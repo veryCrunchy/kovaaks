@@ -94,13 +94,22 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     let monitor = monitors.get(index).or_else(|| monitors.first());
     let Some(m) = monitor else { return };
 
-    let pos = m.position();
-    let sf = m.scale_factor();
+    let pos  = m.position();
+    let size = m.size();
+    let sf   = m.scale_factor();
     let logical_pos = pos.to_logical::<f64>(sf);
 
     let _ = win.set_fullscreen(false);
     let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
     let _ = win.set_fullscreen(true);
+
+    // Keep the screen recorder capture rect in sync with whichever monitor the
+    // overlay is on.  Uses physical pixel coordinates to match GDI capture.
+    let monitor_rect = settings::RegionRect {
+        x: pos.x, y: pos.y,
+        width: size.width, height: size.height,
+    };
+    screen_recorder::update_monitor_rect(&monitor_rect);
 }
 
 // ─── Tauri Commands ────────────────────────────────────────────────────────────

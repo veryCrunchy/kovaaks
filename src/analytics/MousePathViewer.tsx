@@ -186,8 +186,9 @@ function drawPath(
     toX = (x) => ox + (x - minX) * scale;
     toY = (y) => oy + (y - minY) * scale;
   } else {
-    // Follow-cam: viewport rectangle always fills ~78 % of canvas width
-    scale = (CW * 0.78) / viewportPx;
+    // Follow-cam: viewport rectangle fills 65 % of canvas width,
+    // leaving ~155 px horizontal and ~95 px vertical margin for off-screen paths.
+    scale = (CW * 0.65) / viewportPx;
     const cam = pts[Math.min(count - 1, pts.length - 1)];
     toX = (x) => CW / 2 + (x - cam.x) * scale;
     toY = (y) => CH / 2 + (y - cam.y) * scale;
@@ -605,7 +606,7 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           <canvas
             ref={canvasRef}
             width={900}
-            height={420}
+            height={520}
             style={{ width: "100%", height: "auto", display: "block", position: "relative", zIndex: 1 }}
           />
         </div>
