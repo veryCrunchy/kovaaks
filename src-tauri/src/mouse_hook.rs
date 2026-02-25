@@ -66,6 +66,24 @@ pub struct MetricPoint {
     pub metrics: MouseMetrics,
 }
 
+/// A single raw cursor position sample recorded during a session.
+/// Downsampled to ≈30 fps; click events are inserted with `is_click = true`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RawPositionPoint {
+    /// Integrated X position in mouse-delta space.  Starts at 0.0 at session
+    /// start; each sample adds the raw screen-pixel delta from the previous
+    /// sample.  This represents camera yaw movement, independent of where the
+    /// OS cursor happens to be physically sitting on screen (FPS games keep the
+    /// cursor locked to the centre, so absolute coords are meaningless).
+    pub x: f64,
+    /// Integrated Y position in mouse-delta space (camera pitch).
+    pub y: f64,
+    /// Milliseconds elapsed since the start of this session.
+    pub timestamp_ms: u64,
+    /// True when this point coincides with a left-button press event.
+    pub is_click: bool,
+}
+
 /// A live coaching notification emitted during an active session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LiveFeedback {
@@ -111,6 +129,17 @@ struct SharedState {
     lmb_down_at: Option<Instant>,
     /// Completed LMB hold durations (ms) in chronological order.
     hold_durations: VecDeque<f32>,
+    /// Downsampled raw cursor positions for post-session path visualisation.
+    raw_positions: Vec<RawPositionPoint>,
+    /// When the last raw-position sample was taken (used for rate-limiting).
+    last_raw_sample: Option<Instant>,
+    /// Most-recent absolute cursor position — used to compute deltas.
+    last_x: f64,
+    last_y: f64,
+    /// Integrated delta-space cursor position.  Starts at (0, 0) each session
+    /// and accumulates raw dx/dy so the path represents actual camera movement.
+    cursor_x: f64,
+    cursor_y: f64,
 }
 
 static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
@@ -121,6 +150,12 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         click_times: VecDeque::with_capacity(200),
         lmb_down_at: None,
         hold_durations: VecDeque::with_capacity(500),
+        raw_positions: Vec::with_capacity(20_000),
+        last_raw_sample: None,
+        last_x: 0.0,
+        last_y: 0.0,
+        cursor_x: 0.0,
+        cursor_y: 0.0,
     })
 });
 
@@ -169,16 +204,25 @@ pub fn stop() {
 }
 
 /// Begin recording smoothness metrics for a new session. Clears previous session data.
-pub fn start_session_tracking() {
+/// Begin recording smoothness metrics for a new session.  Returns the `Instant`
+/// used as the session clock so callers can pass it to other subsystems (e.g.
+/// `screen_recorder`) that need to share the exact same time base.
+pub fn start_session_tracking() -> Instant {
+    let session_start = Instant::now();
     {
         let mut s = STATE.lock().unwrap();
         s.events.clear();
         s.session_metrics.clear();
-        s.session_start = Instant::now();
+        s.session_start = session_start;
         s.click_times.clear();
+        s.raw_positions.clear();
+        s.last_raw_sample = None;
+        s.cursor_x = 0.0;
+        s.cursor_y = 0.0;
     }
     TRACKING_ACTIVE.store(true, Ordering::SeqCst);
     log::info!("Smoothness tracking started");
+    session_start
 }
 
 /// Stop recording metrics (session ended). Data is retained for post-session report.
@@ -207,6 +251,13 @@ pub fn resume_session_tracking() {
 pub fn drain_session_buffer() -> Vec<MetricPoint> {
     let mut s = STATE.lock().unwrap();
     std::mem::take(&mut s.session_metrics)
+}
+
+/// Drain the raw-position buffer for post-session path visualisation.
+/// Returns all cursor samples recorded during the last session and clears the buffer.
+pub fn drain_raw_positions() -> Vec<RawPositionPoint> {
+    let mut s = STATE.lock().unwrap();
+    std::mem::take(&mut s.raw_positions)
 }
 
 /// Return the most-recent metric snapshot without consuming the buffer.
@@ -275,6 +326,42 @@ fn mouse_event_callback(event: Event) {
                     if s.events.len() > 50_000 {
                         s.events.drain(..10_000);
                     }
+                    // Track last known position for click-event correlation
+                    // and integrate into cumulative camera-space delta path.
+                    let dx = x - s.last_x;
+                    let dy = y - s.last_y;
+                    // Only accumulate if last_x/last_y have been initialised
+                    // (skip the very first event which would produce a large
+                    // jump from 0,0 to wherever the OS cursor happens to be).
+                    if s.last_x != 0.0 || s.last_y != 0.0 {
+                        s.cursor_x += dx;
+                        s.cursor_y += dy;
+                    }
+                    s.last_x = x;
+                    s.last_y = y;
+                    // Downsample to ≈30 fps for path visualisation
+                    let sample = match s.last_raw_sample {
+                        None => true,
+                        Some(last) => now.duration_since(last) >= Duration::from_millis(33),
+                    };
+                    if sample {
+                        let ts_ms = now
+                            .saturating_duration_since(s.session_start)
+                            .as_millis() as u64;
+                        let cx = s.cursor_x;
+                        let cy = s.cursor_y;
+                        s.raw_positions.push(RawPositionPoint {
+                            x: cx,
+                            y: cy,
+                            timestamp_ms: ts_ms,
+                            is_click: false,
+                        });
+                        s.last_raw_sample = Some(now);
+                        // Cap at ~30k samples (≈16 min at 30 fps)
+                        if s.raw_positions.len() > 30_000 {
+                            s.raw_positions.drain(..5_000);
+                        }
+                    }
                 }
             }
         }
@@ -285,12 +372,23 @@ fn mouse_event_callback(event: Event) {
                     s.click_times.push_back(now);
                     if s.click_times.len() > 500 { s.click_times.pop_front(); }
                     s.lmb_down_at = Some(now);
+                    // Record click position in the raw-positions buffer
+                    let ts_ms = now
+                        .saturating_duration_since(s.session_start)
+                        .as_millis() as u64;
+                    let click_x = s.cursor_x;
+                    let click_y = s.cursor_y;
+                    s.raw_positions.push(RawPositionPoint {
+                        x: click_x,
+                        y: click_y,
+                        timestamp_ms: ts_ms,
+                        is_click: true,
+                    });
                 }
             }
         }
         EventType::ButtonRelease(rdev::Button::Left) => {
             if TRACKING_ACTIVE.load(Ordering::Relaxed) {
-                let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
                     if let Some(down) = s.lmb_down_at.take() {
                         let hold_ms = down.elapsed().as_secs_f32() * 1000.0;

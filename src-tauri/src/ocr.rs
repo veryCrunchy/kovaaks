@@ -285,8 +285,8 @@ fn ocr_loop(app: AppHandle) {
                     if is_restart {
                         log::info!("Restart detected: SPM dropped from {} → {}; re-starting session", prev_spm, spm);
                         SESSION_STARTED.store(false, Ordering::SeqCst);
-                        crate::mouse_hook::start_session_tracking();
-                        crate::screen_recorder::start();
+                        let ss = crate::mouse_hook::start_session_tracking();
+                        crate::screen_recorder::start(ss);
                         crate::stats_ocr::set_active(true);
                         // Reset decay counter — a restart is a legitimate SPM drop,
                         // not a rolling-window decay, so we must not suppress events.
@@ -329,8 +329,8 @@ fn ocr_loop(app: AppHandle) {
                         } else {
                             log::info!("Session start detected via OCR");
                             let _ = app.emit(EVENT_SESSION_START, ());
-                            crate::mouse_hook::start_session_tracking();
-                            crate::screen_recorder::start();
+                            let ss = crate::mouse_hook::start_session_tracking();
+                            crate::screen_recorder::start(ss);
                             crate::stats_ocr::set_active(true);
                         }
                     }

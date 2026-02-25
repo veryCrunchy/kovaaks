@@ -32,9 +32,23 @@ static FORCE_SHOW: AtomicBool = AtomicBool::new(false);
 /// captures when the user is not in-game (prevents OCR on unrelated windows).
 static GAME_FOCUSED: AtomicBool = AtomicBool::new(false);
 
+/// Last known KovaaK's HWND stored as a raw pointer so focus can be restored.
+static GAME_HWND_PTR: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Returns true if KovaaK's is currently the foreground window.
 pub fn is_game_focused() -> bool {
     GAME_FOCUSED.load(Ordering::Relaxed)
+}
+
+/// Return the cached KovaaK's HWND, if we have seen it at least once.
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+pub fn get_game_hwnd() -> Option<windows::Win32::Foundation::HWND> {
+    let ptr = GAME_HWND_PTR.load(Ordering::Relaxed);
+    if ptr == 0 {
+        None
+    } else {
+        Some(windows::Win32::Foundation::HWND(ptr as _))
+    }
 }
 
 pub fn start(app: AppHandle) {
@@ -91,6 +105,7 @@ fn tracker_loop(app: AppHandle) {
             let found = is_kovaaks_window(fg);
             if found {
                 game_hwnd = Some(fg);
+                GAME_HWND_PTR.store(fg.0 as usize, Ordering::Relaxed);
             } else if game_hwnd.is_none() {
                 // Also periodically do a fresh title check to handle late-start
             }

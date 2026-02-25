@@ -1,9 +1,10 @@
-/// Stats-panel OCR module.
+/// Per-stat OCR module.
 ///
-/// Reads the KovaaK's in-game stats panel (Kill Count, KPS, Accuracy,
-/// Damage, SPM, Avg TTK) on every poll tick.  Delta-detects shot events
-/// (hits and misses), infers scenario type from which fields are populated,
-/// and emits scenario-type-aware live coaching feedback.
+/// Reads individual KovaaK's stat fields (Kill Count, KPS, Accuracy,
+/// Damage, SPM, Avg TTK) from separately-configured screen regions on every
+/// poll tick.  Delta-detects shot events (hits and misses), infers scenario
+/// type from which fields are populated, and emits scenario-type-aware live
+/// coaching feedback.
 ///
 /// Emits:
 ///   `stats-panel-update`  — full StatsPanelReading every tick (throttled when unchanged)
@@ -171,9 +172,9 @@ pub fn start(app: AppHandle) {
     std::thread::Builder::new()
         .name("stats-ocr".into())
         .spawn(move || {
-            log::info!("Stats-panel OCR thread started");
+            log::info!("Per-stat OCR thread started");
             poll_loop(app);
-            log::info!("Stats-panel OCR thread stopped");
+            log::info!("Per-stat OCR thread stopped");
         })
         .expect("failed to spawn stats-ocr thread");
 }
