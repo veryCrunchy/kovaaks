@@ -253,11 +253,25 @@ pub fn drain_session_buffer() -> Vec<MetricPoint> {
     std::mem::take(&mut s.session_metrics)
 }
 
+/// Return metric points for the last session without removing them.
+/// The buffer is cleared automatically when the next session starts.
+pub fn get_session_buffer() -> Vec<MetricPoint> {
+    let s = STATE.lock().unwrap();
+    s.session_metrics.clone()
+}
+
 /// Drain the raw-position buffer for post-session path visualisation.
 /// Returns all cursor samples recorded during the last session and clears the buffer.
 pub fn drain_raw_positions() -> Vec<RawPositionPoint> {
     let mut s = STATE.lock().unwrap();
     std::mem::take(&mut s.raw_positions)
+}
+
+/// Return raw cursor positions for the last session without removing them.
+/// The buffer is cleared automatically when the next session starts.
+pub fn get_raw_positions() -> Vec<RawPositionPoint> {
+    let s = STATE.lock().unwrap();
+    s.raw_positions.clone()
 }
 
 /// Return the most-recent metric snapshot without consuming the buffer.

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   LineChart,
   Line,
@@ -118,7 +119,7 @@ export function SmoothnessReport() {
   const [screenFrames, setScreenFrames] = useState<ScreenFrame[]>([]);
   const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
+  const fetchSessionData = () => {
     Promise.all([
       invoke<MetricPoint[]>("get_session_mouse_data"),
       invoke<RawPositionPoint[]>("get_session_raw_positions"),
@@ -131,6 +132,14 @@ export function SmoothnessReport() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
+  };
+
+  useEffect(() => {
+    fetchSessionData();
+    // Re-fetch automatically whenever a session finishes
+    const unlisten = listen("session-complete", () => fetchSessionData());
+    return () => { unlisten.then((fn) => fn()); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const issues = detectIssues(points);
@@ -174,8 +183,22 @@ export function SmoothnessReport() {
       {loading ? (
         <div style={{ color: "rgba(255,255,255,0.4)" }}>Loading session data…</div>
       ) : points.length === 0 ? (
-        <div style={{ color: "rgba(255,255,255,0.4)" }}>
+        <div style={{ color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", gap: 12 }}>
           No session data yet. Play a scenario first.
+          <button
+            onClick={() => { setLoading(true); fetchSessionData(); }}
+            style={{
+              background: "rgba(0,245,160,0.1)",
+              border: "1px solid rgba(0,245,160,0.3)",
+              color: "#00f5a0",
+              borderRadius: 6,
+              padding: "3px 12px",
+              cursor: "pointer",
+              fontSize: 12,
+            }}
+          >
+            ↺ Refresh
+          </button>
         </div>
       ) : (
         <>

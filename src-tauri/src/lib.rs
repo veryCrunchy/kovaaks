@@ -378,7 +378,17 @@ fn stop_mouse_hook() {
 
 #[tauri::command]
 fn get_session_mouse_data() -> Vec<mouse_hook::MetricPoint> {
-    mouse_hook::drain_session_buffer()
+    mouse_hook::get_session_buffer()
+}
+
+#[tauri::command]
+fn get_session_raw_positions() -> Vec<mouse_hook::RawPositionPoint> {
+    mouse_hook::get_raw_positions()
+}
+
+#[tauri::command]
+fn get_session_screen_frames() -> Vec<screen_recorder::ScreenFrame> {
+    screen_recorder::get_frames()
 }
 
 #[tauri::command]
@@ -930,6 +940,8 @@ pub fn run() {
             start_mouse_hook,
             stop_mouse_hook,
             get_session_mouse_data,
+            get_session_raw_positions,
+            get_session_screen_frames,
             toggle_settings,
             toggle_overlay,
             set_mouse_passthrough,

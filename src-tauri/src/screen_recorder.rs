@@ -109,6 +109,12 @@ pub fn drain_frames() -> Vec<ScreenFrame> {
     std::mem::take(&mut *FRAMES.lock().unwrap())
 }
 
+/// Return all recorded frames without removing them.
+/// The buffer is cleared automatically when the next session starts.
+pub fn get_frames() -> Vec<ScreenFrame> {
+    FRAMES.lock().unwrap().clone()
+}
+
 // ─── Recording loop ───────────────────────────────────────────────────────────
 
 fn record_loop(my_gen: u64) {

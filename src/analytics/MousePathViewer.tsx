@@ -130,14 +130,22 @@ function computeSensitivitySuggestion(
 
 // ─── Canvas drawing ───────────────────────────────────────────────────────────
 
+/**
+ * Two rendering modes:
+ *  - Follow-cam (playHeadFraction ≥ 0): fixed scale where viewportPx fills ~78%
+ *    of the canvas width; the "camera" is centred on the current cursor position.
+ *    The viewport rectangle is always centred on-screen.  Path points that went
+ *    off-screen appear outside the box — this is the 3-D effect.
+ *  - Full-path (playHeadFraction < 0): auto-fit bounding box; no viewport overlay.
+ */
 function drawPath(
   canvas: HTMLCanvasElement,
   pts: RawPositionPoint[],
   overshoots: OvershootMarker[],
-  playHeadFraction: number, // 0–1 or -1 to draw full path
+  playHeadFraction: number, // 0–1; or <0 to draw full path
   trailFadeMs = 0,           // 0 = no fade; >0 = fade window in ms
-  playbackMs = 0,            // current playback time, for age computation
-  viewportPx = 960,          // width of the on-screen region in delta-px (capture is 50% of monitor)
+  playbackMs = 0,
+  viewportPx = 960,          // on-screen monitor capture width in delta-px
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx || pts.length < 2) {
@@ -145,38 +153,47 @@ function drawPath(
     return;
   }
 
-  // ── Bounding box ───────────────────────────────────────────────────────────
-  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-  for (const p of pts) {
-    if (p.x < minX) minX = p.x;
-    if (p.x > maxX) maxX = p.x;
-    if (p.y < minY) minY = p.y;
-    if (p.y > maxY) maxY = p.y;
-  }
-  // Expand bounding box to always include the viewport rect around start/end
-  const vpHalf = viewportPx / 2;
-  const vpHalfH = Math.round(vpHalf * (9 / 16));
-  minX = Math.min(minX, pts[0].x - vpHalf);
-  maxX = Math.max(maxX, pts[0].x + vpHalf);
-  minY = Math.min(minY, pts[0].y - vpHalfH);
-  maxY = Math.max(maxY, pts[0].y + vpHalfH);
+  const showFull = playHeadFraction < 0;
+  const count    = showFull
+    ? pts.length
+    : Math.max(2, Math.floor(playHeadFraction * pts.length));
 
-  const rangeX = maxX - minX || 1;
-  const rangeY = maxY - minY || 1;
-
+  const CW = canvas.width;
+  const CH = canvas.height;
   const PAD = 28;
-  const W   = canvas.width  - PAD * 2;
-  const H   = canvas.height - PAD * 2;
+  const W   = CW - PAD * 2;
+  const H   = CH - PAD * 2;
 
-  // Uniform scale to preserve aspect ratio
-  const scale = Math.min(W / rangeX, H / rangeY);
-  const ox = PAD + (W - rangeX * scale) / 2;
-  const oy = PAD + (H - rangeY * scale) / 2;
+  // ── Camera / projection ───────────────────────────────────────────────────
+  let scale: number;
+  let toX: (x: number) => number;
+  let toY: (y: number) => number;
 
-  const cx = (x: number) => ox + (x - minX) * scale;
-  const cy = (y: number) => oy + (y - minY) * scale;
+  if (showFull) {
+    // Auto-fit all points
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    for (const p of pts) {
+      if (p.x < minX) minX = p.x;
+      if (p.x > maxX) maxX = p.x;
+      if (p.y < minY) minY = p.y;
+      if (p.y > maxY) maxY = p.y;
+    }
+    const rangeX = maxX - minX || 1;
+    const rangeY = maxY - minY || 1;
+    scale = Math.min(W / rangeX, H / rangeY);
+    const ox = PAD + (W - rangeX * scale) / 2;
+    const oy = PAD + (H - rangeY * scale) / 2;
+    toX = (x) => ox + (x - minX) * scale;
+    toY = (y) => oy + (y - minY) * scale;
+  } else {
+    // Follow-cam: viewport rectangle always fills ~78 % of canvas width
+    scale = (CW * 0.78) / viewportPx;
+    const cam = pts[Math.min(count - 1, pts.length - 1)];
+    toX = (x) => CW / 2 + (x - cam.x) * scale;
+    toY = (y) => CH / 2 + (y - cam.y) * scale;
+  }
 
-  // ── Speeds ─────────────────────────────────────────────────────────────────
+  // ── Speed palette ─────────────────────────────────────────────────────────
   const speeds: number[] = [];
   for (let i = 0; i < pts.length - 1; i++) {
     const p = pts[i], q = pts[i + 1];
@@ -184,81 +201,66 @@ function drawPath(
     const dt = Math.max((q.timestamp_ms - p.timestamp_ms) / 1000, 0.001);
     speeds.push(Math.hypot(dx, dy) / dt);
   }
-  const sorted  = [...speeds].sort((a, b) => a - b);
+  const sorted = [...speeds].sort((a, b) => a - b);
   const p5  = sorted[Math.floor(sorted.length * 0.05)] ?? 0;
   const p95 = sorted[Math.floor(sorted.length * 0.95)] ?? 1;
   const norm = (s: number) => Math.max(0, Math.min(1, (s - p5) / (p95 - p5 || 1)));
 
-  // ── Clear ──────────────────────────────────────────────────────────────────
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-  // Subtle grid
+  // ── Clear + grid ──────────────────────────────────────────────────────────
+  ctx.clearRect(0, 0, CW, CH);
   ctx.strokeStyle = "rgba(255,255,255,0.04)";
   ctx.lineWidth = 1;
   for (let gx = 0; gx <= 4; gx++) {
     const px = PAD + (W / 4) * gx;
-    ctx.beginPath(); ctx.moveTo(px, PAD); ctx.lineTo(px, canvas.height - PAD); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(px, PAD); ctx.lineTo(px, CH - PAD); ctx.stroke();
   }
   for (let gy = 0; gy <= 4; gy++) {
     const py = PAD + (H / 4) * gy;
-    ctx.beginPath(); ctx.moveTo(PAD, py); ctx.lineTo(canvas.width - PAD, py); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(PAD, py); ctx.lineTo(CW - PAD, py); ctx.stroke();
   }
 
-  // ── Viewport rectangle ────────────────────────────────────────────────────
-  // Shows the region of the game that is on-screen around the current cursor
-  // position.  Path going outside this box = off-screen overshoot.
-  const count = playHeadFraction < 0
-    ? pts.length
-    : Math.max(2, Math.floor(playHeadFraction * pts.length));
+  // ── Viewport rectangle (follow-cam only) ─────────────────────────────────
+  if (!showFull) {
+    const vpW = viewportPx * scale;
+    const vpH = vpW * (9 / 16);
+    const vpX = CW / 2 - vpW / 2;
+    const vpY = CH / 2 - vpH / 2;
 
-  const vpCursorIdx = Math.max(0, Math.min(count - 1, pts.length - 1));
-  const vpCenter = pts[vpCursorIdx];
-  const vpW = viewportPx * scale;
-  const vpH = vpW * (9 / 16);
-  const vpX = cx(vpCenter.x) - vpW / 2;
-  const vpY = cy(vpCenter.y) - vpH / 2;
+    ctx.save();
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0,          0,    CW,        vpY);
+    ctx.fillRect(0,          vpY + vpH, CW,   CH - (vpY + vpH));
+    ctx.fillRect(0,          vpY,  vpX,       vpH);
+    ctx.fillRect(vpX + vpW,  vpY,  CW - (vpX + vpW), vpH);
+    ctx.restore();
 
-  // Dim "outside" area — fill outside the viewport rect with dark overlay
-  ctx.save();
-  ctx.fillStyle = "rgba(0,0,0,0.35)";
-  // Top
-  ctx.fillRect(0, 0, canvas.width, vpY);
-  // Bottom
-  ctx.fillRect(0, vpY + vpH, canvas.width, canvas.height - (vpY + vpH));
-  // Left
-  ctx.fillRect(0, vpY, vpX, vpH);
-  // Right
-  ctx.fillRect(vpX + vpW, vpY, canvas.width - (vpX + vpW), vpH);
-  ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,210,255,0.55)";
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([6, 4]);
+    ctx.strokeRect(vpX, vpY, vpW, vpH);
+    ctx.setLineDash([]);
+    ctx.restore();
 
-  // Viewport border
-  ctx.save();
-  ctx.strokeStyle = "rgba(0,210,255,0.55)";
-  ctx.lineWidth = 1.5;
-  ctx.setLineDash([6, 4]);
-  ctx.strokeRect(vpX, vpY, vpW, vpH);
-  ctx.setLineDash([]);
-  ctx.restore();
+    ctx.save();
+    ctx.strokeStyle = "rgba(0,210,255,0.35)";
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(CW / 2 - 8, CH / 2); ctx.lineTo(CW / 2 + 8, CH / 2); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(CW / 2, CH / 2 - 8); ctx.lineTo(CW / 2, CH / 2 + 8); ctx.stroke();
+    ctx.restore();
+  }
 
-  // Crosshair at viewport centre (where crosshair sits in a FPS)
-  ctx.save();
-  ctx.strokeStyle = "rgba(0,210,255,0.3)";
-  ctx.lineWidth = 1;
-  const vcx = cx(vpCenter.x), vcy = cy(vpCenter.y);
-  ctx.beginPath(); ctx.moveTo(vcx - 8, vcy); ctx.lineTo(vcx + 8, vcy); ctx.stroke();
-  ctx.beginPath(); ctx.moveTo(vcx, vcy - 8); ctx.lineTo(vcx, vcy + 8); ctx.stroke();
-  ctx.restore();
-
+  // ── Path segments ─────────────────────────────────────────────────────────
   for (let i = 0; i < Math.min(count - 1, speeds.length); i++) {
     let alpha = 1;
-    if (trailFadeMs > 0 && playHeadFraction >= 0) {
+    if (trailFadeMs > 0 && !showFull) {
       const age = playbackMs - pts[i + 1].timestamp_ms;
-      if (age > trailFadeMs) continue;            // too old — skip
-      alpha = Math.max(0, 1 - age / trailFadeMs); // oldest segments fade to 0
+      if (age > trailFadeMs) continue;
+      alpha = Math.max(0, 1 - age / trailFadeMs);
     }
     ctx.beginPath();
-    ctx.moveTo(cx(pts[i].x), cy(pts[i].y));
-    ctx.lineTo(cx(pts[i + 1].x), cy(pts[i + 1].y));
+    ctx.moveTo(toX(pts[i].x), toY(pts[i].y));
+    ctx.lineTo(toX(pts[i + 1].x), toY(pts[i + 1].y));
     ctx.strokeStyle = speedColor(norm(speeds[i]), alpha);
     ctx.lineWidth = 1.8;
     ctx.lineCap = "round";
@@ -266,26 +268,26 @@ function drawPath(
   }
 
   // ── Overshoot markers ─────────────────────────────────────────────────────
-  const overshootCutoff = playHeadFraction < 0
+  const cutoff = showFull
     ? Infinity
     : (pts[Math.min(count - 1, pts.length - 1)]?.timestamp_ms ?? Infinity);
 
   for (const o of overshoots) {
-    if (o.timestamp_ms > overshootCutoff) continue;
-    let oAlpha = 0.85;
-    if (trailFadeMs > 0 && playHeadFraction >= 0) {
+    if (o.timestamp_ms > cutoff) continue;
+    let oA = 0.85;
+    if (trailFadeMs > 0 && !showFull) {
       const age = playbackMs - o.timestamp_ms;
       if (age > trailFadeMs) continue;
-      oAlpha = Math.max(0, 0.85 * (1 - age / trailFadeMs));
+      oA = Math.max(0, 0.85 * (1 - age / trailFadeMs));
     }
-    const px = cx(o.x), py = cy(o.y);
+    const px = toX(o.x), py = toY(o.y);
     ctx.beginPath();
-    ctx.moveTo(px,      py - 10);
-    ctx.lineTo(px + 7,  py +  4);
-    ctx.lineTo(px - 7,  py +  4);
+    ctx.moveTo(px,     py - 10);
+    ctx.lineTo(px + 7, py +  4);
+    ctx.lineTo(px - 7, py +  4);
     ctx.closePath();
-    ctx.fillStyle   = `rgba(255,80,30,${oAlpha})`;
-    ctx.strokeStyle = `rgba(255,160,80,${Math.min(1, oAlpha * 1.05)})`;
+    ctx.fillStyle   = `rgba(255,80,30,${oA})`;
+    ctx.strokeStyle = `rgba(255,160,80,${Math.min(1, oA * 1.05)})`;
     ctx.lineWidth   = 1;
     ctx.fill();
     ctx.stroke();
@@ -295,42 +297,40 @@ function drawPath(
   for (let i = 0; i < Math.min(count, pts.length); i++) {
     const p = pts[i];
     if (!p.is_click) continue;
-    let cAlpha = 0.9;
-    if (trailFadeMs > 0 && playHeadFraction >= 0) {
+    let cA = 0.9;
+    if (trailFadeMs > 0 && !showFull) {
       const age = playbackMs - p.timestamp_ms;
       if (age > trailFadeMs) continue;
-      cAlpha = Math.max(0, 0.9 * (1 - age / trailFadeMs));
+      cA = Math.max(0, 0.9 * (1 - age / trailFadeMs));
     }
     ctx.beginPath();
-    ctx.arc(cx(p.x), cy(p.y), 5, 0, Math.PI * 2);
-    ctx.fillStyle   = `rgba(255,220,30,${cAlpha})`;
-    ctx.strokeStyle = `rgba(255,255,255,${cAlpha * 0.55})`;
+    ctx.arc(toX(p.x), toY(p.y), 5, 0, Math.PI * 2);
+    ctx.fillStyle   = `rgba(255,220,30,${cA})`;
+    ctx.strokeStyle = `rgba(255,255,255,${cA * 0.55})`;
     ctx.lineWidth   = 1;
     ctx.fill();
     ctx.stroke();
   }
 
   // ── Start / end markers ───────────────────────────────────────────────────
-  const first = pts[0];
   ctx.beginPath();
-  ctx.arc(cx(first.x), cy(first.y), 5, 0, Math.PI * 2);
+  ctx.arc(toX(pts[0].x), toY(pts[0].y), 5, 0, Math.PI * 2);
   ctx.fillStyle = "rgba(0,245,160,0.9)";
   ctx.fill();
 
-  if (playHeadFraction < 0) {
+  if (showFull) {
     const last = pts[pts.length - 1];
     ctx.beginPath();
-    ctx.arc(cx(last.x), cy(last.y), 5, 0, Math.PI * 2);
+    ctx.arc(toX(last.x), toY(last.y), 5, 0, Math.PI * 2);
     ctx.fillStyle = "rgba(255,80,80,0.9)";
     ctx.fill();
   }
 
   // ── Playback cursor ───────────────────────────────────────────────────────
-  if (playHeadFraction >= 0) {
-    const idx = Math.max(0, Math.min(count - 1, pts.length - 1));
-    const p = pts[idx];
+  if (!showFull) {
+    // In follow-cam mode the cursor is always the canvas centre
     ctx.beginPath();
-    ctx.arc(cx(p.x), cy(p.y), 7, 0, Math.PI * 2);
+    ctx.arc(CW / 2, CH / 2, 7, 0, Math.PI * 2);
     ctx.fillStyle   = "rgba(255,255,255,0.95)";
     ctx.strokeStyle = "#000";
     ctx.lineWidth   = 1.5;
