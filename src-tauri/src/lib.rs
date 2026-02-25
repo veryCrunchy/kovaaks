@@ -1,4 +1,5 @@
 mod file_watcher;
+mod screen_recorder;
 mod kovaaks_api;
 mod logger;
 mod mouse_hook;
@@ -345,9 +346,9 @@ async fn validate_username(username: String) -> Result<Option<FriendProfile>, St
 
 #[tauri::command]
 fn start_ocr(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    let (region, scenario_region, poll_ms, stats_dir) = {
+    let (spm_region, scenario_region, poll_ms, stats_dir) = {
         let s = state.settings.lock().map_err(|e| e.to_string())?;
-        (s.region, s.scenario_region, s.ocr_poll_ms, s.stats_dir.clone())
+        (s.stats_field_regions.spm, s.scenario_region, s.ocr_poll_ms, s.stats_dir.clone())
     };
     // Rebuild the local scenario index from CSV filenames in the stats dir.
     // This is the primary source for fast, offline OCR correction.
@@ -356,7 +357,7 @@ fn start_ocr(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String
         scenario_index::rebuild(stats_path);
     }
     ocr::update_scenario_region(scenario_region);
-    ocr::start(app, region, poll_ms);
+    ocr::start(app, spm_region, poll_ms);
     Ok(())
 }
 
@@ -946,7 +947,22 @@ pub fn run() {
         ])
         .setup(|app| {
             // Load persisted settings
-            let loaded = settings::load(app.handle()).unwrap_or_default();
+            let mut loaded = settings::load(app.handle()).unwrap_or_default();
+
+            // Migrate legacy `region` → `stats_field_regions.spm`.
+            // The old setup wizard stored the SPM capture region in the top-level
+            // `region` field.  After the per-stat refactor it lives in
+            // `stats_field_regions.spm`.  Copy it once and persist so subsequent
+            // startups don't need to do this.
+            if let (Some(legacy), None) = (loaded.region, loaded.stats_field_regions.spm) {
+                log::info!("Migrating legacy `region` → `stats_field_regions.spm`");
+                loaded.stats_field_regions.spm = Some(legacy);
+                // `region` is skip_serializing so it won't be written back.
+                if let Err(e) = settings::persist(app.handle(), &loaded) {
+                    log::warn!("Failed to persist region migration: {e}");
+                }
+            }
+
             {
                 let state = app.state::<AppState>();
                 let mut s = state.settings.lock().unwrap();
@@ -978,7 +994,7 @@ pub fn run() {
 
             // Start OCR (begins reading SPM once a region is configured)
             ocr::update_scenario_region(loaded.scenario_region);
-            ocr::start(app.handle().clone(), loaded.region, loaded.ocr_poll_ms);
+            ocr::start(app.handle().clone(), loaded.stats_field_regions.spm, loaded.ocr_poll_ms);
 
             // Start stats-panel OCR
             stats_ocr::update_field_regions(loaded.stats_field_regions);

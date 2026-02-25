@@ -59,6 +59,7 @@ pub struct FriendProfile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     /// Path to KovaaK's stats directory.
+    #[serde(default = "default_stats_dir")]
     pub stats_dir: String,
     /// Screen region for score OCR (set via setup wizard).
     /// Deprecated — kept only so old settings.json files can be deserialized.
@@ -66,12 +67,16 @@ pub struct AppSettings {
     #[serde(default, skip_serializing)]
     pub region: Option<RegionRect>,
     /// OCR poll rate in milliseconds.
+    #[serde(default = "default_ocr_poll_ms")]
     pub ocr_poll_ms: u64,
     /// Whether the overlay is currently visible.
+    #[serde(default = "default_true")]
     pub overlay_visible: bool,
     /// The user's KovaaK's webapp username (used for VS Mode comparison and display).
+    #[serde(default)]
     pub username: String,
     /// Which monitor index to show the overlay on (0 = primary).
+    #[serde(default)]
     pub monitor_index: usize,
     /// Friends to compare scores against (rich profiles from KovaaK's API).
     #[serde(default)]
@@ -150,8 +155,15 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
     use tauri_plugin_store::StoreExt;
     let store = app.store(STORE_PATH)?;
     if let Some(val) = store.get(STORE_KEY) {
-        let settings: AppSettings = serde_json::from_value(val)?;
-        return Ok(settings);
+        match serde_json::from_value::<AppSettings>(val.clone()) {
+            Ok(settings) => return Ok(settings),
+            Err(e) => {
+                log::error!("Failed to deserialize settings: {e}");
+                log::error!("Raw settings JSON: {}", serde_json::to_string_pretty(&val).unwrap_or_else(|_| "<unserializable>".into()));
+                log::warn!("Falling back to default settings");
+                return Ok(AppSettings::default());
+            }
+        }
     }
     Ok(AppSettings::default())
 }
@@ -164,10 +176,8 @@ pub fn persist(app: &AppHandle, settings: &AppSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_mouse_dpi() -> u32 {
-    800
-}
-
+fn default_mouse_dpi() -> u32 { 800 }
+fn default_ocr_poll_ms() -> u64 { 100 }
 fn default_true() -> bool { true }
 fn default_feedback_verbosity() -> u8 { 1 }
 
