@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "KovaaK's Overlay",
+  "productName": "KovaaKs Overlay",
   "version": "0.2.2",
   "identifier": "com.verycrunchy.kovaaks",
   "build": {
@@ -20,11 +20,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "fullscreen": false,
-        "width": 1920,
-        "height": 1080,
-        "x": 0,
-        "y": 0,
+        "fullscreen": true,
         "visible": true
       },
       {
