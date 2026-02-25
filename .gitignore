@@ -1,0 +1,25 @@
+# Node
+node_modules/
+dist/
+.pnpm-store/
+
+# Rust / Cargo
+src-tauri/target/
+
+# Tauri
+src-tauri/gen/schemas/
+
+# Keys — never commit signing keys
+*.key
+*.key.pub
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/settings.json
+.idea/
+
+# Logs
+*.log
