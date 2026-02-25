@@ -53,6 +53,19 @@ pub struct LiveScorePayload {
     pub raw_text: String,
 }
 
+/// A single word returned by Windows.Media.Ocr with its bounding box.
+/// Coordinates are in pixels relative to the captured region (0,0 = top-left of capture).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OcrWordResult {
+    pub text: String,
+    /// Left edge of the word bounding box.
+    pub x: i32,
+    /// Top edge of the word bounding box.
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 /// Update the region used by the running OCR thread.
@@ -187,6 +200,25 @@ pub(crate) fn capture_text(rect: crate::settings::RegionRect) -> anyhow::Result<
     { let _ = rect; Ok(String::new()) }
 }
 
+/// Capture a screen region and return every recognised word with its bounding box.
+///
+/// This is used by `auto_detect_stats_regions` to locate the KovaaK's stats panel
+/// labels without any upscaling — the stats panel text is typically large enough
+/// (≥ 20 px) for Windows.Media.Ocr at native resolution.
+///
+/// Returned coordinates are relative to the captured region (0,0 = top-left of `rect`).
+/// On non-Windows / without the `ocr` feature this always returns an empty Vec.
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+pub fn capture_screen_words(rect: &RegionRect) -> anyhow::Result<Vec<OcrWordResult>> {
+    let (pixels, w, h) = capture_region_gdi(rect)?;
+    run_windows_ocr_words(pixels, w, h)
+}
+
+#[cfg(not(all(target_os = "windows", feature = "ocr")))]
+pub fn capture_screen_words(_rect: &RegionRect) -> anyhow::Result<Vec<OcrWordResult>> {
+    Ok(Vec::new())
+}
+
 // ─── OCR Loop ─────────────────────────────────────────────────────────────────
 
 fn ocr_loop(app: AppHandle) {
@@ -254,6 +286,7 @@ fn ocr_loop(app: AppHandle) {
                         log::info!("Restart detected: SPM dropped from {} → {}; re-starting session", prev_spm, spm);
                         SESSION_STARTED.store(false, Ordering::SeqCst);
                         crate::mouse_hook::start_session_tracking();
+                        crate::screen_recorder::start();
                         crate::stats_ocr::set_active(true);
                         // Reset decay counter — a restart is a legitimate SPM drop,
                         // not a rolling-window decay, so we must not suppress events.
@@ -297,6 +330,7 @@ fn ocr_loop(app: AppHandle) {
                             log::info!("Session start detected via OCR");
                             let _ = app.emit(EVENT_SESSION_START, ());
                             crate::mouse_hook::start_session_tracking();
+                            crate::screen_recorder::start();
                             crate::stats_ocr::set_active(true);
                         }
                     }
@@ -459,7 +493,7 @@ fn save_debug_bmp(bgra: &[u8], width: u32, height: u32, path: &std::path::Path) 
 /// Capture a screen region into a BGRA byte buffer using GDI BitBlt.
 /// Works for any window type including borderless/windowed games.
 #[cfg(all(target_os = "windows", feature = "ocr"))]
-fn capture_region_gdi(rect: &RegionRect) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+pub(crate) fn capture_region_gdi(rect: &RegionRect) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject,
         GetDC, GetDIBits, ReleaseDC, SelectObject,
@@ -522,6 +556,96 @@ fn capture_region_gdi(rect: &RegionRect) -> anyhow::Result<(Vec<u8>, u32, u32)> 
 
         Ok((pixels, rect.width, rect.height)) // BGRA pixel order
     }
+}
+
+/// Run Windows.Media.Ocr on a BGRA pixel buffer and return every recognised word
+/// together with its bounding box (in pixels, relative to the image top-left).
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+fn run_windows_ocr_words(bgra_pixels: Vec<u8>, width: u32, height: u32) -> anyhow::Result<Vec<OcrWordResult>> {
+    use windows::Graphics::Imaging::{BitmapBufferAccessMode, BitmapPixelFormat, SoftwareBitmap};
+    use windows::Media::Ocr::OcrEngine;
+    use windows::Win32::System::WinRT::IMemoryBufferByteAccess;
+    use windows::core::Interface;
+
+    let bitmap = SoftwareBitmap::Create(BitmapPixelFormat::Bgra8, width as i32, height as i32)
+        .map_err(|e| anyhow::anyhow!("SoftwareBitmap::Create failed: {e}"))?;
+    {
+        let locked = bitmap
+            .LockBuffer(BitmapBufferAccessMode::Write)
+            .map_err(|e| anyhow::anyhow!("LockBuffer failed: {e}"))?;
+        let reference = locked
+            .CreateReference()
+            .map_err(|e| anyhow::anyhow!("CreateReference failed: {e}"))?;
+        let byte_access: IMemoryBufferByteAccess = reference
+            .cast()
+            .map_err(|e| anyhow::anyhow!("cast to IMemoryBufferByteAccess failed: {e}"))?;
+        unsafe {
+            let mut data_ptr: *mut u8 = std::ptr::null_mut();
+            let mut capacity: u32 = 0;
+            byte_access.GetBuffer(&mut data_ptr, &mut capacity)
+                .map_err(|e| anyhow::anyhow!("GetBuffer failed: {e}"))?;
+            let len = bgra_pixels.len().min(capacity as usize);
+            std::ptr::copy_nonoverlapping(bgra_pixels.as_ptr(), data_ptr, len);
+        }
+    }
+
+    let engine = OcrEngine::TryCreateFromUserProfileLanguages()
+        .map_err(|e| anyhow::anyhow!("OcrEngine init failed: {e}"))?;
+    let operation = engine
+        .RecognizeAsync(&bitmap)
+        .map_err(|e| anyhow::anyhow!("RecognizeAsync call failed: {e}"))?;
+
+    loop {
+        let status = operation.Status()
+            .map_err(|e| anyhow::anyhow!("OCR Status() failed: {e}"))?;
+        let val = status.0;
+        if val == 1 { break; }
+        if val >= 2 { anyhow::bail!("OCR async operation failed (status={})", val); }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let ocr_result = operation
+        .GetResults()
+        .map_err(|e| anyhow::anyhow!("OCR GetResults failed: {e}"))?;
+
+    let lines = ocr_result.Lines()
+        .map_err(|e| anyhow::anyhow!("OcrResult.Lines() failed: {e}"))?;
+    let line_count = lines.Size().unwrap_or(0);
+    let mut words: Vec<OcrWordResult> = Vec::new();
+
+    for i in 0..line_count {
+        let line = match lines.GetAt(i) {
+            Ok(l) => l,
+            Err(_) => continue,
+        };
+        let wds = match line.Words() {
+            Ok(w) => w,
+            Err(_) => continue,
+        };
+        let word_count = wds.Size().unwrap_or(0);
+        for j in 0..word_count {
+            let wd = match wds.GetAt(j) {
+                Ok(w) => w,
+                Err(_) => continue,
+            };
+            let text = match wd.Text() {
+                Ok(t) => t.to_string(),
+                Err(_) => continue,
+            };
+            let bbox = match wd.BoundingRect() {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+            words.push(OcrWordResult {
+                text,
+                x: bbox.X as i32,
+                y: bbox.Y as i32,
+                width: bbox.Width as u32,
+                height: bbox.Height as u32,
+            });
+        }
+    }
+
+    Ok(words)
 }
 
 /// Run Windows.Media.Ocr on a BGRA pixel buffer and return the recognised text.
@@ -638,7 +762,7 @@ fn normalise_scenario_name(raw: &str) -> String {
     let mut joined = fixed.join(" ");
 
     // Remove noise prefixes (longest first so "Friends Only" beats "Friends")
-    let mut best_noise_front = NOISE_FRONT
+    let best_noise_front = NOISE_FRONT
         .iter()
         .filter(|&&n| joined.starts_with(n))
         .max_by_key(|n| n.len());
