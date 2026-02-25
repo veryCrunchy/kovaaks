@@ -13,6 +13,34 @@ pub struct RegionRect {
     pub height: u32,
 }
 
+/// Per-field OCR regions for the KovaaK's stats panel.
+/// Each field captures a small screen area containing exactly one value.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub struct StatsFieldRegions {
+    /// Region covering the Kill Count value only.
+    #[serde(default)]
+    pub kills: Option<RegionRect>,
+    /// Region covering the KPS (kills-per-second) value only.
+    #[serde(default)]
+    pub kps: Option<RegionRect>,
+    /// Region covering the Accuracy hit/shot fraction and percentage.
+    #[serde(default)]
+    pub accuracy: Option<RegionRect>,
+    /// Region covering the Damage Dealt value only.
+    #[serde(default)]
+    pub damage: Option<RegionRect>,
+    /// Region covering the Avg TTK value only.
+    #[serde(default)]
+    pub ttk: Option<RegionRect>,
+}
+
+impl StatsFieldRegions {
+    pub fn has_any(&self) -> bool {
+        self.kills.is_some() || self.kps.is_some() || self.accuracy.is_some()
+            || self.damage.is_some() || self.ttk.is_some()
+    }
+}
+
 /// Rich friend profile persisted in settings.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FriendProfile {
@@ -52,7 +80,34 @@ pub struct AppSettings {
     /// The username of the friend chosen as battle opponent in VS Mode.
     #[serde(default)]
     pub selected_friend: Option<String>,
-}
+    /// Per-field OCR regions for the stats panel — one small region per stat.
+    #[serde(default)]
+    pub stats_field_regions: StatsFieldRegions,
+    /// Whether live coaching notifications are enabled.
+    #[serde(default = "default_true")]
+    pub live_feedback_enabled: bool,
+    /// Live feedback verbosity: 0=minimal, 1=standard, 2=verbose.
+    #[serde(default = "default_feedback_verbosity")]
+    pub live_feedback_verbosity: u8,
+    /// Whether text-to-speech is used to read live coaching notifications aloud.
+    #[serde(default)]
+    pub live_feedback_tts_enabled: bool,
+    /// Name of the selected TTS voice (matches SpeechSynthesisVoice.name in the browser).
+    /// None means use the auto-selected best voice.
+    #[serde(default)]
+    pub live_feedback_tts_voice: Option<String>,
+    /// Per-HUD visibility toggles.
+    #[serde(default = "default_true")]
+    pub hud_vsmode_visible: bool,
+    #[serde(default = "default_true")]
+    pub hud_smoothness_visible: bool,
+    #[serde(default = "default_true")]
+    pub hud_stats_visible: bool,
+    #[serde(default = "default_true")]
+    pub hud_feedback_visible: bool,
+    /// Whether the post-session overview card is shown after each run.
+    #[serde(default = "default_true")]
+    pub hud_post_session_visible: bool,}
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -67,6 +122,16 @@ impl Default for AppSettings {
             scenario_region: None,
             mouse_dpi: default_mouse_dpi(),
             selected_friend: None,
+            stats_field_regions: StatsFieldRegions::default(),
+            live_feedback_enabled: true,
+            live_feedback_verbosity: 1,
+            live_feedback_tts_enabled: false,
+            live_feedback_tts_voice: None,
+            hud_vsmode_visible: true,
+            hud_smoothness_visible: true,
+            hud_stats_visible: true,
+            hud_feedback_visible: true,
+            hud_post_session_visible: true,
         }
     }
 }
@@ -96,6 +161,9 @@ pub fn persist(app: &AppHandle, settings: &AppSettings) -> anyhow::Result<()> {
 fn default_mouse_dpi() -> u32 {
     800
 }
+
+fn default_true() -> bool { true }
+fn default_feedback_verbosity() -> u8 { 1 }
 
 const KOVAAKS_STATS_SUFFIX: &str =
     r"steamapps\common\FPSAimTrainer\FPSAimTrainer\stats";

@@ -8,7 +8,8 @@
 ///   F8  → toggle-settings        (open/close settings panel)
 ///   F9  → open-region-picker     (jump straight to region selection)
 ///   F10 → toggle-layout-huds     (enter/exit HUD drag-to-reposition mode)
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -42,6 +43,20 @@ pub struct MouseMetrics {
     /// the target.  Catches low-frequency S-curve wobble that jitter (which is
     /// velocity-perpendicular) can miss.
     pub path_efficiency: f32,
+    /// Coefficient of variation of inter-click intervals (lower = more rhythmic).
+    /// Based on Schmidt et al. (1979) click-timing research. 0 = perfect metronome.
+    /// Only populated when ≥3 clicks occurred in the window; otherwise 0.
+    pub click_timing_cv: f32,
+    /// Fraction of movement time spent in the "correction phase" (speed < 40 % of
+    /// mean speed). Fitts' Law: lower ratio = more decisive ballistic movements.
+    pub correction_ratio: f32,
+    /// Directional bias in overshoot events (0 = balanced, 1 = always one direction).
+    /// >0.3 suggests a systematic aim-starting-position issue (Natapov et al. 2009).
+    pub directional_bias: f32,
+    /// Average left-button hold duration (ms) over the last 5 seconds.
+    /// Near-zero = discrete taps (clicking scenario);
+    /// high value = sustained presses (tracking / beam scenario).
+    pub avg_hold_ms: f32,
 }
 
 /// A single timestamped metric snapshot for session replay/graphing.
@@ -50,6 +65,19 @@ pub struct MetricPoint {
     pub timestamp_ms: u64,
     pub metrics: MouseMetrics,
 }
+
+/// A live coaching notification emitted during an active session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LiveFeedback {
+    /// Human-readable coaching message.
+    pub message: String,
+    /// Severity: "positive" | "tip" | "warning"
+    pub kind: String,
+    /// Which metric triggered this notification.
+    pub metric: String,
+}
+
+pub const EVENT_LIVE_FEEDBACK: &str = "live-feedback";
 
 #[derive(Debug, Clone)]
 struct RawMouseEvent {
@@ -65,6 +93,10 @@ static HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
 static TRACKING_ACTIVE: AtomicBool = AtomicBool::new(false);
 /// User's configured mouse DPI/CPI, used to normalise speed metrics.
 static MOUSE_DPI: AtomicU32 = AtomicU32::new(800);
+/// Whether to emit live-feedback coaching notifications.
+static FEEDBACK_ENABLED: AtomicBool = AtomicBool::new(true);
+/// Verbosity level: 0=minimal, 1=standard, 2=verbose.
+static FEEDBACK_VERBOSITY: AtomicU8 = AtomicU8::new(1);
 
 /// Stored handle so the rdev callback (static fn) can emit hotkey events.
 static APP_HANDLE: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
@@ -73,6 +105,12 @@ struct SharedState {
     events: Vec<RawMouseEvent>,
     session_metrics: Vec<MetricPoint>,
     session_start: Instant,
+    /// Recent left-click timestamps for click_timing_cv computation.
+    click_times: VecDeque<Instant>,
+    /// Timestamp of the most recent LMB-down event (None if button is up).
+    lmb_down_at: Option<Instant>,
+    /// Completed LMB hold durations (ms) in chronological order.
+    hold_durations: VecDeque<f32>,
 }
 
 static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
@@ -80,6 +118,9 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         events: Vec::with_capacity(10_000),
         session_metrics: Vec::with_capacity(3_600),
         session_start: Instant::now(),
+        click_times: VecDeque::with_capacity(200),
+        lmb_down_at: None,
+        hold_durations: VecDeque::with_capacity(500),
     })
 });
 
@@ -134,6 +175,7 @@ pub fn start_session_tracking() {
         s.events.clear();
         s.session_metrics.clear();
         s.session_start = Instant::now();
+        s.click_times.clear();
     }
     TRACKING_ACTIVE.store(true, Ordering::SeqCst);
     log::info!("Smoothness tracking started");
@@ -145,10 +187,33 @@ pub fn stop_session_tracking() {
     log::info!("Smoothness tracking stopped");
 }
 
+/// Pause recording mid-session without discarding accumulated data.
+/// Called when the stats panel is frozen or OCR consistently fails,
+/// indicating the player is idle (paused, at results screen, or at menu).
+pub fn pause_session_tracking() {
+    if TRACKING_ACTIVE.swap(false, Ordering::SeqCst) {
+        log::info!("Smoothness tracking paused (player idle)");
+    }
+}
+
+/// Resume recording after a mid-session pause. Does not reset accumulated data.
+pub fn resume_session_tracking() {
+    if !TRACKING_ACTIVE.swap(true, Ordering::SeqCst) {
+        log::info!("Smoothness tracking resumed (player active)");
+    }
+}
+
 /// Drain session metric buffer for post-session analysis.
 pub fn drain_session_buffer() -> Vec<MetricPoint> {
     let mut s = STATE.lock().unwrap();
     std::mem::take(&mut s.session_metrics)
+}
+
+/// Return the most-recent metric snapshot without consuming the buffer.
+/// Used by stats_ocr for shot-event correlation.
+pub fn get_latest_metrics() -> Option<MouseMetrics> {
+    let s = STATE.lock().ok()?;
+    s.session_metrics.last().map(|p| p.metrics.clone())
 }
 
 /// Compute a session-averaged smoothness snapshot from all per-second MetricPoints
@@ -163,12 +228,15 @@ pub fn session_summary() -> Option<crate::session_store::SmoothnessSnapshot> {
         s.session_metrics.iter().map(|p| f(p)).sum::<f32>() / n
     };
     Some(crate::session_store::SmoothnessSnapshot {
-        composite:     avg(|p| p.metrics.smoothness),
-        jitter:        avg(|p| p.metrics.jitter),
-        overshoot_rate: avg(|p| p.metrics.overshoot_rate),
-        velocity_std:  avg(|p| p.metrics.velocity_std),
+        composite:       avg(|p| p.metrics.smoothness),
+        jitter:          avg(|p| p.metrics.jitter),
+        overshoot_rate:  avg(|p| p.metrics.overshoot_rate),
+        velocity_std:    avg(|p| p.metrics.velocity_std),
         path_efficiency: avg(|p| p.metrics.path_efficiency),
-        avg_speed:     avg(|p| p.metrics.avg_speed),
+        avg_speed:       avg(|p| p.metrics.avg_speed),
+        click_timing_cv: avg(|p| p.metrics.click_timing_cv),
+        correction_ratio: avg(|p| p.metrics.correction_ratio),
+        directional_bias: avg(|p| p.metrics.directional_bias),
     })
 }
 
@@ -177,6 +245,16 @@ pub fn set_dpi(dpi: u32) {
     let clamped = dpi.max(100).min(32_000);
     MOUSE_DPI.store(clamped, Ordering::Relaxed);
     log::info!("Mouse DPI set to {clamped}");
+}
+
+/// Enable or disable live coaching feedback notifications.
+pub fn set_feedback_enabled(enabled: bool) {
+    FEEDBACK_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+/// Set feedback verbosity: 0 = minimal, 1 = standard, 2 = verbose.
+pub fn set_feedback_verbosity(level: u8) {
+    FEEDBACK_VERBOSITY.store(level.min(2), Ordering::Relaxed);
 }
 
 // ─── rdev callback ────────────────────────────────────────────────────────────
@@ -196,6 +274,28 @@ fn mouse_event_callback(event: Event) {
                     // Keep only last 5 seconds of raw events to bound memory
                     if s.events.len() > 50_000 {
                         s.events.drain(..10_000);
+                    }
+                }
+            }
+        }
+        EventType::ButtonPress(rdev::Button::Left) => {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                if let Ok(mut s) = STATE.lock() {
+                    s.click_times.push_back(now);
+                    if s.click_times.len() > 500 { s.click_times.pop_front(); }
+                    s.lmb_down_at = Some(now);
+                }
+            }
+        }
+        EventType::ButtonRelease(rdev::Button::Left) => {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) {
+                let now = Instant::now();
+                if let Ok(mut s) = STATE.lock() {
+                    if let Some(down) = s.lmb_down_at.take() {
+                        let hold_ms = down.elapsed().as_secs_f32() * 1000.0;
+                        s.hold_durations.push_back(hold_ms);
+                        if s.hold_durations.len() > 500 { s.hold_durations.pop_front(); }
                     }
                 }
             }
@@ -233,30 +333,69 @@ fn metric_emitter_loop(app: AppHandle) {
     let tick = Duration::from_secs(1);
     let window = Duration::from_secs(5);
 
+    // Per-metric streak counters and cooldowns (in ticks).
+    let mut streaks: HashMap<&'static str, u32> = HashMap::new();
+    let mut cooldowns: HashMap<&'static str, u32> = HashMap::new();
+
     while HOOK_RUNNING.load(Ordering::Relaxed) {
         std::thread::sleep(tick);
 
+        // Decrement all cooldowns
+        for v in cooldowns.values_mut() {
+            *v = v.saturating_sub(1);
+        }
+
         // Only compute and emit when a session is active
         if !TRACKING_ACTIVE.load(Ordering::Relaxed) {
+            // Reset streaks when not in session
+            streaks.clear();
             continue;
         }
 
-        let metrics = {
+        let (metrics, timestamp_ms, scenario) = {
             let s = STATE.lock().unwrap();
-            let cutoff = Instant::now() - window;
+            let now = Instant::now();
+            let cutoff = now - window;
+
             let recent: Vec<&RawMouseEvent> =
                 s.events.iter().filter(|e| e.time >= cutoff).collect();
+
+            // Compute click intervals (ms) for the measurement window
+            let click_intervals_ms: Vec<f64> = s
+                .click_times
+                .iter()
+                .filter(|&&t| t >= cutoff)
+                .collect::<Vec<_>>()
+                .windows(2)
+                .map(|w| w[1].duration_since(*w[0]).as_secs_f64() * 1000.0)
+                .collect();
+
+            // Compute average hold duration for the measurement window.
+            // Completed holds whose release falls within the window are included.
+            let hold_durations_ms: Vec<f32> = s.hold_durations
+                .iter().copied()
+                .collect::<Vec<_>>();
+            let avg_hold_ms = if hold_durations_ms.is_empty() {
+                0.0f32
+            } else {
+                hold_durations_ms.iter().sum::<f32>() / hold_durations_ms.len() as f32
+            };
+
             let dpi = MOUSE_DPI.load(Ordering::Relaxed);
-            compute_metrics(&recent, dpi)
+
+            // Query scenario once — used for both scoring weights and feedback gating.
+            #[cfg(feature = "ocr")]
+            let scenario = crate::stats_ocr::get_scenario_type();
+            #[cfg(not(feature = "ocr"))]
+            let scenario = "Unknown".to_string();
+
+            let mut m = compute_metrics(&recent, dpi, &click_intervals_ms, &scenario);
+            m.avg_hold_ms = avg_hold_ms;
+            let ts = s.session_start.elapsed().as_millis() as u64;
+            (m, ts, scenario)
         };
 
-        let point = MetricPoint {
-            timestamp_ms: {
-                let s = STATE.lock().unwrap();
-                s.session_start.elapsed().as_millis() as u64
-            },
-            metrics: metrics.clone(),
-        };
+        let point = MetricPoint { timestamp_ms, metrics: metrics.clone() };
 
         {
             let mut s = STATE.lock().unwrap();
@@ -264,6 +403,173 @@ fn metric_emitter_loop(app: AppHandle) {
         }
 
         let _ = app.emit(EVENT_MOUSE_METRICS, &metrics);
+
+        // ── Live feedback ─────────────────────────────────────────────────────
+        if FEEDBACK_ENABLED.load(Ordering::Relaxed) {
+            let verbosity = FEEDBACK_VERBOSITY.load(Ordering::Relaxed);
+            maybe_emit_feedback(&app, &metrics, &scenario, verbosity, &mut streaks, &mut cooldowns);
+        }
+    }
+}
+
+// ─── Live feedback helper ─────────────────────────────────────────────────────
+
+/// Increment streak counter if `cond` is true, else reset; returns new value.
+#[inline]
+fn streak_tick(streaks: &mut HashMap<&'static str, u32>, key: &'static str, cond: bool) -> u32 {
+    let v = streaks.entry(key).or_insert(0);
+    if cond { *v += 1 } else { *v = 0 }
+    *v
+}
+
+/// Emit a live-feedback event unless the per-key cooldown is still active.
+#[inline]
+fn maybe_emit(
+    app: &AppHandle,
+    key: &'static str,
+    msg: &str,
+    kind: &str,
+    cooldowns: &mut HashMap<&'static str, u32>,
+) {
+    if *cooldowns.get(key).unwrap_or(&0) > 0 {
+        return;
+    }
+    let _ = app.emit(EVENT_LIVE_FEEDBACK, LiveFeedback {
+        message: msg.to_string(),
+        kind: kind.to_string(),
+        metric: key.to_string(),
+    });
+    cooldowns.insert(key, 12); // 12-second cooldown
+}
+
+/// Check metric values against thresholds, increment/reset streak counters,
+/// and emit a `live-feedback` event when a streak crosses its trigger threshold
+/// and the per-category cooldown has expired.
+///
+/// Only emits tips that make sense for the current scenario type:
+/// - clicking scenarios → skip jitter/velocity_std (speed changes are intentional)
+/// - tracking scenarios → skip click_timing (no meaningful click rhythm)
+fn maybe_emit_feedback(
+    app: &AppHandle,
+    m: &MouseMetrics,
+    scenario: &str,
+    verbosity: u8,
+    streaks: &mut HashMap<&'static str, u32>,
+    cooldowns: &mut HashMap<&'static str, u32>,
+) {
+    let is_clicking = matches!(scenario,
+        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking");
+    let is_tracking = matches!(scenario,
+        "Tracking" | "PureTracking");
+    let is_accuracy = scenario == "AccuracyDrill";
+
+    // ── Always active (level 0+) ─────────────────────────────────────────────
+
+    // High overshoot: 3 consecutive seconds above threshold
+    // Threshold is tighter for clicking (you should land cleanly on each shot).
+    let overshoot_thresh = if is_clicking { 0.35 } else { 0.45 };
+    if streak_tick(streaks, "overshoot", m.overshoot_rate > overshoot_thresh) >= 3 {
+        let msg = if is_tracking {
+            "High overshoot — smooth out your cursor motion, less aggressive corrections"
+        } else if is_clicking {
+            "High overshoot on clicks — slow your flick, let the target come to you"
+        } else {
+            "High overshoot — try to decelerate before the target"
+        };
+        maybe_emit(app, "overshoot", msg, "warning", cooldowns);
+        streaks.insert("overshoot", 0);
+    }
+
+    // Smooth streak: 5 consecutive seconds >82 → positive reinforcement.
+    // Threshold is higher for clicking (overshoot-heavy score) to stay meaningful.
+    let smooth_thresh = if is_clicking { 88.0 } else { 82.0 };
+    if streak_tick(streaks, "smooth_streak", m.smoothness > smooth_thresh) >= 5 {
+        let msg = if is_clicking {
+            "Clean aim streak! Great flick precision"
+        } else if is_tracking {
+            "Smooth tracking streak! Excellent movement quality"
+        } else {
+            "Smooth streak! Excellent movement quality"
+        };
+        maybe_emit(app, "smooth_streak", msg, "positive", cooldowns);
+        streaks.insert("smooth_streak", 0);
+    }
+
+    if verbosity < 1 { return; }
+
+    // ── Standard level (1+) ──────────────────────────────────────────────────
+
+    // Inconsistent click timing: only meaningful for clicking scenarios
+    if is_clicking && m.click_timing_cv > 0.0
+        && streak_tick(streaks, "click_timing", m.click_timing_cv > 0.65) >= 2
+    {
+        maybe_emit(app, "click_timing", "Inconsistent click rhythm — try to pace your shots evenly", "tip", cooldowns);
+        streaks.insert("click_timing", 0);
+    } else if !is_clicking {
+        streaks.insert("click_timing", 0);
+    }
+
+    // Over-correcting: applies to all scenarios, message varies
+    if streak_tick(streaks, "correction", m.correction_ratio > 0.55) >= 3 {
+        let msg = if is_clicking {
+            "Over-correcting between shots — trust your first flick, reduce micro-adjustments"
+        } else if is_tracking {
+            "Over-correcting on target — stay on with steady pressure, resist over-steering"
+        } else {
+            "Over-correcting — trust your first movement, reduce hesitation"
+        };
+        maybe_emit(app, "correction", msg, "tip", cooldowns);
+        streaks.insert("correction", 0);
+    }
+
+    // Speed inconsistency: only tracked for tracking — clicking is naturally stop-and-go
+    if is_tracking && streak_tick(streaks, "velocity_std", m.velocity_std > 0.65) >= 3 {
+        maybe_emit(app, "velocity_std", "Inconsistent tracking speed — try to maintain even tempo on the target", "warning", cooldowns);
+        streaks.insert("velocity_std", 0);
+    } else if is_clicking {
+        streaks.insert("velocity_std", 0);
+    }
+
+    // Path efficiency: direct flicks matter for accuracy drills and clicking
+    if (is_accuracy || is_clicking) && streak_tick(streaks, "path_eff", m.path_efficiency < 0.72) >= 3 {
+        let msg = if is_clicking {
+            "Curved flick path — aim for straighter, more direct movements to each target"
+        } else {
+            "Wandering flick path — commit to a straight line when snapping to targets"
+        };
+        maybe_emit(app, "path_eff", msg, "tip", cooldowns);
+        streaks.insert("path_eff", 0);
+    } else if is_tracking {
+        streaks.insert("path_eff", 0);
+    }
+
+    if verbosity < 2 { return; }
+
+    // ── Verbose level (2) ────────────────────────────────────────────────────
+
+    // Directional bias: applies to all
+    if m.directional_bias > 0.0 && streak_tick(streaks, "bias", m.directional_bias > 0.55) >= 3 {
+        let msg = if is_clicking {
+            "Directional flick bias — try varying your starting position relative to targets"
+        } else {
+            "Directional bias detected — check your aim starting position"
+        };
+        maybe_emit(app, "bias", msg, "tip", cooldowns);
+        streaks.insert("bias", 0);
+    }
+
+    // Jitter: only meaningful while actively tracking or unknown
+    if (is_tracking || scenario == "Unknown") && streak_tick(streaks, "jitter", m.jitter > 0.25) >= 3 {
+        maybe_emit(app, "jitter", "High lateral jitter — relax your grip and use larger arm movements", "tip", cooldowns);
+        streaks.insert("jitter", 0);
+    } else if is_clicking {
+        streaks.insert("jitter", 0);
+    }
+
+    // Low path efficiency in tracking: wandering while following target
+    if is_tracking && streak_tick(streaks, "path_eff_track", m.path_efficiency < 0.60) >= 3 {
+        maybe_emit(app, "path_eff_track", "Wandering path — keep your cursor locked on the target rather than drifting around it", "tip", cooldowns);
+        streaks.insert("path_eff_track", 0);
     }
 }
 
@@ -299,26 +605,11 @@ fn primary_axis(velocities: &[(f64, f64)]) -> (f64, f64) {
 
 /// Compute smoothness metrics from a set of recent raw mouse events.
 ///
-/// # DPI normalisation
-/// `dpi` is the user's configured mouse CPI.  All pixel-speed outputs are
-/// divided by `dpi / 800` so that numbers are comparable regardless of
-/// sensitivity setup.  Direction/ratio metrics (jitter, overshoot, velocity_std)
-/// are already dimensionless and therefore inherently DPI-independent.
-///
-/// # Tracking awareness
-/// Jitter is computed using **local sliding-window PCA** (window = 10 velocity
-/// samples, 50 % overlap).  Each window uses its own dominant axis so that
-/// intentional direction changes between windows (e.g. moving to a new target
-/// in a different direction) are never counted as lateral noise.  A global PCA
-/// axis is still used for overshoot detection on the dominant motion axis.
-///
-/// * **Jitter** = mean of per-window (lateral RMS / mean speed).
-/// * **Overshoot** = sharp axial sign-flips on the global axis (both sides
-///   above 25 % of mean speed) — catches aggressive corrections without
-///   penalising smooth reversals that decelerate through zero.
-/// * **Consistency** = CV of speed *above* a 0.4 natural-movement baseline,
-///   so normal Fitts's-law acceleration arcs don't lose points.
-fn compute_metrics(events: &[&RawMouseEvent], dpi: u32) -> MouseMetrics {
+/// `click_intervals_ms`: inter-click intervals (ms) from the same time window,
+/// used for click_timing_cv.  Pass an empty slice when no click data is available.
+/// `scenario` is the string from `stats_ocr::get_scenario_type()` and controls
+/// the composite-score weight profile (see inline comments).
+fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f64], scenario: &str) -> MouseMetrics {
     let blank = MouseMetrics {
         smoothness: 100.0,
         jitter: 0.0,
@@ -326,6 +617,10 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32) -> MouseMetrics {
         velocity_std: 0.0,
         avg_speed: 0.0,
         path_efficiency: 1.0,
+        click_timing_cv: 0.0,
+        avg_hold_ms: 0.0,
+        correction_ratio: 0.0,
+        directional_bias: 0.0,
     };
 
     if events.len() < 3 {
@@ -500,12 +795,74 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32) -> MouseMetrics {
         1.0f32 // not enough data — don't penalise
     };
 
+    // ── Click timing CV ──────────────────────────────────────────────────────
+    // Schmidt et al. (1979): consistent inter-click intervals indicate good
+    // motor rhythm. CV = std/mean over the measurement window's click intervals.
+    let click_timing_cv = if click_intervals_ms.len() >= 3 {
+        let n = click_intervals_ms.len() as f64;
+        let mean = click_intervals_ms.iter().sum::<f64>() / n;
+        let variance = click_intervals_ms.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        (variance.sqrt() / mean.max(1.0)) as f32
+    } else {
+        0.0f32
+    };
+
+    // ── Correction ratio ─────────────────────────────────────────────────────
+    // Fitts' Law: expert aimers spend most of their movement time in the
+    // ballistic (fast) phase; excessive correction-phase time signals hesitation.
+    // Correction phase = speed < 40 % of mean speed.
+    let correction_samples = speeds.iter().filter(|&&s| s < mean_speed * 0.40).count();
+    let correction_ratio = (correction_samples as f32 / speeds.len().max(1) as f32).min(1.0);
+
+    // ── Directional bias in overshoot events ─────────────────────────────────
+    // Natapov et al. (2009): systematic bias (always overshooting same direction)
+    // reveals a starting-position habit, not random error.
+    // Measure sign of axial velocity just BEFORE each reversal.
+    let mut pre_reversal_signs: Vec<f64> = Vec::new();
+    for i in 0..axial.len().saturating_sub(1) {
+        let a0 = axial[i];
+        let a1 = axial[i + 1];
+        if a0.abs() > axial_threshold && a1.abs() > axial_threshold && a0 * a1 < 0.0 {
+            pre_reversal_signs.push(a0.signum());
+        }
+    }
+    let directional_bias = if pre_reversal_signs.len() >= 3 {
+        let mean_sign = pre_reversal_signs.iter().sum::<f64>() / pre_reversal_signs.len() as f64;
+        mean_sign.abs() as f32 // 0=perfectly balanced, 1=always same direction
+    } else {
+        0.0f32
+    };
+
     // ── Composite score ──────────────────────────────────────────────────────
-    // Weights: jitter 30 %, path efficiency 15 %, consistency 25 %, overshoot 30 %
-    let jitter_score     = (1.0 - (jitter as f64).min(1.0)) * 30.0;
-    let path_score       = path_efficiency as f64 * 15.0;
-    let consistency_score = (1.0 - (velocity_cv as f64).min(1.0)) * 25.0;
-    let overshoot_score  = (1.0 - overshoot_rate as f64) * 30.0;
+    // Weight profiles are tuned per scenario type because the same raw metric
+    // value means very different things depending on how the mouse is being used:
+    //
+    //  Tracking  — jitter & speed consistency are the dominant quality signals;
+    //              overshoots happen naturally during direction changes so the
+    //              overshoot weight is reduced.
+    //
+    //  Clicking  — landing cleanly on each target (overshoot) is the whole game;
+    //              velocity is intentionally stop-and-go so consistency is low-
+    //              weighted, and per-axis jitter between shots is not meaningful.
+    //
+    //  Accuracy  — straight direct flicks (path efficiency) matter most;
+    //              overshoot is still important but secondary.
+    //
+    //  Unknown   — balanced baseline (original formula).
+    let (w_jitter, w_path, w_consistency, w_overshoot): (f64, f64, f64, f64) = match scenario {
+        "Tracking" | "PureTracking" =>
+            (35.0, 25.0, 30.0, 10.0),
+        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" =>
+            ( 5.0, 25.0, 10.0, 60.0),
+        "AccuracyDrill" =>
+            (10.0, 40.0, 10.0, 40.0),
+        _ => // Unknown / default
+            (30.0, 15.0, 25.0, 30.0),
+    };
+    let jitter_score      = (1.0 - (jitter as f64).min(1.0)) * w_jitter;
+    let path_score        = path_efficiency as f64 * w_path;
+    let consistency_score = (1.0 - (velocity_cv as f64).min(1.0)) * w_consistency;
+    let overshoot_score   = (1.0 - overshoot_rate as f64) * w_overshoot;
     let smoothness = (jitter_score + path_score + consistency_score + overshoot_score)
         .clamp(0.0, 100.0) as f32;
 
@@ -516,6 +873,10 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32) -> MouseMetrics {
         velocity_std: velocity_cv,
         avg_speed,
         path_efficiency,
+        click_timing_cv,
+        correction_ratio,
+        directional_bias,
+        avg_hold_ms: 0.0, // populated by the metric loop, not here
     }
 }
 
@@ -536,7 +897,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&RawMouseEvent> = events.iter().collect();
-        let m = compute_metrics(&refs, 800);
+        let m = compute_metrics(&refs, 800, &[], "Unknown");
         assert!(m.smoothness > 90.0, "expected high smoothness, got {}", m.smoothness);
         assert!(m.jitter < 0.05, "expected near-zero jitter, got {}", m.jitter);
         assert!(m.overshoot_rate < 0.05, "expected near-zero overshoot, got {}", m.overshoot_rate);
@@ -562,7 +923,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&RawMouseEvent> = events.iter().collect();
-        let m = compute_metrics(&refs, 800);
+        let m = compute_metrics(&refs, 800, &[], "Tracking");
         assert!(
             m.smoothness > 75.0,
             "smooth tracking should score high, got {}",
@@ -591,8 +952,8 @@ mod tests {
         let refs800: Vec<&RawMouseEvent> = ev800.iter().collect();
         let refs1600: Vec<&RawMouseEvent> = ev1600.iter().collect();
 
-        let m800 = compute_metrics(&refs800, 800);
-        let m1600 = compute_metrics(&refs1600, 1600);
+        let m800 = compute_metrics(&refs800, 800, &[], "Unknown");
+        let m1600 = compute_metrics(&refs1600, 1600, &[], "Unknown");
 
         let diff = (m800.smoothness - m1600.smoothness).abs();
         assert!(
@@ -627,7 +988,7 @@ mod tests {
             })
             .collect();
         let refs: Vec<&RawMouseEvent> = events.iter().collect();
-        let m = compute_metrics(&refs, 800);
+        let m = compute_metrics(&refs, 800, &[], "Unknown");
         // Sharp back-and-forth reversals → high overshoot
         assert!(
             m.overshoot_rate > 0.5,

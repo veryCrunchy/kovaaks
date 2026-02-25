@@ -1,19 +1,20 @@
 mod file_watcher;
-mod friend_scores; // kept as empty stub — friend data is now in settings.friends
 mod kovaaks_api;
 mod logger;
 mod mouse_hook;
 mod ocr;
+mod sapi;
 mod scenario_index;
 mod session_store;
 mod settings;
+mod stats_ocr;
 mod window_tracker;
 
 use std::sync::{Arc, Mutex};
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, PhysicalPosition, Runtime,
+    AppHandle, Emitter, Manager, Runtime,
 };
 
 pub use settings::{AppSettings, FriendProfile};
@@ -60,7 +61,12 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
     OverlayOrigin { x, y, scale_factor }
 }
 
-/// Reposition and resize the overlay window to cover the monitor at `index`.
+/// Reposition the overlay window to cover the monitor at `index`.
+///
+/// Fullscreen bypasses DWM's invisible resize borders entirely, which
+/// eliminates the pixel gap on the left side of borderless windows.
+/// We exit fullscreen first so the OS accepts the new position, then
+/// re-enter fullscreen on the target monitor.
 pub fn apply_monitor(app: &AppHandle, index: usize) {
     let Some(win) = app.get_webview_window("overlay") else { return };
     let monitors = win.available_monitors().unwrap_or_default();
@@ -68,16 +74,52 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     let Some(m) = monitor else { return };
 
     let pos = m.position();
-    let size = m.size();
+    let sf = m.scale_factor();
+    let logical_pos = pos.to_logical::<f64>(sf);
 
-    let _ = win.set_position(PhysicalPosition::new(pos.x, pos.y));
-    let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-        width: size.width,
-        height: size.height,
-    }));
+    let _ = win.set_fullscreen(false);
+    let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
+    let _ = win.set_fullscreen(true);
 }
 
 // ─── Tauri Commands ────────────────────────────────────────────────────────────
+
+#[tauri::command]
+fn open_speech_settings() {
+    // Opens Windows Speech settings (Time & Language > Speech) where the user
+    // can install additional high-quality Neural / Natural voices.
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "ms-settings:speech"])
+        .spawn();
+}
+
+#[tauri::command]
+fn open_natural_voices_store() {
+    // Opens Windows Accessibility > Narrator settings where the user can click
+    // "Add more voices" to install the free Microsoft Neural voices (Aria, Jenny,
+    // Guy, …) that are bundled with Windows but not installed by default.
+    #[cfg(target_os = "windows")]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "start", "ms-settings:easeofaccess-narrator"])
+        .spawn();
+}
+
+/// Return display names of every TTS voice installed on this machine.
+/// Reads both the legacy SAPI5 registry hive and the newer OneCore hive
+/// (neural / Narrator voices) so all installed voices are returned.
+#[tauri::command]
+fn list_sapi_voices() -> Vec<String> {
+    sapi::list_voices()
+}
+
+/// Speak `text` using the named voice (or the system default when `None`).
+/// Kills any currently-playing speech first, then spawns a background
+/// PowerShell process so the command returns immediately.
+#[tauri::command]
+fn speak_with_sapi(text: String, voice_name: Option<String>) {
+    sapi::speak(&text, voice_name.as_deref());
+}
 
 #[tauri::command]
 fn get_settings(state: tauri::State<AppState>) -> Result<AppSettings, String> {
@@ -99,6 +141,9 @@ fn save_settings(
     ocr::update_scenario_region(new_settings.scenario_region);
     ocr::update_poll_ms(new_settings.ocr_poll_ms);
     mouse_hook::set_dpi(new_settings.mouse_dpi);
+    mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
+    mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
+    stats_ocr::update_field_regions(new_settings.stats_field_regions);
     Ok(())
 }
 
@@ -129,6 +174,21 @@ fn set_scenario_region(
     drop(s);
     settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     ocr::update_scenario_region(cloned.scenario_region);
+    Ok(())
+}
+
+#[tauri::command]
+fn set_stats_field_regions(
+    regions: settings::StatsFieldRegions,
+    state: tauri::State<AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    let mut s = state.settings.lock().map_err(|e| e.to_string())?;
+    s.stats_field_regions = regions;
+    let cloned = s.clone();
+    drop(s);
+    settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
+    stats_ocr::update_field_regions(cloned.stats_field_regions);
     Ok(())
 }
 
@@ -455,6 +515,7 @@ pub fn run() {
             save_settings,
             set_region,
             set_scenario_region,
+            set_stats_field_regions,
             get_friends,
             add_friend,
             remove_friend,
@@ -474,6 +535,10 @@ pub fn run() {
             get_monitors,
             set_overlay_monitor,
             get_capture_preview,
+            open_speech_settings,
+            open_natural_voices_store,
+            list_sapi_voices,
+            speak_with_sapi,
         ])
         .setup(|app| {
             // Load persisted settings
@@ -498,10 +563,17 @@ pub fn run() {
 
             // Start mouse hook (captures events; metrics only emitted during sessions)
             let _ = mouse_hook::start(app.handle().clone());
+            mouse_hook::set_dpi(loaded.mouse_dpi);
+            mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
+            mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
 
             // Start OCR (begins reading SPM once a region is configured)
             ocr::update_scenario_region(loaded.scenario_region);
             ocr::start(app.handle().clone(), loaded.region, loaded.ocr_poll_ms);
+
+            // Start stats-panel OCR
+            stats_ocr::update_field_regions(loaded.stats_field_regions);
+            stats_ocr::start(app.handle().clone());
 
             // Start window tracker — shows/hides overlay based on KovaaK's focus
             window_tracker::start(app.handle().clone());
@@ -516,6 +588,9 @@ pub fn run() {
             // Overlay starts with mouse passthrough enabled
             if let Some(win) = app.get_webview_window("overlay") {
                 let _ = win.set_ignore_cursor_events(true);
+                // Force the window background to fully transparent so the DWM
+                // compositor does not tint or dim the game colours underneath.
+                let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
             }
 
             Ok(())

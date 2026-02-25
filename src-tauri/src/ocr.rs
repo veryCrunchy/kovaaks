@@ -8,7 +8,7 @@
 /// which gates smoothness tracking to actual KovaaK's sessions.
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
@@ -32,6 +32,12 @@ static LAST_SPM_X100: std::sync::atomic::AtomicU64 =
 static SCENARIO_REGION: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
 /// Last scenario name emitted, used to suppress duplicate events.
 static LAST_SCENARIO_NAME: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new(String::new()));
+/// Time of the most recent reset_session() call (None = no reset yet this run).
+/// The OCR loop will not emit a new session-start for at least RESET_QUIET_MS
+/// after this instant, preventing the results screen's lingering SPM from
+/// triggering a false start immediately after a session ends.
+static RESET_AT: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+const RESET_QUIET_MS: u128 = 3_000;
 
 pub const EVENT_LIVE_SCORE: &str = "live-score";
 pub const EVENT_SESSION_START: &str = "session-start";
@@ -143,10 +149,42 @@ pub fn get_capture_png() -> Option<Vec<u8>> {
 pub fn reset_session() {
     SESSION_STARTED.store(false, Ordering::SeqCst);
     LAST_SPM_X100.store(0, Ordering::SeqCst);
+    // Record the reset time so the loop ignores residual results-screen OCR.
+    if let Ok(mut t) = RESET_AT.lock() {
+        *t = Some(Instant::now());
+    }
     // Clear cached scenario name so the next session always re-emits scenario-detected
     if let Ok(mut name) = LAST_SCENARIO_NAME.lock() {
         name.clear();
     }
+}
+
+/// Returns the most recent SPM reading from the live score OCR, or `None` if
+/// no session is active / no value has been captured yet.
+pub fn get_current_spm() -> Option<u32> {
+    let v = LAST_SPM_X100.load(std::sync::atomic::Ordering::Relaxed);
+    if v == 0 { None } else { Some((v / 100) as u32) }
+}
+
+/// Capture a screen region and return the raw OCR text.
+/// Used by `stats_ocr` module to read the stats panel.
+/// Returns empty string when OCR is not available (non-Windows / no feature flag).
+pub(crate) fn capture_text(rect: crate::settings::RegionRect) -> anyhow::Result<String> {
+    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    {
+        let (pixels, w, h) = capture_region_gdi(&rect)?;
+        // Per-field regions are small (the user draws a tight box around one value).
+        // Windows.Media.Ocr needs ~20+ px font height; upscale so the region is
+        // at least 64 px tall — same logic as capture_and_ocr for the SPM counter.
+        let scale = {
+            let target_h: u32 = 64;
+            (target_h / h.max(1)).clamp(2, 6)
+        };
+        let (ocr_pixels, ocr_w, ocr_h) = upscale_nearest(&pixels, w, h, scale);
+        return run_windows_ocr(ocr_pixels, ocr_w, ocr_h);
+    }
+    #[allow(unreachable_code)]
+    { let _ = rect; Ok(String::new()) }
 }
 
 // ─── OCR Loop ─────────────────────────────────────────────────────────────────
@@ -160,10 +198,26 @@ fn ocr_loop(app: AppHandle) {
     const SCENARIO_CHECK_INTERVAL: Duration = Duration::from_secs(5);
     // Candidate for next scenario name — must be seen on 2 consecutive checks to emit.
     let mut pending_scenario: Option<String> = None;
-    // Only emit live-score (and log) when the value actually changes.
-    // This prevents stale rolling-average readings from accumulating score
-    // on the frontend after the player has completely stopped shooting.
+    // Only emit live-score (and log) when the value actually changes AND the
+    // player is not in a confirmed rolling-window decay state.
+    //
+    // Mathematical basis: KovaaK's SPM is a rolling average over window W.
+    // While the player is actively scoring, hits arrive stochastically so SPM
+    // fluctuates both up and down.  Once the player stops completely, SPM decays
+    // as old hits leave the window: SPM(t+k) = SPM₀ · (W−k)/W — strictly
+    // monotonic.  Therefore, N consecutive strictly-decreasing readings prove
+    // (with probability 1 − 0.4^N of being correct) that the rolling window is
+    // shedding old hits with no new ones.
+    //
+    // At POLL_MS ≈ 100 ms and N = 4 this gives:
+    //   • Detection latency ≤ 400 ms after the player stops.
+    //   • False-positive rate ≈ 0.4^4 ≈ 2.6 % (brief active dip suppressed).
+    //
+    // When suppressed the frontend's 1.2 s SPM-stale guard takes over and
+    // stops score accumulation, which is exactly the desired behaviour.
     let mut last_emitted_spm: u64 = u64::MAX;
+    let mut consecutive_decreases: u32 = 0;
+    const DECAY_THRESHOLD: u32 = 4;
 
     while OCR_RUNNING.load(Ordering::SeqCst) {
         // Only capture when KovaaK's is the foreground window.
@@ -178,6 +232,14 @@ fn ocr_loop(app: AppHandle) {
 
         if let Some(rect) = region {
             match capture_and_ocr(rect) {
+                // Discard readings whose SPM exceeds any plausible KovaaK's value.
+                // World-record tracking SPM is ~12 000–15 000; 30 000 gives ample
+                // headroom while filtering noise like "113,204" or "32,170" that
+                // arise when the score region is captured mid-transition and the
+                // digit separator is mis-read as part of the integer.
+                Ok(Some(ref payload)) if payload.score > 30_000 => {
+                    log::debug!("SPM {} implausible (>30 000), discarding OCR reading", payload.score);
+                }
                 Ok(Some(payload)) => {
                     let spm = payload.score;
                     let prev_spm_x100 = LAST_SPM_X100.load(Ordering::Relaxed);
@@ -192,6 +254,10 @@ fn ocr_loop(app: AppHandle) {
                         log::info!("Restart detected: SPM dropped from {} → {}; re-starting session", prev_spm, spm);
                         SESSION_STARTED.store(false, Ordering::SeqCst);
                         crate::mouse_hook::start_session_tracking();
+                        crate::stats_ocr::set_active(true);
+                        // Reset decay counter — a restart is a legitimate SPM drop,
+                        // not a rolling-window decay, so we must not suppress events.
+                        consecutive_decreases = 0;
                         // Force immediate scenario re-check on restart
                         last_scenario_check = last_scenario_check
                             .checked_sub(SCENARIO_CHECK_INTERVAL)
@@ -200,20 +266,51 @@ fn ocr_loop(app: AppHandle) {
 
                     LAST_SPM_X100.store(spm * 100, Ordering::Relaxed);
 
-                    // First valid reading since last reset → new session starting
+                    // Track consecutive strictly-decreasing readings to identify
+                    // rolling-window decay (player has stopped scoring).
+                    // Any non-decrease (new hit landed) resets the counter.
+                    if !is_restart {
+                        if spm < prev_spm {
+                            consecutive_decreases += 1;
+                        } else {
+                            consecutive_decreases = 0;
+                        }
+                    }
+                    let is_decaying = consecutive_decreases >= DECAY_THRESHOLD;
+
+                    // First valid reading since last reset → new session starting.
+                    // Guard with a quiet period so the results-screen residue
+                    // (high SPM still visible for ~1 s after round ends) cannot
+                    // trigger a false start before the dedup window in
+                    // file_watcher has had time to mark the session as complete.
+                    // Instant is Copy so we can move the Option<Instant> out of the guard.
+                    let in_quiet = RESET_AT.lock().ok()
+                        .and_then(|g| *g)
+                        .map_or(false, |t| t.elapsed().as_millis() < RESET_QUIET_MS);
                     if !SESSION_STARTED.swap(true, Ordering::SeqCst) {
-                        log::info!("Session start detected via OCR");
-                        let _ = app.emit(EVENT_SESSION_START, ());
-                        crate::mouse_hook::start_session_tracking();
+                        if in_quiet {
+                            // Reschedule: undo the swap so the check fires again
+                            // once we are outside the quiet window.
+                            SESSION_STARTED.store(false, Ordering::SeqCst);
+                            log::debug!("[ocr] suppressing session-start during post-reset quiet window");
+                        } else {
+                            log::info!("Session start detected via OCR");
+                            let _ = app.emit(EVENT_SESSION_START, ());
+                            crate::mouse_hook::start_session_tracking();
+                            crate::stats_ocr::set_active(true);
+                        }
                     }
 
-                    // Only emit (and log) when the value has actually changed.
-                    // A stale rolling average that hasn't moved means the player
-                    // stopped shooting — no new event = frontend stops accumulating.
-                    if spm != last_emitted_spm {
+                    // Only emit when value changed AND not in confirmed decay state.
+                    // Suppressing during decay means the TS 1.2 s SPM-stale guard
+                    // fires and stops score accumulation — exactly the right outcome
+                    // since no new hits are being registered in-game either.
+                    if spm != last_emitted_spm && !is_decaying {
                         log::info!("SPM: {} (raw: {:?})", spm, payload.raw_text);
                         last_emitted_spm = spm;
                         let _ = app.emit(EVENT_LIVE_SCORE, &payload);
+                    } else if is_decaying && spm != last_emitted_spm {
+                        log::debug!("SPM decay suppressed ({} consecutive decreases): {} → {}", consecutive_decreases, prev_spm, spm);
                     }
                 }
                 Ok(None) => {} // No number in region — between rounds / paused
@@ -498,12 +595,63 @@ fn capture_scenario_name(rect: RegionRect) -> anyhow::Result<String> {
     let text = run_windows_ocr(pixels, w, h)?;
     // Collapse whitespace so multi-line OCR output becomes a single name string
     let cleaned = text.split_whitespace().collect::<Vec<_>>().join(" ");
-    Ok(cleaned)
+    Ok(normalise_scenario_name(&cleaned))
 }
 
 #[cfg(not(all(target_os = "windows", feature = "ocr")))]
 fn capture_scenario_name(_rect: RegionRect) -> anyhow::Result<String> {
     Ok(String::new())
+}
+
+/// Normalise a raw OCR scenario name string:
+///
+/// 1. In every whitespace-delimited token that contains at least one ASCII digit,
+///    replace digit-confusable letters (`l`, `I` → `1`, `O` → `0`).  This fixes
+///    intermittent misreads like "lw4ts" ↔ "1w4ts".
+///
+/// 2. Strip leading/trailing KovaaK's UI noise tokens that leak into the scenario
+///    name region depending on the visibility badge state:
+///    "Friends Only", "Public", "Private", "Friends", "Only"
+///    Also strips trailing season/badge suffixes like "S1"–"S9".
+fn normalise_scenario_name(raw: &str) -> String {
+    // Step 1 — per-token digit-confusable fix.
+    let normalised: Vec<&str> = raw.split_whitespace().collect();
+    let fixed: Vec<String> = normalised.iter().map(|tok| {
+        if tok.chars().any(|c| c.is_ascii_digit()) {
+            tok.chars().map(|c| match c {
+                'l' | 'I' => '1',
+                'O' => '0',
+                _ => c,
+            }).collect()
+        } else {
+            tok.to_string()
+        }
+    }).collect();
+
+    // Step 2 — strip known UI-badge noise tokens from front and back.
+    const NOISE_FRONT: &[&str] = &["Friends Only", "Public", "Private", "Friends", "Only"];
+    const NOISE_BACK_PAT: fn(&str) -> bool = |tok: &str| {
+        // Strip trailing tokens that look like a season badge: "S" followed by 1–2 digits.
+        tok.starts_with('S') && tok.len() <= 3 && tok[1..].chars().all(|c| c.is_ascii_digit())
+    };
+
+    let mut joined = fixed.join(" ");
+
+    // Remove noise prefixes (longest first so "Friends Only" beats "Friends")
+    let mut best_noise_front = NOISE_FRONT
+        .iter()
+        .filter(|&&n| joined.starts_with(n))
+        .max_by_key(|n| n.len());
+    if let Some(prefix) = best_noise_front {
+        joined = joined[prefix.len()..].trim_start().to_string();
+    }
+    // Remove trailing season badge token if present
+    let mut words: Vec<&str> = joined.split_whitespace().collect();
+    if words.last().map_or(false, |w| NOISE_BACK_PAT(w)) {
+        words.pop();
+    }
+
+    words.join(" ")
 }
 
 /// Fallback for non-Windows / non-ocr builds: emits a mock rising SPM for UI development.

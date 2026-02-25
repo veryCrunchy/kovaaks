@@ -29,6 +29,48 @@ pub struct SmoothnessSnapshot {
     pub path_efficiency: f32,
     /// DPI-normalised average speed (px/s at 800 DPI baseline)
     pub avg_speed: f32,
+    /// Inter-click interval coefficient of variation (lower = more rhythmic).
+    #[serde(default)]
+    pub click_timing_cv: f32,
+    /// Fraction of time in Fitts' correction phase (lower = more decisive).
+    #[serde(default)]
+    pub correction_ratio: f32,
+    /// Systematic overshoot direction bias (0=balanced, 1=always same direction).
+    #[serde(default)]
+    pub directional_bias: f32,
+}
+
+/// Per-session stats-panel snapshot (fields are Option because not all scenarios
+/// populate every field — the presence pattern is used to infer scenario type).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct StatsPanelSnapshot {
+    /// Scenario type inferred from populated fields.
+    pub scenario_type: String,
+    /// Final kill count (None for pure tracking).
+    #[serde(default)]
+    pub kills: Option<u32>,
+    /// Average kills per second over session.
+    #[serde(default)]
+    pub avg_kps: Option<f32>,
+    /// Final accuracy % (shots hit / shots fired).
+    #[serde(default)]
+    pub accuracy_pct: Option<f32>,
+    /// Total damage dealt (None for one-shot scenarios).
+    #[serde(default)]
+    pub total_damage: Option<f32>,
+    /// Average time-to-kill in milliseconds.
+    #[serde(default)]
+    pub avg_ttk_ms: Option<f32>,
+    /// Best (minimum) TTK recorded during the session.
+    #[serde(default)]
+    pub best_ttk_ms: Option<f32>,
+    /// TTK standard deviation — consistency of kill speed.
+    #[serde(default)]
+    pub ttk_std_ms: Option<f32>,
+    /// Accuracy trend: final accuracy minus accuracy at session midpoint.
+    /// Positive = improving, negative = fatiguing.
+    #[serde(default)]
+    pub accuracy_trend: Option<f32>,
 }
 
 /// One completed session record.
@@ -42,10 +84,15 @@ pub struct SessionRecord {
     pub kills: u32,
     pub deaths: u32,
     pub duration_secs: f64,
+    pub avg_ttk: f64,
+    pub damage_done: f64,
     /// Raw timestamp string from the CSV filename (YYYY.MM.DD-HH.mm.ss)
     pub timestamp: String,
     /// Session-averaged smoothness metrics (None if mouse hook had no data)
     pub smoothness: Option<SmoothnessSnapshot>,
+    /// Session stats panel snapshot (None if stats-panel OCR not configured)
+    #[serde(default)]
+    pub stats_panel: Option<StatsPanelSnapshot>,
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────
