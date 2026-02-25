@@ -504,30 +504,6 @@ pub fn detect_field_regions_from_words(
         field_candidates.push((field, val_box));
     }
 
-    // Same-row filter: drop values whose centre_y is far from the consensus row.
-    if field_candidates.len() >= 3 {
-        let mut cys: Vec<i32> = field_candidates.iter().map(|(_, vb)| vb.centre_y()).collect();
-        cys.sort_unstable();
-        let median_cy = cys[cys.len() / 2];
-        let before    = field_candidates.len();
-        field_candidates.retain(|(field, vb)| {
-            let ok = (vb.centre_y() - median_cy).abs() <= 40;
-            if !ok {
-                log::debug!(
-                    "auto_detect: dropping '{}' — value cy={} too far from median={}",
-                    field, vb.centre_y(), median_cy,
-                );
-            }
-            ok
-        });
-        if field_candidates.len() < before {
-            log::info!(
-                "auto_detect: same-row filter dropped {} suspect field(s)",
-                before - field_candidates.len()
-            );
-        }
-    }
-
     for (field, val_box) in field_candidates {
         let w       = (val_box.width as i32 + EXTRA_LEFT).max(MIN_VAL_W);
         let h       = val_box.height as i32 + PAD * 2;
