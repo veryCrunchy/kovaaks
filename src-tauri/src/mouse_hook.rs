@@ -175,6 +175,15 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
         *h = Some(app.clone());
     }
 
+    // On Windows, start a Raw Input listener alongside rdev.
+    // Raw input gives us hardware mouse deltas (lLastX/lLastY) which are NOT
+    // clamped by monitor boundaries or affected by SetCursorPos recentering that
+    // FPS games perform every frame.  This thread owns cursor_x/cursor_y and the
+    // raw_positions buffer.  The rdev thread below continues for hotkeys, click
+    // detection, and the per-second smoothness metrics engine.
+    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    start_raw_input_thread();
+
     // Spawn the rdev listener thread (blocks, so must be its own thread)
     std::thread::Builder::new()
         .name("mouse-hook".into())
@@ -322,6 +331,161 @@ pub fn set_feedback_verbosity(level: u8) {
     FEEDBACK_VERBOSITY.store(level.min(2), Ordering::Relaxed);
 }
 
+// ─── Windows Raw Input thread ─────────────────────────────────────────────────
+//
+// WH_MOUSE_LL (used by rdev) reports *absolute* OS cursor coordinates which are
+// hard-clamped to the monitor rectangle by the OS.  In a 3-D FPS the game also
+// calls SetCursorPos to re-centre the cursor after each frame, producing an
+// equal-and-opposite delta that cancels the real movement.  Both effects make
+// cursor_x/cursor_y useless for path replay.
+//
+// WM_INPUT delivers lLastX/lLastY straight from the mouse sensor hardware — the
+// same source the game uses — completely unaffected by cursor clamping or
+// recentering.  We use it exclusively to track cursor_x/cursor_y and build the
+// raw_positions buffer.  rdev continues for hotkeys, click detection and metrics.
+
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+fn start_raw_input_thread() {
+    std::thread::Builder::new()
+        .name("raw-input-mouse".into())
+        .spawn(raw_input_loop)
+        .expect("failed to spawn raw input thread");
+}
+
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+fn raw_input_loop() {
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
+        HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASS_STYLES, WNDCLASSW,
+    };
+    use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
+    use windows::core::PCWSTR;
+    use std::mem::size_of;
+
+    unsafe {
+        let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+
+        let class_name: Vec<u16> = "KovaaksRawMouse\0".encode_utf16().collect();
+
+        let wc = WNDCLASSW {
+            style:          WNDCLASS_STYLES(0),
+            lpfnWndProc:    Some(raw_input_wnd_proc),
+            cbClsExtra:     0,
+            cbWndExtra:     0,
+            hInstance:      windows::Win32::Foundation::HINSTANCE(hinstance.0),
+            hIcon:          Default::default(),
+            hCursor:        Default::default(),
+            hbrBackground:  Default::default(),
+            lpszMenuName:   PCWSTR::null(),
+            lpszClassName:  PCWSTR(class_name.as_ptr()),
+        };
+        RegisterClassW(&wc);
+
+        let hwnd = match CreateWindowExW(
+            WINDOW_EX_STYLE(0),
+            PCWSTR(class_name.as_ptr()),
+            PCWSTR::null(),
+            WINDOW_STYLE(0),
+            0, 0, 0, 0,
+            Some(HWND_MESSAGE),
+            None, Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)), None,
+        ) {
+            Ok(h)  => h,
+            Err(e) => { log::error!("raw input: CreateWindowExW: {e}"); return; }
+        };
+
+        let dev = RAWINPUTDEVICE {
+            usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
+            usUsage:     0x02, // HID_USAGE_GENERIC_MOUSE
+            dwFlags:     RIDEV_INPUTSINK,
+            hwndTarget:  hwnd,
+        };
+        if let Err(e) = RegisterRawInputDevices(&[dev], size_of::<RAWINPUTDEVICE>() as u32) {
+            log::error!("raw input: RegisterRawInputDevices: {e}"); return;
+        }
+
+        log::info!("Raw input mouse listener started");
+        let mut msg = MSG::default();
+        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    }
+}
+
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+unsafe extern "system" fn raw_input_wnd_proc(
+    hwnd:   windows::Win32::Foundation::HWND,
+    msg:    u32,
+    wparam: windows::Win32::Foundation::WPARAM,
+    lparam: windows::Win32::Foundation::LPARAM,
+) -> windows::Win32::Foundation::LRESULT {
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
+    use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT};
+    use std::mem::size_of;
+
+    const WM_INPUT: u32 = 0x00FF;
+    const RIM_TYPEMOUSE: u32 = 0;
+    const MOUSE_MOVE_ABSOLUTE: u16 = 0x01;          // usFlags bit — clear = relative
+
+    if msg == WM_INPUT {
+        let handle = HRAWINPUT(lparam.0 as *mut std::ffi::c_void);
+        let header_sz = size_of::<RAWINPUTHEADER>() as u32;
+        let mut needed: u32 = 0;
+        unsafe { GetRawInputData(handle, RID_INPUT, None, &mut needed, header_sz) };
+
+        if needed > 0 && (needed as usize) <= size_of::<RAWINPUT>() {
+            // Stack-allocate: RAWINPUT for mouse is ~40 bytes — well within limits.
+            let mut raw = std::mem::MaybeUninit::<RAWINPUT>::zeroed();
+            let written = unsafe { GetRawInputData(
+                handle, RID_INPUT,
+                Some(raw.as_mut_ptr() as *mut _),
+                &mut needed, header_sz,
+            ) };
+            if written == needed {
+                let raw = unsafe { raw.assume_init() };
+                if raw.header.dwType == RIM_TYPEMOUSE {
+                    let mouse = unsafe { &raw.data.mouse };
+                    // Ignore absolute-mode reports (pen tablets, digitisers).
+                    if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE == 0 {
+                        let dx = mouse.lLastX as f64;
+                        let dy = mouse.lLastY as f64;
+                        if (dx != 0.0 || dy != 0.0) && TRACKING_ACTIVE.load(Ordering::Relaxed) {
+                            let now = Instant::now();
+                            if let Ok(mut s) = STATE.lock() {
+                                s.cursor_x += dx;
+                                s.cursor_y += dy;
+                                let sample = match s.last_raw_sample {
+                                    None       => true,
+                                    Some(last) => now.duration_since(last) >= Duration::from_millis(33),
+                                };
+                                if sample {
+                                    let ts_ms = now
+                                        .saturating_duration_since(s.session_start)
+                                        .as_millis() as u64;
+                                    let (cx, cy) = (s.cursor_x, s.cursor_y);
+                                    s.raw_positions.push(RawPositionPoint {
+                                        x: cx, y: cy,
+                                        timestamp_ms: ts_ms,
+                                        is_click: false,
+                                    });
+                                    s.last_raw_sample = Some(now);
+                                    if s.raw_positions.len() > 30_000 {
+                                        s.raw_positions.drain(..5_000);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
 // ─── rdev callback ────────────────────────────────────────────────────────────
 
 fn mouse_event_callback(event: Event) {
@@ -340,42 +504,47 @@ fn mouse_event_callback(event: Event) {
                     if s.events.len() > 50_000 {
                         s.events.drain(..10_000);
                     }
-                    // Track last known position for click-event correlation
-                    // and integrate into cumulative camera-space delta path.
-                    let dx = x - s.last_x;
-                    let dy = y - s.last_y;
-                    // Only accumulate if last_x/last_y have been initialised
-                    // (skip the very first event which would produce a large
-                    // jump from 0,0 to wherever the OS cursor happens to be).
-                    if s.last_x != 0.0 || s.last_y != 0.0 {
-                        s.cursor_x += dx;
-                        s.cursor_y += dy;
-                    }
-                    s.last_x = x;
-                    s.last_y = y;
-                    // Downsample to ≈30 fps for path visualisation
-                    let sample = match s.last_raw_sample {
-                        None => true,
-                        Some(last) => now.duration_since(last) >= Duration::from_millis(33),
-                    };
-                    if sample {
-                        let ts_ms = now
-                            .saturating_duration_since(s.session_start)
-                            .as_millis() as u64;
-                        let cx = s.cursor_x;
-                        let cy = s.cursor_y;
-                        s.raw_positions.push(RawPositionPoint {
-                            x: cx,
-                            y: cy,
-                            timestamp_ms: ts_ms,
-                            is_click: false,
-                        });
-                        s.last_raw_sample = Some(now);
-                        // Cap at ~30k samples (≈16 min at 30 fps)
-                        if s.raw_positions.len() > 30_000 {
-                            s.raw_positions.drain(..5_000);
+                    // On Windows the raw-input thread (raw_input_wnd_proc) owns
+                    // cursor_x/cursor_y and raw_positions using true hardware
+                    // deltas that are unaffected by monitor-edge clamping or the
+                    // game's SetCursorPos recentering.  Nothing to do here.
+                    //
+                    // On other platforms (no raw input) we fall back to
+                    // accumulated OS-cursor deltas, which is the best we have.
+                    #[cfg(not(all(target_os = "windows", feature = "ocr")))]
+                    {
+                        let dx = x - s.last_x;
+                        let dy = y - s.last_y;
+                        if s.last_x != 0.0 || s.last_y != 0.0 {
+                            s.cursor_x += dx;
+                            s.cursor_y += dy;
+                        }
+                        let sample = match s.last_raw_sample {
+                            None => true,
+                            Some(last) => now.duration_since(last) >= Duration::from_millis(33),
+                        };
+                        if sample {
+                            let ts_ms = now
+                                .saturating_duration_since(s.session_start)
+                                .as_millis() as u64;
+                            let cx = s.cursor_x;
+                            let cy = s.cursor_y;
+                            s.raw_positions.push(RawPositionPoint {
+                                x: cx,
+                                y: cy,
+                                timestamp_ms: ts_ms,
+                                is_click: false,
+                            });
+                            s.last_raw_sample = Some(now);
+                            if s.raw_positions.len() > 30_000 {
+                                s.raw_positions.drain(..5_000);
+                            }
                         }
                     }
+                    // Always update last_x/last_y — used for click-position
+                    // correlation and the metrics events buffer (absolute coords).
+                    s.last_x = x;
+                    s.last_y = y;
                 }
             }
         }
