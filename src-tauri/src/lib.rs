@@ -537,8 +537,8 @@ pub fn run() {
             get_capture_preview,
             open_speech_settings,
             open_natural_voices_store,
-            list_sapi_voices,
-            speak_with_sapi,
+            // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
+            // for future use but not registered until a working voice backend is confirmed.
         ])
         .setup(|app| {
             // Load persisted settings

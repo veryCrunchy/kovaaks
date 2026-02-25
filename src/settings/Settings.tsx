@@ -717,44 +717,10 @@ function GeneralSettings({
               </div>
             )}
 
-            {/* Text-to-speech */}
-            {settings.live_feedback_enabled && (
-              <label className="flex items-center gap-3 cursor-pointer">
-                <div
-                  onClick={() => update("live_feedback_tts_enabled", !settings.live_feedback_tts_enabled)}
-                  className="relative rounded-full transition-all"
-                  style={{
-                    width: 40,
-                    height: 22,
-                    background: settings.live_feedback_tts_enabled ? "#00f5a0" : "rgba(255,255,255,0.15)",
-                    cursor: "pointer",
-                  }}
-                >
-                  <div
-                    className="absolute rounded-full transition-all"
-                    style={{
-                      width: 16,
-                      height: 16,
-                      top: 3,
-                      left: settings.live_feedback_tts_enabled ? 21 : 3,
-                      background: "#fff",
-                      boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
-                    }}
-                  />
-                </div>
-                <span className="text-sm" style={{ color: "rgba(255,255,255,0.6)" }}>
-                  Text-to-speech {settings.live_feedback_tts_enabled ? "on" : "off"}
-                </span>
-              </label>
-            )}
-
-            {/* Neural voice installer / selector */}
-            {settings.live_feedback_enabled && settings.live_feedback_tts_enabled && (
-              <NeuralVoiceInstaller
-                selectedVoice={settings.live_feedback_tts_voice}
-                onSelect={(voice) => update("live_feedback_tts_voice", voice)}
-              />
-            )}
+            {/* Text-to-speech toggle and voice picker are temporarily hidden.
+                 The SAPI backend (sapi.rs, list_sapi_voices, speak_with_sapi) is
+                 preserved for future use once a reliable voice source is confirmed.
+            */}
           </div>
         </FieldGroup>
 
@@ -950,6 +916,7 @@ interface VoicePickerProps {
   onSelect: (voiceName: string | null) => void;
 }
 
+// @ts-ignore -- kept for future use when SAPI wiring is re-enabled
 function NeuralVoiceInstaller({ selectedVoice, onSelect }: VoicePickerProps) {
   const [voices, setVoices] = useState<string[] | null>(null); // null = loading
   const [previewing, setPreviewing] = useState<string | null>(null);
