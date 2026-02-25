@@ -215,15 +215,32 @@ export default function App() {
         </div>
       )}
 
-      {/* Settings panel — slides in over the overlay */}
+      {/* Settings panel — floating overlay, click backdrop to dismiss */}
       {mode === "settings" && (
         <Suspense fallback={null}>
-          <div className="absolute inset-0" style={{ zIndex: 100 }}>
-            <Settings
-              onClose={() => { setMode("overlay"); reloadHudVis(); }}
-              onPickRegions={() => { setReturnMode("settings"); setMode("region-picker"); }}
-              onLayoutHUDs={() => { setReturnMode("settings"); setMode("layout"); }}
-            />
+          <div
+            className="absolute inset-0 flex items-center justify-center"
+            style={{ zIndex: 100, background: "rgba(0,0,0,0.55)", backdropFilter: "blur(6px)" }}
+            onMouseDown={(e) => { if (e.target === e.currentTarget) { setMode("overlay"); reloadHudVis(); } }}
+          >
+            <div
+              style={{
+                width: 1040,
+                height: 720,
+                maxWidth: "94vw",
+                maxHeight: "92vh",
+                borderRadius: 14,
+                overflow: "hidden",
+                boxShadow: "0 12px 56px rgba(0,0,0,0.75)",
+                border: "1px solid rgba(255,255,255,0.08)",
+              }}
+            >
+              <Settings
+                onClose={() => { setMode("overlay"); reloadHudVis(); }}
+                onPickRegions={() => { setReturnMode("settings"); setMode("region-picker"); }}
+                onLayoutHUDs={() => { setReturnMode("settings"); setMode("layout"); }}
+              />
+            </div>
           </div>
         </Suspense>
       )}
