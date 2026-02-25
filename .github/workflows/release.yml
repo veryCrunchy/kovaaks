@@ -37,6 +37,9 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Clear stale tauri NSIS cache
+        run: Remove-Item -Recurse -Force "$env:LOCALAPPDATA\tauri\NSIS" -ErrorAction SilentlyContinue
+
       - name: Install frontend dependencies
         run: pnpm install
 
