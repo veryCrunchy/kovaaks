@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.5.0](https://github.com/veryCrunchy/kovaaks/compare/v0.4.0...v0.5.0) (2026-02-25)
+
+
+### Features
+
+* add session stats tab and integrate StatsWindow component ([6efbe2f](https://github.com/veryCrunchy/kovaaks/commit/6efbe2f2b1d00f501e2fcc6ed19c95773c6e3a94))
+* **animation:** add spin and pulse keyframes for animations ([74fa88f](https://github.com/veryCrunchy/kovaaks/commit/74fa88fc6aeaaaf90a2438e239d2821e17fe7265))
+* **auto-setup:** add auto-setup mode and HUD integration ([90a9c6c](https://github.com/veryCrunchy/kovaaks/commit/90a9c6c4b84e24f035898d8f316f039daf7f6dff))
+* **ocr:** add support for capturing words with bounding boxes ([e212e13](https://github.com/veryCrunchy/kovaaks/commit/e212e13d7b27a0fd58946ad962ab846963cab5b9))
+* **spm:** deprecate legacy region field, migrate to stats_field_regions.spm ([8a0d071](https://github.com/veryCrunchy/kovaaks/commit/8a0d07117e8bef260fc76d958bd77d6c389c971c))
+
+
+### Bug Fixes
+
+* **auto-setup:** remove same-row filter that dropped vertically-stacked fields ([a6b8e64](https://github.com/veryCrunchy/kovaaks/commit/a6b8e64f4e56dcfec1d221acd604177330f80177))
+* enable createUpdaterArtifacts to produce .nsis.zip.sig for updater ([f49fb65](https://github.com/veryCrunchy/kovaaks/commit/f49fb6558f9254cca9384e7d65d47913226464da))
+* remove unused trayIcon configuration from tauri.conf.json ([19a3c76](https://github.com/veryCrunchy/kovaaks/commit/19a3c76a8750cfba80698a21004e334a3ca1b85b))
+* update settings panel to be a floating overlay with backdrop dismiss ([c5af49e](https://github.com/veryCrunchy/kovaaks/commit/c5af49eab12698428375d4f83eea3135d0d259df))
+
 ## [0.4.0](https://github.com/veryCrunchy/kovaaks/compare/v0.3.0...v0.4.0) (2026-02-25)
 
 
