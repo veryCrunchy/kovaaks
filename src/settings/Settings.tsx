@@ -12,12 +12,11 @@ type Tab = "general" | "friends" | "smoothness";
 
 interface SettingsProps {
   onClose: () => void;
-  onPickRegion: () => void;
-  onPickScenarioRegion: () => void;
+  onPickRegions: () => void;
   onLayoutHUDs: () => void;
 }
 
-export function Settings({ onClose, onPickRegion, onPickScenarioRegion, onLayoutHUDs }: SettingsProps) {
+export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [saving, setSaving] = useState(false);
@@ -271,8 +270,7 @@ export function Settings({ onClose, onPickRegion, onPickScenarioRegion, onLayout
             settings={settings}
             onChange={setSettings}
             onSave={handleSave}
-            onPickRegion={onPickRegion}
-            onPickScenarioRegion={onPickScenarioRegion}
+            onPickRegions={onPickRegions}
             saving={saving}
             saved={saved}
             error={error}
@@ -299,8 +297,7 @@ interface GeneralSettingsProps {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onSave: () => void;
-  onPickRegion: () => void;
-  onPickScenarioRegion: () => void;
+  onPickRegions: () => void;
   saving: boolean;
   saved: boolean;
   error: string | null;
@@ -310,8 +307,7 @@ function GeneralSettings({
   settings,
   onChange,
   onSave,
-  onPickRegion,
-  onPickScenarioRegion,
+  onPickRegions,
   saving,
   saved,
   error,
@@ -461,7 +457,7 @@ function GeneralSettings({
               </span>
             )}
             <button
-              onClick={onPickRegion}
+              onClick={onPickRegions}
               className="px-4 py-1.5 rounded-lg text-sm"
               style={{
                 background: "rgba(255,255,255,0.07)",
@@ -513,7 +509,7 @@ function GeneralSettings({
               </span>
             )}
             <button
-              onClick={onPickScenarioRegion}
+              onClick={onPickRegions}
               className="px-4 py-1.5 rounded-lg text-sm"
               style={{
                 background: "rgba(255,255,255,0.07)",
@@ -596,6 +592,172 @@ function GeneralSettings({
           </div>
         </FieldGroup>
 
+        {/* Stats field regions */}
+        <FieldGroup
+          label="Stats Field Regions"
+          description="Each stat field (Kill Count, KPS, Accuracy, Damage, Avg TTK) has its own small OCR region — one region per value. Use the region picker to draw regions around each stat."
+        >
+          {(() => {
+            const fields = settings.stats_field_regions;
+            const fieldDefs = [
+              { key: "kills" as const,    label: "Kill Count", color: "#f87171" },
+              { key: "kps" as const,      label: "KPS",        color: "#fb923c" },
+              { key: "accuracy" as const, label: "Accuracy",   color: "#fbbf24" },
+              { key: "damage" as const,   label: "Damage",     color: "#a78bfa" },
+              { key: "ttk" as const,      label: "Avg TTK",    color: "#34d399" },
+            ];
+            const configured = fieldDefs.filter(f => fields?.[f.key]).length;
+            return (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap gap-2">
+                  {fieldDefs.map(f => {
+                    const rect = fields?.[f.key];
+                    return (
+                      <div
+                        key={f.key}
+                        className="text-xs px-2.5 py-1 rounded-md"
+                        style={{
+                          background: rect ? `${f.color}14` : "rgba(255,255,255,0.04)",
+                          border: `1px solid ${rect ? `${f.color}44` : "rgba(255,255,255,0.1)"}`,
+                          color: rect ? f.color : "rgba(255,255,255,0.3)",
+                          fontFamily: "'JetBrains Mono', monospace",
+                        }}
+                      >
+                        <span style={{ marginRight: 5 }}>{rect ? "●" : "○"}</span>
+                        {f.label}
+                        {rect && (
+                          <span style={{ opacity: 0.5, marginLeft: 5 }}>
+                            {rect.width}×{rect.height}
+                          </span>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="flex items-center gap-3">
+                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+                    {configured}/{fieldDefs.length} fields configured
+                  </span>
+                  <button
+                    onClick={onPickRegions}
+                    className="px-4 py-1.5 rounded-lg text-sm"
+                    style={{
+                      background: "rgba(255,255,255,0.07)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      color: "rgba(255,255,255,0.7)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {configured > 0 ? "Edit Regions" : "Configure Regions"}
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
+        </FieldGroup>
+
+        {/* Live coaching feedback */}
+        <FieldGroup
+          label="Live Coaching"
+          description="Real-time on-screen tips based on your mouse movement and stats panel data."
+        >
+          <div className="flex flex-col gap-4">
+            {/* Enabled toggle */}
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                onClick={() => update("live_feedback_enabled", !settings.live_feedback_enabled)}
+                className="relative rounded-full transition-all"
+                style={{
+                  width: 40,
+                  height: 22,
+                  background: settings.live_feedback_enabled ? "#00f5a0" : "rgba(255,255,255,0.15)",
+                  cursor: "pointer",
+                }}
+              >
+                <div
+                  className="absolute rounded-full transition-all"
+                  style={{
+                    width: 16,
+                    height: 16,
+                    top: 3,
+                    left: settings.live_feedback_enabled ? 21 : 3,
+                    background: "#fff",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                  }}
+                />
+              </div>
+              <span className="text-sm" style={{ color: "rgba(255,255,255,0.6)" }}>
+                {settings.live_feedback_enabled ? "Enabled" : "Disabled"}
+              </span>
+            </label>
+
+            {/* Verbosity */}
+            {settings.live_feedback_enabled && (
+              <div className="flex items-center gap-3">
+                <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)", minWidth: 70 }}>Verbosity</span>
+                {([0, 1, 2] as const).map((level) => {
+                  const labels = ["Minimal", "Standard", "Verbose"];
+                  const active = settings.live_feedback_verbosity === level;
+                  return (
+                    <button
+                      key={level}
+                      onClick={() => update("live_feedback_verbosity", level)}
+                      className="px-3 py-1 rounded-lg text-xs"
+                      style={{
+                        background: active ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.05)",
+                        border: active ? "1px solid rgba(0,245,160,0.35)" : "1px solid rgba(255,255,255,0.08)",
+                        color: active ? "#00f5a0" : "rgba(255,255,255,0.55)",
+                        cursor: "pointer",
+                      }}
+                    >
+                      {labels[level]}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {/* Text-to-speech */}
+            {settings.live_feedback_enabled && (
+              <label className="flex items-center gap-3 cursor-pointer">
+                <div
+                  onClick={() => update("live_feedback_tts_enabled", !settings.live_feedback_tts_enabled)}
+                  className="relative rounded-full transition-all"
+                  style={{
+                    width: 40,
+                    height: 22,
+                    background: settings.live_feedback_tts_enabled ? "#00f5a0" : "rgba(255,255,255,0.15)",
+                    cursor: "pointer",
+                  }}
+                >
+                  <div
+                    className="absolute rounded-full transition-all"
+                    style={{
+                      width: 16,
+                      height: 16,
+                      top: 3,
+                      left: settings.live_feedback_tts_enabled ? 21 : 3,
+                      background: "#fff",
+                      boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                    }}
+                  />
+                </div>
+                <span className="text-sm" style={{ color: "rgba(255,255,255,0.6)" }}>
+                  Text-to-speech {settings.live_feedback_tts_enabled ? "on" : "off"}
+                </span>
+              </label>
+            )}
+
+            {/* Neural voice installer / selector */}
+            {settings.live_feedback_enabled && settings.live_feedback_tts_enabled && (
+              <NeuralVoiceInstaller
+                selectedVoice={settings.live_feedback_tts_voice}
+                onSelect={(voice) => update("live_feedback_tts_voice", voice)}
+              />
+            )}
+          </div>
+        </FieldGroup>
+
         {/* Overlay toggle */}
         <FieldGroup label="Overlay" description="Show or hide the in-game overlay">
           <label className="flex items-center gap-3 cursor-pointer">
@@ -625,6 +787,48 @@ function GeneralSettings({
               {settings.overlay_visible ? "Visible" : "Hidden"}
             </span>
           </label>
+        </FieldGroup>
+
+        {/* HUD visibility */}
+        <FieldGroup label="Visible HUDs" description="Show or hide individual overlay elements">
+          {(
+            [
+              ["VS Mode", "hud_vsmode_visible"],
+              ["Smoothness", "hud_smoothness_visible"],
+              ["Stats Panel", "hud_stats_visible"],
+              ["Coaching Tips", "hud_feedback_visible"],
+              ["Post-Session", "hud_post_session_visible"],
+            ] as const
+          ).map(([label, key]) => (
+            <label key={key} className="flex items-center gap-3 cursor-pointer mb-2">
+              <div
+                onClick={() => update(key, !settings[key])}
+                className="relative rounded-full transition-all"
+                style={{
+                  width: 40,
+                  height: 22,
+                  background: settings[key] ? "#00f5a0" : "rgba(255,255,255,0.15)",
+                  cursor: "pointer",
+                  flexShrink: 0,
+                }}
+              >
+                <div
+                  className="absolute rounded-full transition-all"
+                  style={{
+                    width: 16,
+                    height: 16,
+                    top: 3,
+                    left: settings[key] ? 21 : 3,
+                    background: "#fff",
+                    boxShadow: "0 1px 3px rgba(0,0,0,0.4)",
+                  }}
+                />
+              </div>
+              <span className="text-sm" style={{ color: "rgba(255,255,255,0.6)" }}>
+                {label}
+              </span>
+            </label>
+          ))}
         </FieldGroup>
       </div>
 
@@ -731,6 +935,156 @@ function GeneralSettings({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Voice Picker ─────────────────────────────────────────────────────────────
+// Lists all voices installed on Windows (SAPI5 + OneCore neural) via the
+// Rust `list_sapi_voices` command which reads the registry directly.
+// Speaks through `speak_with_sapi` (PowerShell + System.Speech) so every
+// installed voice — including offline neural voices from Narrator — works.
+
+interface VoicePickerProps {
+  selectedVoice: string | null;
+  onSelect: (voiceName: string | null) => void;
+}
+
+function NeuralVoiceInstaller({ selectedVoice, onSelect }: VoicePickerProps) {
+  const [voices, setVoices] = useState<string[] | null>(null); // null = loading
+  const [previewing, setPreviewing] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<string[]>("list_sapi_voices")
+      .then(setVoices)
+      .catch(() => setVoices([]));
+  }, []);
+
+  /** "Microsoft Aria Online (Natural) - English (United States)" → "Aria" */
+  const displayName = (v: string) =>
+    v.replace(/^Microsoft\s+/i, "")
+     .replace(/\s*Online.*/i, "")
+     .replace(/\s*\(Natural\).*/i, "")
+     .replace(/\s*-\s*.+$/, "")
+     .trim();
+
+  const previewVoice = (voiceName: string) => {
+    setPreviewing(voiceName);
+    invoke("speak_with_sapi", {
+      text: "Great shot — your accuracy is improving. Stay relaxed.",
+      voiceName,
+    }).finally(() => {
+      // Clear preview indicator after a reasonable speech duration
+      setTimeout(() => setPreviewing((p) => (p === voiceName ? null : p)), 4000);
+    });
+  };
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+  if (voices === null) {
+    return (
+      <div className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>Loading voices…</div>
+    );
+  }
+
+  // ── No voices found ────────────────────────────────────────────────────────
+  if (voices.length === 0) {
+    return (
+      <div
+        className="flex flex-col gap-3 rounded-xl p-4"
+        style={{
+          background: "rgba(255,255,255,0.03)",
+          border: "1px solid rgba(255,255,255,0.08)",
+        }}
+      >
+        <span className="text-xs font-semibold" style={{ color: "rgba(255,255,255,0.7)" }}>
+          No voices found
+        </span>
+        <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)", lineHeight: 1.5 }}>
+          Install neural voices via{" "}
+          <strong style={{ color: "rgba(255,255,255,0.55)" }}>Accessibility → Narrator → Add more voices</strong>{" "}
+          then restart the app.
+        </span>
+        <button
+          onClick={() => invoke("open_natural_voices_store").catch(console.error)}
+          className="px-4 py-2 rounded-lg text-xs font-semibold self-start"
+          style={{ background: "#00f5a0", color: "#000", cursor: "pointer", border: "none" }}
+        >
+          Open Accessibility → Narrator ↗
+        </button>
+      </div>
+    );
+  }
+
+  // ── Voice selector ─────────────────────────────────────────────────────────
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between">
+        <span className="text-xs" style={{ color: "rgba(255,255,255,0.4)" }}>Voice</span>
+        <button
+          onClick={() => invoke("open_natural_voices_store").catch(console.error)}
+          className="text-xs px-2 py-1 rounded"
+          style={{
+            background: "rgba(255,255,255,0.04)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            color: "rgba(255,255,255,0.3)",
+            cursor: "pointer",
+          }}
+        >
+          Install more ↗
+        </button>
+      </div>
+
+      <div className="flex flex-col gap-1">
+        {/* Auto option */}
+        <div
+          className="flex items-center px-3 py-2 rounded-lg cursor-pointer"
+          style={{
+            background: !selectedVoice ? "rgba(0,245,160,0.08)" : "rgba(255,255,255,0.03)",
+            border: !selectedVoice ? "1px solid rgba(0,245,160,0.25)" : "1px solid rgba(255,255,255,0.07)",
+          }}
+          onClick={() => onSelect(null)}
+        >
+          <span className="text-xs" style={{ color: !selectedVoice ? "#00f5a0" : "rgba(255,255,255,0.5)" }}>
+            Auto (best available)
+          </span>
+        </div>
+
+        {voices.map((voiceName) => {
+          const active = selectedVoice === voiceName;
+          return (
+            <div
+              key={voiceName}
+              className="flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer"
+              style={{
+                background: active ? "rgba(0,245,160,0.08)" : "rgba(255,255,255,0.03)",
+                border: active ? "1px solid rgba(0,245,160,0.25)" : "1px solid rgba(255,255,255,0.07)",
+              }}
+              onClick={() => onSelect(voiceName)}
+            >
+              <div className="flex flex-col">
+                <span className="text-xs" style={{ color: active ? "#00f5a0" : "rgba(255,255,255,0.7)" }}>
+                  {displayName(voiceName)}
+                </span>
+                <span className="text-xs" style={{ color: "rgba(255,255,255,0.2)", fontSize: 10 }}>
+                  {voiceName}
+                </span>
+              </div>
+              <button
+                onClick={(e) => { e.stopPropagation(); previewVoice(voiceName); }}
+                className="flex-shrink-0 ml-2 px-2 py-0.5 rounded text-xs"
+                style={{
+                  background: previewing === voiceName ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.06)",
+                  border: previewing === voiceName ? "1px solid rgba(0,245,160,0.3)" : "1px solid rgba(255,255,255,0.1)",
+                  color: previewing === voiceName ? "#00f5a0" : "rgba(255,255,255,0.4)",
+                  cursor: "pointer",
+                }}
+              >
+                {previewing === voiceName ? "●" : "▶"}
+              </button>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
