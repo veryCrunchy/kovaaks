@@ -61,6 +61,7 @@
   },
   "bundle": {
     "active": true,
+    "publisher": "veryCrunchy",
     "targets": [
       "nsis"
     ],
