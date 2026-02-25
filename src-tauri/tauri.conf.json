@@ -1,0 +1,94 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "KovaaK's Overlay",
+  "version": "0.1.0",
+  "identifier": "com.verycrunchy.kovaaks",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "overlay",
+        "title": "KovaaK's Overlay",
+        "url": "index.html",
+        "transparent": true,
+        "decorations": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "fullscreen": false,
+        "width": 1920,
+        "height": 1080,
+        "x": 0,
+        "y": 0,
+        "visible": true
+      },
+      {
+        "label": "logs",
+        "title": "KovaaK's Overlay — Logs",
+        "url": "logs.html",
+        "decorations": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "width": 1000,
+        "height": 620,
+        "visible": false
+      },
+      {
+        "label": "stats",
+        "title": "KovaaK's Overlay — Session Stats",
+        "url": "stats.html",
+        "decorations": true,
+        "alwaysOnTop": false,
+        "resizable": true,
+        "width": 1100,
+        "height": 720,
+        "minWidth": 800,
+        "minHeight": 500,
+        "visible": false
+      }
+    ],
+    "trayIcon": {
+      "id": "main",
+      "iconPath": "icons/icon.png",
+      "tooltip": "KovaaK's Overlay",
+      "iconAsTemplate": true,
+      "menuOnLeftClick": false
+    },
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4NDA5NjI2RDBEM0YxRjYKUldUMjhkUFFKcFpBYUpVL1ZhbHJpTkRPY3h5ZGtZZE84UHNFMHB0bVduRVdTQm1MNkM3YlZ5MVoK",
+      "endpoints": [
+        "https://github.com/veryCrunchy/kovaaks/releases/latest/download/latest.json"
+      ],
+      "dialog": false,
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}
