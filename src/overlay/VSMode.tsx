@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useLiveScore } from "../hooks/useLiveScore";
-import type { FriendProfile } from "../types/stats";
+import type { FriendProfile } from "../types/friends";
 
 interface VSModeProps {
   currentScenario: string | null;

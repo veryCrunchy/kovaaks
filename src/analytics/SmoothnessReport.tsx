@@ -12,7 +12,8 @@ import {
   Bar,
   ReferenceLine,
 } from "recharts";
-import type { MetricPoint } from "../types/stats";
+import type { MetricPoint, RawPositionPoint, ScreenFrame } from "../types/mouse";
+import { MousePathViewer } from "./MousePathViewer";
 
 interface Issue {
   severity: "high" | "medium" | "low";
@@ -113,12 +114,20 @@ const SEVERITY_COLOR: Record<string, string> = {
 
 export function SmoothnessReport() {
   const [points, setPoints] = useState<MetricPoint[]>([]);
+  const [rawPositions, setRawPositions] = useState<RawPositionPoint[]>([]);
+  const [screenFrames, setScreenFrames] = useState<ScreenFrame[]>([]);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    invoke<MetricPoint[]>("get_session_mouse_data")
-      .then((data) => {
+    Promise.all([
+      invoke<MetricPoint[]>("get_session_mouse_data"),
+      invoke<RawPositionPoint[]>("get_session_raw_positions"),
+      invoke<ScreenFrame[]>("get_session_screen_frames"),
+    ])
+      .then(([data, raw, frames]) => {
         setPoints(data);
+        setRawPositions(raw);
+        setScreenFrames(frames);
         setLoading(false);
       })
       .catch(() => setLoading(false));
@@ -224,6 +233,9 @@ export function SmoothnessReport() {
               </div>
             ))}
           </div>
+
+          {/* Mouse path viewer */}
+          <MousePathViewer rawPositions={rawPositions} metricPoints={points} screenFrames={screenFrames} />
 
           {/* Smoothness over time */}
           <ChartSection title="Smoothness Score (per second)">

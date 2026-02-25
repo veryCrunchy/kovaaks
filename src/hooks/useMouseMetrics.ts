@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { MouseMetrics } from "../types/stats";
+import type { MouseMetrics } from "../types/mouse";
 
 const MOUSE_METRICS_EVENT = "mouse-metrics";
 

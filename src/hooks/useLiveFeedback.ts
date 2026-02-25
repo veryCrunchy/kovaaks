@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { LiveFeedback } from "../types/stats";
+import type { LiveFeedback } from "../types/overlay";
 
 export interface ToastEntry extends LiveFeedback {
   id: number;

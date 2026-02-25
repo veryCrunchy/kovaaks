@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { StatsPanelReading } from "../types/stats";
+import type { StatsPanelReading } from "../types/overlay";
 
 const EVENT = "stats-panel-update";
 

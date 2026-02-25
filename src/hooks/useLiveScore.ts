@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { LiveScorePayload, SessionResult } from "../types/stats";
+import type { LiveScorePayload, SessionResult } from "../types/overlay";
 
 const LIVE_SCORE_EVENT = "live-score";
 const SESSION_COMPLETE_EVENT = "session-complete";

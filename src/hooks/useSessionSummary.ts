@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { SessionResult, MouseMetrics, StatsPanelReading } from "../types/stats";
+import type { SessionResult, StatsPanelReading } from "../types/overlay";
+import type { MouseMetrics } from "../types/mouse";
 
 export interface SessionSummary {
   session: SessionResult;

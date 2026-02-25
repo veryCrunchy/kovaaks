@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, FriendProfile, MostPlayedEntry } from "../types/stats";
+import type { AppSettings } from "../types/settings";
+import type { FriendProfile, MostPlayedEntry } from "../types/friends";
 
 interface FriendManagerProps {
   settings: AppSettings;
