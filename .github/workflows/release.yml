@@ -45,9 +45,9 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "KovaaK's Overlay ${{ github.ref_name }}"
-          releaseBody: |
-            See the [CHANGELOG](https://github.com/veryCrunchy/kovaaks/commits/${{ github.ref_name }}) for details.
-          releaseDraft: true
+          # release-please already created the release with a changelog;
+          # tauri-action will find it by tag and upload the build artifacts.
+          releaseDraft: false
           prerelease: false
           args: --features ocr
           updaterJsonPreferNsis: true
