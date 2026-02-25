@@ -60,5 +60,5 @@ jobs:
           # tauri-action will find it by tag and upload the build artifacts.
           releaseDraft: false
           prerelease: false
-          args: --features ocr
+          args: --features ocr --target x86_64-pc-windows-msvc
           updaterJsonPreferNsis: true
