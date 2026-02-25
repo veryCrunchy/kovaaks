@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, MonitorInfo } from "../types/stats";
+import type { AppSettings, MonitorInfo } from "../types/settings";
 import { FriendManager } from "./FriendManager";
 import { useUpdater } from "../hooks/useUpdater";
 
@@ -17,9 +17,10 @@ interface SettingsProps {
   onClose: () => void;
   onPickRegions: () => void;
   onLayoutHUDs: () => void;
+  onAutoSetup: () => void;
 }
 
-export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps) {
+export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [saving, setSaving] = useState(false);
@@ -295,6 +296,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
             onChange={setSettings}
             onSave={handleSave}
             onPickRegions={onPickRegions}
+            onAutoSetup={onAutoSetup}
             saving={saving}
             saved={saved}
             error={error}
@@ -333,6 +335,7 @@ interface GeneralSettingsProps {
   onChange: (s: AppSettings) => void;
   onSave: () => void;
   onPickRegions: () => void;
+  onAutoSetup: () => void;
   saving: boolean;
   saved: boolean;
   error: string | null;
@@ -343,6 +346,7 @@ function GeneralSettings({
   onChange,
   onSave,
   onPickRegions,
+  onAutoSetup,
   saving,
   saved,
   error,
@@ -469,93 +473,79 @@ function GeneralSettings({
           />
         </FieldGroup>
 
-        {/* SPM region */}
+        {/* OCR Regions */}
         <FieldGroup
-          label="SPM Region"
-          description="Screen region containing KovaaK's SPM (Score Per Minute) counter"
+          label="OCR Regions"
+          description="Screen regions for SPM, scenario name, and live stats. Auto Setup detects them while you play."
         >
-          <div className="flex items-center gap-3 flex-wrap">
-            {settings.region ? (
-              <div
-                className="text-xs px-3 py-1.5 rounded-lg"
-                style={{
-                  background: "rgba(0,245,160,0.08)",
-                  border: "1px solid rgba(0,245,160,0.2)",
-                  color: "#00f5a0",
-                }}
-              >
-                {settings.region.x}, {settings.region.y} — {settings.region.width}×{settings.region.height}px
+          {(() => {
+            const allDefs = [
+              { key: "spm",      label: "SPM",          color: "#00f5a0", rect: settings.stats_field_regions?.spm },
+              { key: "scenario", label: "Scenario Name", color: "#00b4ff", rect: settings.scenario_region },
+              { key: "kills",    label: "Kill Count",    color: "#f87171", rect: settings.stats_field_regions?.kills },
+              { key: "kps",      label: "KPS",           color: "#fb923c", rect: settings.stats_field_regions?.kps },
+              { key: "accuracy", label: "Accuracy",      color: "#fbbf24", rect: settings.stats_field_regions?.accuracy },
+              { key: "damage",   label: "Damage",        color: "#a78bfa", rect: settings.stats_field_regions?.damage },
+              { key: "ttk",      label: "Avg TTK",       color: "#34d399", rect: settings.stats_field_regions?.ttk },
+            ];
+            const configured = allDefs.filter(d => d.rect).length;
+            return (
+              <div className="flex flex-col gap-3">
+                <div className="flex flex-wrap gap-2">
+                  {allDefs.map(d => (
+                    <div
+                      key={d.key}
+                      className="text-xs px-2.5 py-1 rounded-md"
+                      style={{
+                        background: d.rect ? `${d.color}14` : "rgba(255,255,255,0.04)",
+                        border: `1px solid ${d.rect ? `${d.color}44` : "rgba(255,255,255,0.1)"}`,
+                        color: d.rect ? d.color : "rgba(255,255,255,0.3)",
+                        fontFamily: "'JetBrains Mono', monospace",
+                      }}
+                    >
+                      <span style={{ marginRight: 5 }}>{d.rect ? "●" : "○"}</span>
+                      {d.label}
+                      {d.rect && (
+                        <span style={{ opacity: 0.5, marginLeft: 5 }}>
+                          {d.rect.width}×{d.rect.height}
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="flex items-center gap-3 flex-wrap">
+                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+                    {configured}/{allDefs.length} configured
+                  </span>
+                  <button
+                    onClick={onAutoSetup}
+                    className="px-4 py-1.5 rounded-lg text-sm"
+                    style={{
+                      background: configured === 0 ? "rgba(251,191,36,0.12)" : "rgba(251,191,36,0.07)",
+                      border: configured === 0 ? "1px solid rgba(251,191,36,0.45)" : "1px solid rgba(251,191,36,0.22)",
+                      color: configured === 0 ? "#fbbf24" : "rgba(251,191,36,0.7)",
+                      cursor: "pointer",
+                      fontWeight: configured === 0 ? 700 : undefined,
+                    }}
+                  >
+                    {configured === 0 ? "Auto Setup" : "Re-run Auto Setup"}
+                  </button>
+                  <button
+                    onClick={onPickRegions}
+                    className="px-4 py-1.5 rounded-lg text-sm"
+                    style={{
+                      background: "rgba(255,255,255,0.07)",
+                      border: "1px solid rgba(255,255,255,0.12)",
+                      color: "rgba(255,255,255,0.6)",
+                      cursor: "pointer",
+                    }}
+                  >
+                    {configured === 0 ? "Manual Setup" : "Edit Regions"}
+                  </button>
+                </div>
               </div>
-            ) : (
-              <span className="text-sm" style={{ color: "rgba(255,255,255,0.35)" }}>
-                Not configured
-              </span>
-            )}
-            <button
-              onClick={onPickRegions}
-              className="px-4 py-1.5 rounded-lg text-sm"
-              style={{
-                background: "rgba(255,255,255,0.07)",
-                border: "1px solid rgba(255,255,255,0.12)",
-                color: "rgba(255,255,255,0.7)",
-                cursor: "pointer",
-              }}
-            >
-              {settings.region ? "Change Region" : "Pick Region"}
-            </button>
-            {settings.region && (
-              <button
-                onClick={handlePreview}
-                disabled={previewLoading}
-                className="px-4 py-1.5 rounded-lg text-sm"
-                style={{
-                  background: previewLoading ? "rgba(0,245,160,0.05)" : "rgba(0,245,160,0.1)",
-                  border: "1px solid rgba(0,245,160,0.2)",
-                  color: previewLoading ? "rgba(0,245,160,0.4)" : "#00f5a0",
-                  cursor: previewLoading ? "not-allowed" : "pointer",
-                }}
-              >
-                {previewLoading ? "Capturing…" : "Preview Capture"}
-              </button>
-            )}
-          </div>
-        </FieldGroup>
-
-        {/* Scenario name region */}
-        <FieldGroup
-          label="Scenario Name Region"
-          description="Screen region where KovaaK's displays the scenario name — OCR'd at session start to pre-populate VS Mode before the CSV is written"
-        >
-          <div className="flex items-center gap-3 flex-wrap">
-            {settings.scenario_region ? (
-              <div
-                className="text-xs px-3 py-1.5 rounded-lg"
-                style={{
-                  background: "rgba(0,180,255,0.08)",
-                  border: "1px solid rgba(0,180,255,0.2)",
-                  color: "#00b4ff",
-                }}
-              >
-                {settings.scenario_region.x}, {settings.scenario_region.y} — {settings.scenario_region.width}×{settings.scenario_region.height}px
-              </div>
-            ) : (
-              <span className="text-sm" style={{ color: "rgba(255,255,255,0.35)" }}>
-                Not configured
-              </span>
-            )}
-            <button
-              onClick={onPickRegions}
-              className="px-4 py-1.5 rounded-lg text-sm"
-              style={{
-                background: "rgba(255,255,255,0.07)",
-                border: "1px solid rgba(255,255,255,0.12)",
-                color: "rgba(255,255,255,0.7)",
-                cursor: "pointer",
-              }}
-            >
-              {settings.scenario_region ? "Change Region" : "Pick Region"}
-            </button>
-          </div>
+            );
+          })()}
         </FieldGroup>
 
         {/* OCR poll rate */}
@@ -625,70 +615,6 @@ function GeneralSettings({
             />
             <span className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>DPI</span>
           </div>
-        </FieldGroup>
-
-        {/* Stats field regions */}
-        <FieldGroup
-          label="Stats Field Regions"
-          description="Each stat field (Kill Count, KPS, Accuracy, Damage, Avg TTK) has its own small OCR region — one region per value. Use the region picker to draw regions around each stat."
-        >
-          {(() => {
-            const fields = settings.stats_field_regions;
-            const fieldDefs = [
-              { key: "kills" as const,    label: "Kill Count", color: "#f87171" },
-              { key: "kps" as const,      label: "KPS",        color: "#fb923c" },
-              { key: "accuracy" as const, label: "Accuracy",   color: "#fbbf24" },
-              { key: "damage" as const,   label: "Damage",     color: "#a78bfa" },
-              { key: "ttk" as const,      label: "Avg TTK",    color: "#34d399" },
-            ];
-            const configured = fieldDefs.filter(f => fields?.[f.key]).length;
-            return (
-              <div className="flex flex-col gap-3">
-                <div className="flex flex-wrap gap-2">
-                  {fieldDefs.map(f => {
-                    const rect = fields?.[f.key];
-                    return (
-                      <div
-                        key={f.key}
-                        className="text-xs px-2.5 py-1 rounded-md"
-                        style={{
-                          background: rect ? `${f.color}14` : "rgba(255,255,255,0.04)",
-                          border: `1px solid ${rect ? `${f.color}44` : "rgba(255,255,255,0.1)"}`,
-                          color: rect ? f.color : "rgba(255,255,255,0.3)",
-                          fontFamily: "'JetBrains Mono', monospace",
-                        }}
-                      >
-                        <span style={{ marginRight: 5 }}>{rect ? "●" : "○"}</span>
-                        {f.label}
-                        {rect && (
-                          <span style={{ opacity: 0.5, marginLeft: 5 }}>
-                            {rect.width}×{rect.height}
-                          </span>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-                <div className="flex items-center gap-3">
-                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
-                    {configured}/{fieldDefs.length} fields configured
-                  </span>
-                  <button
-                    onClick={onPickRegions}
-                    className="px-4 py-1.5 rounded-lg text-sm"
-                    style={{
-                      background: "rgba(255,255,255,0.07)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      color: "rgba(255,255,255,0.7)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {configured > 0 ? "Edit Regions" : "Configure Regions"}
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
         </FieldGroup>
 
         {/* Live coaching feedback */}

@@ -29,6 +29,9 @@ pub struct StatsFieldRegions {
     /// Region covering the Damage Dealt value only.
     #[serde(default)]
     pub damage: Option<RegionRect>,
+    /// Region covering the SPM (score-per-minute) value only.
+    #[serde(default)]
+    pub spm: Option<RegionRect>,
     /// Region covering the Avg TTK value only.
     #[serde(default)]
     pub ttk: Option<RegionRect>,
@@ -37,7 +40,7 @@ pub struct StatsFieldRegions {
 impl StatsFieldRegions {
     pub fn has_any(&self) -> bool {
         self.kills.is_some() || self.kps.is_some() || self.accuracy.is_some()
-            || self.damage.is_some() || self.ttk.is_some()
+            || self.damage.is_some() || self.spm.is_some() || self.ttk.is_some()
     }
 }
 
@@ -58,6 +61,9 @@ pub struct AppSettings {
     /// Path to KovaaK's stats directory.
     pub stats_dir: String,
     /// Screen region for score OCR (set via setup wizard).
+    /// Deprecated — kept only so old settings.json files can be deserialized.
+    /// On startup this is migrated into `stats_field_regions.spm` and cleared.
+    #[serde(default, skip_serializing)]
     pub region: Option<RegionRect>,
     /// OCR poll rate in milliseconds.
     pub ocr_poll_ms: u64,

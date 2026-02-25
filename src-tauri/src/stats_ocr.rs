@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use once_cell::sync::Lazy;
 use tauri::{AppHandle, Emitter};
 
-use crate::settings::{RegionRect, StatsFieldRegions};
+use crate::settings::StatsFieldRegions;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -317,11 +317,16 @@ fn poll_loop(app: AppHandle) {
         if let Some(text) = capture_field!(field_regions.ttk, "ttk") {
             reading.ttk_secs = parse_ttk_field(&text);
         }
+        if let Some(text) = capture_field!(field_regions.spm, "spm") {
+            reading.spm = parse_spm_field(&text);
+        }
 
-        // Inject live SPM from the score OCR — it already reads the SPM counter
-        // at high frequency so we don't need a dedicated region for it.
+        // Inject live SPM from the score OCR only when no dedicated SPM region
+        // is configured — the field region (when present) is more reliable.
         let live_spm = crate::ocr::get_current_spm();
-        reading.spm = live_spm;
+        if reading.spm.is_none() {
+            reading.spm = live_spm;
+        }
 
         // If every individual capture returned an Err AND we have no SPM, the
         // game is probably not showing stats — pause mouse tracking.
@@ -390,6 +395,12 @@ fn poll_loop(app: AppHandle) {
 
 fn parse_kills_field(text: &str) -> Option<u32> {
     // Kill count is a plain integer, possibly thousands-formatted ("1,234").
+    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
+    digits.parse::<u32>().ok()
+}
+
+fn parse_spm_field(text: &str) -> Option<u32> {
+    // SPM is a plain integer (score per minute), same format as kill count.
     let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
     digits.parse::<u32>().ok()
 }

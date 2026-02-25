@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import type { AppSettings, RegionRect, StatsFieldRegions } from "../types/stats";
+import { listen } from "@tauri-apps/api/event";
+import type { AppSettings, RegionRect, StatsFieldRegions } from "../types/settings";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -10,7 +11,7 @@ interface OverlayOrigin {
   scale_factor: number;
 }
 
-type StandaloneKey = "region" | "scenario_region";
+type StandaloneKey = "scenario_region";
 type FieldKey = keyof StatsFieldRegions;
 type AnyKey = StandaloneKey | FieldKey;
 
@@ -44,20 +45,23 @@ interface DragState {
 
 interface Props {
   onComplete: () => void;
+  onStartAutoSetup?: () => void;
+}
+
+interface AutoSetupProgressPayload {
+  confirmed: string[];
+  total: number;
+}
+
+interface AutoSetupCompletePayload {
+  regions: StatsFieldRegions;
+  scenario_region: RegionRect | null;
+  confirmed_count: number;
 }
 
 // ─── Region definitions ────────────────────────────────────────────────────────
 
 const STANDALONE_DEFS: StandaloneDef[] = [
-  {
-    kind: "standalone",
-    key: "region",
-    label: "Live Score",
-    description: "Drag over the SPM / score counter in the KovaaK's HUD",
-    command: "set_region",
-    color: "#00f5a0",
-    colorBg: "rgba(0,245,160,0.07)",
-  },
   {
     kind: "standalone",
     key: "scenario_region",
@@ -110,6 +114,14 @@ const FIELD_DEFS: FieldDef[] = [
     color: "#34d399",
     colorBg: "rgba(52,211,153,0.07)",
   },
+  {
+    kind: "field",
+    key: "spm",
+    label: "SPM",
+    description: "Drag over the score-per-minute value (e.g. '12,345')",
+    color: "#60a5fa",
+    colorBg: "rgba(96,165,250,0.07)",
+  },
 ];
 
 const ALL_DEFS: RegionDef[] = [...STANDALONE_DEFS, ...FIELD_DEFS];
@@ -120,7 +132,7 @@ function defByKey(key: AnyKey): RegionDef {
 
 // ─── Component ─────────────────────────────────────────────────────────────────
 
-export function UnifiedRegionPicker({ onComplete }: Props) {
+export function UnifiedRegionPicker({ onComplete, onStartAutoSetup }: Props) {
   const [origin, setOrigin] = useState<OverlayOrigin>({
     x: 0,
     y: 0,
@@ -128,13 +140,17 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
   });
   const [savedStandalone, setSavedStandalone] = useState<Partial<Record<StandaloneKey, RegionRect>>>({});
   const [savedFields, setSavedFields] = useState<StatsFieldRegions>({
-    kills: null, kps: null, accuracy: null, damage: null, ttk: null,
+    kills: null, kps: null, accuracy: null, damage: null, ttk: null, spm: null,
   });
   const [activeKey, setActiveKey] = useState<AnyKey | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [justSaved, setJustSaved] = useState<AnyKey | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Auto-setup: background polling mode shown when no fields are configured yet
+  const [autoSetupMode, setAutoSetupMode] = useState(false);
+  const [confirmedSetupFields, setConfirmedSetupFields] = useState<Set<FieldKey>>(new Set());
+  const [autoSetupDone, setAutoSetupDone] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Load origin + current settings on mount
@@ -146,21 +162,64 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
     invoke<AppSettings>("get_settings")
       .then(s => {
         const standalone: Partial<Record<StandaloneKey, RegionRect>> = {};
-        if (s.region) standalone.region = s.region;
         if (s.scenario_region) standalone.scenario_region = s.scenario_region;
         setSavedStandalone(standalone);
-        if (s.stats_field_regions) {
+        const sfr = s.stats_field_regions;
+        const allNull = !sfr || (!sfr.kills && !sfr.kps && !sfr.accuracy && !sfr.damage && !sfr.ttk && !sfr.spm);
+        if (!allNull) {
           setSavedFields({
-            kills: s.stats_field_regions.kills ?? null,
-            kps: s.stats_field_regions.kps ?? null,
-            accuracy: s.stats_field_regions.accuracy ?? null,
-            damage: s.stats_field_regions.damage ?? null,
-            ttk: s.stats_field_regions.ttk ?? null,
+            kills: sfr.kills ?? null,
+            kps: sfr.kps ?? null,
+            accuracy: sfr.accuracy ?? null,
+            damage: sfr.damage ?? null,
+            ttk: sfr.ttk ?? null,
+            spm: sfr.spm ?? null,
           });
         }
+        setAutoSetupMode(allNull);
       })
       .catch(console.error);
   }, []);
+
+  // ── Auto-setup background polling ────────────────────────────────────────
+
+  useEffect(() => {
+    if (!autoSetupMode) {
+      invoke("stop_auto_setup").catch(console.error);
+      return;
+    }
+
+    invoke("start_auto_setup").catch(console.error);
+
+    const progressUnsub = listen<AutoSetupProgressPayload>("auto-setup-progress", e => {
+      setConfirmedSetupFields(new Set(e.payload.confirmed as FieldKey[]));
+    });
+    const completeUnsub = listen<AutoSetupCompletePayload>("auto-setup-complete", e => {
+      const { regions } = e.payload;
+      setSavedFields({
+        kills: regions.kills ?? null,
+        kps: regions.kps ?? null,
+        accuracy: regions.accuracy ?? null,
+        damage: regions.damage ?? null,
+        ttk: regions.ttk ?? null,
+        spm: regions.spm ?? null,
+      });
+      invoke("set_stats_field_regions", { regions }).catch(console.error);
+      if (e.payload.scenario_region) {
+        setSavedStandalone(prev => ({ ...prev, scenario_region: e.payload.scenario_region! }));
+        invoke("set_scenario_region", { region: e.payload.scenario_region }).catch(console.error);
+      }
+      setConfirmedSetupFields(new Set(["kills", "kps", "accuracy", "damage", "ttk", "spm"] as FieldKey[]));
+      setAutoSetupDone(true);
+      setTimeout(() => onComplete(), 3000);
+    });
+
+    return () => {
+      progressUnsub.then(fn => fn());
+      completeUnsub.then(fn => fn());
+      invoke("stop_auto_setup").catch(console.error);
+    };
+  }, [autoSetupMode, onComplete]);
 
   // ESC: de-select active region (or close if none)
   useEffect(() => {
@@ -182,7 +241,7 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
   const activeDef = activeKey ? defByKey(activeKey) : null;
 
   function getSaved(key: AnyKey): RegionRect | null {
-    if (key === "region" || key === "scenario_region") return savedStandalone[key] ?? null;
+    if (key === "scenario_region") return savedStandalone[key] ?? null;
     return savedFields[key as FieldKey] ?? null;
   }
 
@@ -238,6 +297,13 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
       setError(String(err));
     }
   }, [isDragging, drag, activeKey, activeDef, origin, savedFields]);
+
+  const enterAutoSetup = useCallback(() => {
+    setConfirmedSetupFields(new Set());
+    setAutoSetupDone(false);
+    setError(null);
+    setAutoSetupMode(true);
+  }, []);
 
   // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -376,9 +442,138 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
         </div>
       )}
 
+      {/* Auto-setup panel — shown when no stats regions are configured yet */}
+      {autoSetupMode && (
+        <div
+          style={{
+            position: "absolute", top: "50%", left: "50%",
+            transform: "translate(-50%, -50%)",
+            background: "rgba(8,8,14,0.97)",
+            border: `1px solid ${autoSetupDone ? "rgba(52,211,153,0.3)" : "rgba(255,255,255,0.07)"}`,
+            borderRadius: 18, padding: "28px 32px", minWidth: 330,
+            fontFamily: "'JetBrains Mono', monospace",
+            pointerEvents: "auto", zIndex: 10,
+            boxShadow: "0 8px 48px rgba(0,0,0,0.7)",
+            transition: "border-color 0.5s",
+          }}
+          onMouseDown={e => e.stopPropagation()}
+        >
+          {autoSetupDone ? (
+            // ── Success state ──
+            <>
+              <div style={{ textAlign: "center", marginBottom: 6 }}>
+                <div style={{ fontSize: 36, lineHeight: 1.2, color: "#34d399", marginBottom: 10 }}>✓</div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: "#34d399", marginBottom: 6 }}>All set up!</div>
+                <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", lineHeight: 1.7, marginBottom: 22 }}>
+                  {confirmedSetupFields.size}/5 regions detected automatically.<br />
+                  Closing in a moment…
+                </div>
+              </div>
+              <button
+                onClick={onComplete}
+                style={{
+                  background: "rgba(52,211,153,0.12)", border: "1px solid rgba(52,211,153,0.3)",
+                  borderRadius: 8, color: "#34d399", cursor: "pointer",
+                  fontSize: 11, fontWeight: 700, padding: "7px 0", width: "100%",
+                  fontFamily: "inherit", outline: "none",
+                }}
+              >
+                Close now
+              </button>
+            </>
+          ) : (
+            // ── Detecting state ──
+            <>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 6 }}>
+                <span style={{
+                  display: "inline-block", width: 8, height: 8, borderRadius: "50%",
+                  background: "#fbbf24",
+                  boxShadow: "0 0 8px #fbbf24",
+                  animation: "pulse 1.8s ease-in-out infinite",
+                  flexShrink: 0,
+                }} />
+                <span style={{ fontSize: 14, fontWeight: 700, color: "#fff" }}>Setting up automatically</span>
+              </div>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", lineHeight: 1.7, marginBottom: 22 }}>
+                Open KovaaK's and start a scenario.<br />
+                Regions will lock in as they appear on screen.
+              </div>
+
+              {/* Field confirmation list */}
+              <div style={{ display: "flex", flexDirection: "column", gap: 9, marginBottom: 20 }}>
+                {FIELD_DEFS.map(def => {
+                  const done = confirmedSetupFields.has(def.key);
+                  return (
+                    <div key={def.key} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{
+                        width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
+                        border: done ? "none" : "2px solid rgba(255,255,255,0.15)",
+                        background: done ? def.color : "transparent",
+                        display: "flex", alignItems: "center", justifyContent: "center",
+                        fontSize: 10, color: "#000", fontWeight: 800,
+                        transition: "all 0.35s",
+                      }}>
+                        {done ? "✓" : ""}
+                      </div>
+                      <span style={{
+                        fontSize: 12,
+                        color: done ? def.color : "rgba(255,255,255,0.38)",
+                        transition: "color 0.35s",
+                      }}>
+                        {def.label}
+                      </span>
+                      {!done && (
+                        <span style={{ fontSize: 9, color: "rgba(255,255,255,0.18)", marginLeft: "auto" }}>
+                          waiting…
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Progress bar */}
+              <div style={{ height: 3, background: "rgba(255,255,255,0.07)", borderRadius: 2, marginBottom: 20 }}>
+                <div style={{
+                  height: "100%", borderRadius: 2,
+                  background: "linear-gradient(90deg, #fbbf24, #34d399)",
+                  width: `${(confirmedSetupFields.size / 5) * 100}%`,
+                  transition: "width 0.5s ease",
+                }} />
+              </div>
+
+              <button
+                onClick={() => {
+                  invoke("stop_auto_setup").catch(console.error);
+                  setAutoSetupMode(false);
+                }}
+                style={{
+                  background: "none", border: "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 8, color: "rgba(255,255,255,0.3)",
+                  cursor: "pointer", fontSize: 10, padding: "6px 0", width: "100%",
+                  fontFamily: "inherit", outline: "none",
+                  transition: "color 0.15s, border-color 0.15s",
+                }}
+                onMouseEnter={e => {
+                  (e.target as HTMLButtonElement).style.color = "rgba(255,255,255,0.6)";
+                  (e.target as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.25)";
+                }}
+                onMouseLeave={e => {
+                  (e.target as HTMLButtonElement).style.color = "rgba(255,255,255,0.3)";
+                  (e.target as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.1)";
+                }}
+              >
+                Set up manually instead
+              </button>
+            </>
+          )}
+        </div>
+      )}
+
       {/* ── Bottom toolbar ──────────────────────────────────────────────────── */}
-      <div
-        className="absolute"
+      {!autoSetupMode && (
+        <div
+          className="absolute"
         style={{
           bottom: 24, left: "50%", transform: "translateX(-50%)",
           display: "flex", alignItems: "center", gap: 6,
@@ -410,6 +605,25 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
         {/* Divider */}
         <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
 
+        {/* Auto Setup */}
+        <button
+          onClick={() => onStartAutoSetup ? onStartAutoSetup() : enterAutoSetup()}
+          style={{
+            background: "rgba(251,191,36,0.07)",
+            border: "1px solid rgba(251,191,36,0.28)",
+            borderRadius: 7, cursor: "pointer",
+            fontSize: 11, padding: "5px 13px",
+            fontFamily: "inherit", outline: "none", transition: "all 0.15s",
+            display: "flex", alignItems: "center", gap: 5,
+            color: "rgba(251,191,36,0.85)",
+          }}
+        >
+          Auto Setup
+        </button>
+
+        {/* Divider */}
+        <div style={{ width: 1, height: 20, background: "rgba(255,255,255,0.1)", margin: "0 2px" }} />
+
         {/* Done */}
         <button
           onClick={onComplete}
@@ -422,6 +636,7 @@ export function UnifiedRegionPicker({ onComplete }: Props) {
           Done
         </button>
       </div>
+      )}
     </div>
   );
 }
