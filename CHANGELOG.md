@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/veryCrunchy/kovaaks/compare/v0.3.0...v0.4.0) (2026-02-25)
+
+
+### Features
+
+* add README with features, installation instructions, and screenshots; update kovaaks-overlay version to 0.2.3 ([ba8b69b](https://github.com/veryCrunchy/kovaaks/commit/ba8b69b53218272c7c348bd8f9a898b6e3f95085))
+
+
+### Bug Fixes
+
+* explicitly pass --target to tauri-action so updater sig is found ([bcf9319](https://github.com/veryCrunchy/kovaaks/commit/bcf9319060803047f0aa782b167b8b86aecf41e9))
+
 ## [0.3.0](https://github.com/veryCrunchy/kovaaks/compare/v0.2.3...v0.3.0) (2026-02-25)
 
 
