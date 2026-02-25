@@ -1,0 +1,57 @@
+name: Dev Build
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  dev-build:
+    # Skip when release-please just bumped the version — the release workflow handles that build.
+    if: "!startsWith(github.event.head_commit.message, 'chore(main): release')"
+    permissions:
+      contents: write
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install sccache
+        uses: mozilla-actions/sccache-action@v0.0.6
+
+      - name: Rust build cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install frontend dependencies
+        run: pnpm install
+
+      - name: Build and publish dev pre-release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: dev
+          releaseName: "KovaaK's Overlay (dev)"
+          releaseBody: "Latest build from main — ${{ github.sha }}"
+          releaseDraft: false
+          prerelease: true
+          # Do not overwrite the stable updater JSON with dev builds
+          uploadUpdaterJson: false
+          args: --features ocr --target x86_64-pc-windows-msvc
