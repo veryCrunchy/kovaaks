@@ -146,6 +146,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
       try {
         await invoke("set_selected_friend", { username: next });
         setSelectedOpponent(next);
+        onChange({ ...settings, selected_friend: next });
         showSuccess(next ? `${next} set as battle opponent` : "Opponent cleared");
       } catch (e) {
         setError(String(e));
