@@ -133,9 +133,18 @@ pub(crate) fn ocr_normalize(s: &str) -> String {
 /// Extract the scenario name from a KovaaK's stats filename stem.
 ///   `"Aimlabs Gridshot Easy - Challenge Start - 2024.01.15-12.30.45"`
 ///   → `Some("Aimlabs Gridshot Easy")`
+///   `"VT PGT Novice S5 - Challenge - 2026.02.25-15.38.34"`
+///   → `Some("VT PGT Novice S5")`
 fn extract_scenario_name(stem: &str) -> Option<String> {
-    const MARKER: &str = " - Challenge Start - ";
-    stem.find(MARKER)
-        .map(|idx| stem[..idx].trim().to_string())
-        .filter(|s| !s.is_empty())
+    // Try both common filename variants; longer marker first.
+    const MARKERS: &[&str] = &[" - Challenge Start - ", " - Challenge - "];
+    for marker in MARKERS {
+        if let Some(idx) = stem.find(marker) {
+            let name = stem[..idx].trim().to_string();
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+    None
 }

@@ -1,4 +1,3 @@
-mod auto_setup;
 mod file_watcher;
 mod kovaaks_api;
 mod logger;
@@ -6,7 +5,6 @@ mod mouse_hook;
 mod ocr;
 mod sapi;
 mod scenario_index;
-mod screen_recorder;
 mod session_store;
 mod settings;
 mod stats_ocr;
@@ -24,6 +22,26 @@ pub use settings::{AppSettings, FriendProfile};
 /// Global app state accessible from Tauri commands.
 pub struct AppState {
     pub settings: Arc<Mutex<AppSettings>>,
+}
+
+// ─── Auto-setup state ─────────────────────────────────────────────────────────
+
+static AUTO_SETUP_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const EVENT_AUTO_SETUP_PROGRESS: &str = "auto-setup-progress";
+const EVENT_AUTO_SETUP_COMPLETE: &str = "auto-setup-complete";
+
+#[derive(serde::Serialize, Clone)]
+struct AutoSetupProgress {
+    confirmed: Vec<String>,
+    total: usize,
+}
+
+#[derive(serde::Serialize, Clone)]
+struct AutoSetupComplete {
+    regions: settings::StatsFieldRegions,
+    confirmed_count: usize,
 }
 
 // ─── Monitor helpers ──────────────────────────────────────────────────────────
@@ -75,22 +93,13 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     let monitor = monitors.get(index).or_else(|| monitors.first());
     let Some(m) = monitor else { return };
 
-    let pos  = m.position();
-    let size = m.size();
-    let sf   = m.scale_factor();
+    let pos = m.position();
+    let sf = m.scale_factor();
     let logical_pos = pos.to_logical::<f64>(sf);
 
     let _ = win.set_fullscreen(false);
     let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
     let _ = win.set_fullscreen(true);
-
-    // Update screen recorder's centre-crop rect for this monitor
-    screen_recorder::update_monitor_rect(&settings::RegionRect {
-        x:      pos.x,
-        y:      pos.y,
-        width:  size.width,
-        height: size.height,
-    });
 }
 
 // ─── Tauri Commands ────────────────────────────────────────────────────────────
@@ -148,7 +157,7 @@ fn save_settings(
     *s = new_settings.clone();
     settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
     file_watcher::restart(&app, &new_settings.stats_dir);
-    ocr::update_region(&app, new_settings.stats_field_regions.spm);
+    ocr::update_region(&app, new_settings.region);
     ocr::update_scenario_region(new_settings.scenario_region);
     ocr::update_poll_ms(new_settings.ocr_poll_ms);
     mouse_hook::set_dpi(new_settings.mouse_dpi);
@@ -200,8 +209,6 @@ fn set_stats_field_regions(
     drop(s);
     settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     stats_ocr::update_field_regions(cloned.stats_field_regions);
-    // Keep the legacy OCR loop (session-start detection) pointed at the SPM region.
-    ocr::update_region(&app, cloned.stats_field_regions.spm);
     Ok(())
 }
 
@@ -373,22 +380,6 @@ fn get_session_mouse_data() -> Vec<mouse_hook::MetricPoint> {
     mouse_hook::drain_session_buffer()
 }
 
-/// Return all downsampled raw cursor positions recorded during the last session
-/// and clear the internal buffer.  Used by the frontend to render the mouse-path
-/// playback/visualisation in the Smoothness Report.
-#[tauri::command]
-fn get_session_raw_positions() -> Vec<mouse_hook::RawPositionPoint> {
-    mouse_hook::drain_raw_positions()
-}
-
-/// Return centre-crop JPEG frames recorded during the last session (5 fps,
-/// ≤320 px wide, quality 20) and clear the internal buffer.
-/// Returns an empty Vec when screen recording is not available.
-#[tauri::command]
-fn get_session_screen_frames() -> Vec<screen_recorder::ScreenFrame> {
-    screen_recorder::drain_frames()
-}
-
 #[tauri::command]
 fn get_monitors(app: AppHandle) -> Vec<MonitorInfo> {
     let Some(win) = app.get_webview_window("overlay") else {
@@ -521,19 +512,6 @@ fn get_capture_preview() -> Option<Vec<u8>> {
     ocr::get_capture_png()
 }
 
-/// Bring KovaaK's game window to the foreground so the user can start playing
-/// immediately after triggering auto-setup from the overlay.
-#[tauri::command]
-fn focus_game_window() {
-    #[cfg(all(target_os = "windows", feature = "ocr"))]
-    {
-        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
-        if let Some(hwnd) = window_tracker::get_game_hwnd() {
-            unsafe { let _ = SetForegroundWindow(hwnd); }
-        }
-    }
-}
-
 #[tauri::command]
 fn set_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("overlay") {
@@ -544,6 +522,367 @@ fn set_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
     // even if KovaaK's isn't the foreground window.
     window_tracker::set_force_show(!enabled);
     Ok(())
+}
+
+/// Start the background auto-setup loop which continuously captures the screen
+/// and automatically detects KovaaK's stats panel field regions.
+/// Emits `auto-setup-progress` periodically and `auto-setup-complete` when all
+/// 5 fields are confirmed (3 consistent detections each).
+#[tauri::command]
+fn start_auto_setup(
+    state: tauri::State<AppState>,
+    app: AppHandle,
+) -> Result<(), String> {
+    if AUTO_SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return Ok(()); // already running
+    }
+    let monitor_index = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.monitor_index
+    };
+    let monitor_rect = resolve_monitor_rect(&app, monitor_index)?;
+    let app_clone = app.clone();
+    std::thread::Builder::new()
+        .name("auto-setup".into())
+        .spawn(move || auto_setup_loop(app_clone, monitor_rect))
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Stop the background auto-setup loop started by `start_auto_setup`.
+#[tauri::command]
+fn stop_auto_setup() {
+    AUTO_SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Background loop for timed auto-setup.
+///
+/// Polls at POLL_INTERVAL, runs full-screen OCR word detection, and accumulates
+/// per-field results across frames.  A field is "confirmed" after CONFIRM_THRESHOLD
+/// consecutive detections that agree within TOLERANCE pixels.  Once all 5 fields
+/// are confirmed (or the loop is stopped), emits `auto-setup-complete`.
+fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
+    use std::collections::HashMap;
+    use std::sync::atomic::Ordering;
+    use std::time::Duration;
+
+    const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+    const CONFIRM_THRESHOLD: u32 = 3;
+    const TOLERANCE: i32 = 12;
+    const TOTAL: usize = 5;
+
+    struct Candidate {
+        rect: settings::RegionRect,
+        consecutive: u32,
+    }
+
+    let field_keys: [&str; TOTAL] = ["kills", "kps", "accuracy", "damage", "ttk"];
+    let mut candidates: HashMap<&str, Candidate> = HashMap::new();
+    let mut confirmed_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut confirmed_regions = settings::StatsFieldRegions::default();
+
+    log::info!(
+        "auto-setup: started — monitor ({},{}) {}×{}",
+        monitor_rect.x, monitor_rect.y, monitor_rect.width, monitor_rect.height,
+    );
+
+    while AUTO_SETUP_RUNNING.load(Ordering::SeqCst) {
+        std::thread::sleep(POLL_INTERVAL);
+        if !AUTO_SETUP_RUNNING.load(Ordering::SeqCst) { break; }
+
+        let words = match ocr::capture_screen_words(&monitor_rect) {
+            Ok(w) => w,
+            Err(e) => { log::debug!("auto-setup: capture failed: {e}"); continue; }
+        };
+        log::debug!("auto-setup: OCR returned {} words", words.len());
+        if log::log_enabled!(log::Level::Trace) {
+            for w in words.iter().take(40) {
+                log::trace!("auto-setup: word {:?} at ({},{}) {}×{}", w.text, w.x, w.y, w.width, w.height);
+            }
+        }
+
+        let detected = detect_field_regions_from_words(&words, &monitor_rect);
+        let detected_per_field: [(&str, Option<settings::RegionRect>); TOTAL] = [
+            ("kills",    detected.kills),
+            ("kps",      detected.kps),
+            ("accuracy", detected.accuracy),
+            ("damage",   detected.damage),
+            ("ttk",      detected.ttk),
+        ];
+
+        for (field, maybe_rect) in detected_per_field {
+            if confirmed_set.contains(field) { continue; }
+            if let Some(rect) = maybe_rect {
+                let newly_confirmed = match candidates.get(field) {
+                    None => {
+                        candidates.insert(field, Candidate { rect, consecutive: 1 });
+                        false
+                    }
+                    Some(c) if rects_close(&c.rect, &rect, TOLERANCE) => {
+                        let n = c.consecutive + 1;
+                        candidates.insert(field, Candidate { rect: c.rect, consecutive: n });
+                        n >= CONFIRM_THRESHOLD
+                    }
+                    _ => {
+                        candidates.insert(field, Candidate { rect, consecutive: 1 });
+                        false
+                    }
+                };
+                if newly_confirmed {
+                    let r = candidates[field].rect;
+                    log::info!("auto-setup: confirmed {} ({},{}) {}×{}", field, r.x, r.y, r.width, r.height);
+                    confirmed_set.insert(field);
+                    match field {
+                        "kills"    => confirmed_regions.kills    = Some(r),
+                        "kps"      => confirmed_regions.kps      = Some(r),
+                        "accuracy" => confirmed_regions.accuracy = Some(r),
+                        "damage"   => confirmed_regions.damage   = Some(r),
+                        "ttk"      => confirmed_regions.ttk      = Some(r),
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let confirmed_list: Vec<String> =
+            field_keys.iter().filter(|&&k| confirmed_set.contains(k)).map(|s| s.to_string()).collect();
+        let _ = app.emit(EVENT_AUTO_SETUP_PROGRESS, AutoSetupProgress {
+            confirmed: confirmed_list,
+            total: TOTAL,
+        });
+
+        if confirmed_set.len() == TOTAL {
+            log::info!("auto-setup: all {} fields confirmed — saving", TOTAL);
+            AUTO_SETUP_RUNNING.store(false, Ordering::SeqCst);
+            let _ = app.emit(EVENT_AUTO_SETUP_COMPLETE, AutoSetupComplete {
+                regions: confirmed_regions,
+                confirmed_count: TOTAL,
+            });
+            break;
+        }
+    }
+    log::info!("auto-setup: stopped ({}/{} confirmed)", confirmed_set.len(), TOTAL);
+}
+
+/// Automatically detect KovaaK's stats panel field regions by capturing the
+/// monitor and matching known label strings in the full-screen OCR word list.
+///
+/// Returns a `StatsFieldRegions` with every field that could be located.
+/// Fields that are not found are returned as `None` so the caller can decide
+/// whether to keep existing manual regions for those fields.
+#[tauri::command]
+fn auto_detect_stats_regions(
+    state: tauri::State<AppState>,
+    app: AppHandle,
+) -> Result<settings::StatsFieldRegions, String> {
+    let monitor_index = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.monitor_index
+    };
+    let monitor_rect = resolve_monitor_rect(&app, monitor_index)?;
+    log::info!(
+        "auto_detect: capturing monitor {} at ({},{}) {}×{}",
+        monitor_index, monitor_rect.x, monitor_rect.y,
+        monitor_rect.width, monitor_rect.height,
+    );
+
+    let words = ocr::capture_screen_words(&monitor_rect).map_err(|e| e.to_string())?;
+    log::info!("auto_detect: OCR returned {} words", words.len());
+
+    Ok(detect_field_regions_from_words(&words, &monitor_rect))
+}
+
+// ─── Auto-detect helpers ───────────────────────────────────────────────────────
+
+/// Returns the physical screen rectangle for the given monitor index.
+/// Falls back to the first monitor if the index is out of range.
+fn resolve_monitor_rect(app: &AppHandle, monitor_index: usize) -> Result<settings::RegionRect, String> {
+    let win = app
+        .get_webview_window("overlay")
+        .ok_or_else(|| "overlay window not found".to_string())?;
+    let monitors = win.available_monitors().map_err(|e| e.to_string())?;
+    let m = monitors
+        .get(monitor_index)
+        .or_else(|| monitors.first())
+        .ok_or_else(|| "no monitors found".to_string())?;
+    let pos = m.position();
+    let size = m.size();
+    Ok(settings::RegionRect { x: pos.x, y: pos.y, width: size.width, height: size.height })
+}
+
+/// Check whether two `RegionRect`s are within `tolerance` pixels on all four edges.
+fn rects_close(a: &settings::RegionRect, b: &settings::RegionRect, tolerance: i32) -> bool {
+    (a.x - b.x).abs() <= tolerance
+        && (a.y - b.y).abs() <= tolerance
+        && (a.width as i32 - b.width as i32).abs() <= tolerance
+        && (a.height as i32 - b.height as i32).abs() <= tolerance
+}
+
+/// Axis-aligned bounding box (capture-image pixel coordinates).
+#[derive(Clone, Debug)]
+struct BBox {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl BBox {
+    fn right(&self) -> i32 { self.x + self.width as i32 }
+    fn bottom(&self) -> i32 { self.y + self.height as i32 }
+    fn centre_y(&self) -> i32 { self.y + self.height as i32 / 2 }
+
+    /// Smallest box containing both `self` and `other`.
+    fn union(&self, other: &BBox) -> BBox {
+        let x1 = self.x.min(other.x);
+        let y1 = self.y.min(other.y);
+        let x2 = self.right().max(other.right());
+        let y2 = self.bottom().max(other.bottom());
+        BBox { x: x1, y: y1, width: (x2 - x1) as u32, height: (y2 - y1) as u32 }
+    }
+}
+
+fn word_to_bbox(w: &ocr::OcrWordResult) -> BBox {
+    BBox { x: w.x, y: w.y, width: w.width, height: w.height }
+}
+
+/// Search `words` for a label composed of one or more tokens (case-insensitive).
+/// For multi-word labels (e.g. `["Kill", "Count"]`) we verify that the later tokens
+/// appear within 5 positions of the first and on the same row (centre_y within 20 px).
+/// Returns the union bounding box of all matched label words.
+fn find_label_in_words(words: &[ocr::OcrWordResult], tokens: &[&str]) -> Option<BBox> {
+    if tokens.is_empty() || words.is_empty() {
+        return None;
+    }
+    'outer: for start in 0..words.len() {
+        if !words[start].text.eq_ignore_ascii_case(tokens[0]) {
+            continue;
+        }
+        let mut bbox = word_to_bbox(&words[start]);
+        let row_cy = bbox.centre_y();
+        for (ti, &tok) in tokens.iter().enumerate().skip(1) {
+            let mut found = false;
+            let end = (start + ti + 5).min(words.len());
+            for wi in (start + ti)..end {
+                let cand = &words[wi];
+                if cand.text.eq_ignore_ascii_case(tok)
+                    && (word_to_bbox(cand).centre_y() - row_cy).abs() < 20
+                {
+                    bbox = bbox.union(&word_to_bbox(cand));
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                continue 'outer;
+            }
+        }
+        return Some(bbox);
+    }
+    None
+}
+
+/// Find the value region for a detected label box.
+///
+/// Strategy: scan all OCR words that are
+///   • on the same horizontal row as the label (centre_y within `label.height` pixels), and
+///   • to the right of the label's right edge, and
+///   • contain at least one ASCII digit (the value itself).
+///
+/// Returns the union of all matching words, or `None` if no digit word is found.
+fn find_value_box(words: &[ocr::OcrWordResult], label_box: &BBox) -> Option<BBox> {
+    let row_cy = label_box.centre_y();
+    let row_tolerance = (label_box.height as i32).max(12);
+
+    let mut combined: Option<BBox> = None;
+    for w in words {
+        let wb = word_to_bbox(w);
+        // Right of the label
+        if wb.x < label_box.right() - 4 {
+            continue;
+        }
+        // Same row
+        if (wb.centre_y() - row_cy).abs() > row_tolerance {
+            continue;
+        }
+        // Must contain at least one digit
+        if !w.text.chars().any(|c| c.is_ascii_digit()) {
+            continue;
+        }
+        combined = Some(match combined {
+            Some(acc) => acc.union(&wb),
+            None => wb,
+        });
+    }
+    combined
+}
+
+/// Match OCR words against all known KovaaK's stats panel labels and assemble
+/// absolute `RegionRect`s (screen coordinates) for each found field.
+///
+/// Each field has a primary label and zero or more fallback alternatives; the
+/// first matching alternative wins.  This handles variations in how KovaaK's
+/// renders the stats panel text (e.g. "Kills" vs "Kill Count", "K/s" vs "KPS").
+fn detect_field_regions_from_words(
+    words: &[ocr::OcrWordResult],
+    capture_rect: &settings::RegionRect,
+) -> settings::StatsFieldRegions {
+    // Each entry: (field_name, list-of-alternative-token-sequences)
+    const LABELS: &[(&str, &[&[&str]])] = &[
+        ("kills",    &[&["Kill", "Count"], &["Kills"], &["Kill"]]),
+        ("kps",      &[&["KPS"], &["K/s"], &["Kills/s"], &["k/s"]]),
+        ("accuracy", &[&["Accuracy"], &["Acc"]]),
+        ("damage",   &[&["Damage"], &["Damage", "Dealt"], &["Dmg"]]),
+        ("ttk",      &[&["Avg", "TTK"], &["TTK"], &["Avg", "Time"]]),
+    ];
+
+    if log::log_enabled!(log::Level::Debug) && !words.is_empty() {
+        let sample: Vec<&str> = words.iter().take(30).map(|w| w.text.as_str()).collect();
+        log::debug!("auto_detect: {} words, first 30: {:?}", words.len(), sample);
+    } else if words.is_empty() {
+        log::debug!("auto_detect: OCR returned 0 words — is KovaaK's visible and running?");
+    }
+
+    let mut out = settings::StatsFieldRegions::default();
+    const PAD: i32 = 6; // padding added on every side (physical pixels)
+
+    for &(field, alternatives) in LABELS {
+        let mut found_label: Option<BBox> = None;
+        for &tokens in alternatives {
+            if let Some(lb) = find_label_in_words(words, tokens) {
+                found_label = Some(lb);
+                break;
+            }
+        }
+        let Some(label_box) = found_label else {
+            log::debug!("auto_detect: label for '{}' not found (tried all alternatives)", field);
+            continue;
+        };
+        let Some(val_box) = find_value_box(words, &label_box) else {
+            log::debug!("auto_detect: value for '{}' not found", field);
+            continue;
+        };
+
+        let r = settings::RegionRect {
+            x: capture_rect.x + (val_box.x - PAD).max(0),
+            y: capture_rect.y + (val_box.y - PAD).max(0),
+            width: (val_box.width as i32 + PAD * 2) as u32,
+            height: (val_box.height as i32 + PAD * 2) as u32,
+        };
+        log::info!(
+            "auto_detect: {} → ({},{}) {}×{}",
+            field, r.x, r.y, r.width, r.height,
+        );
+        match field {
+            "kills"    => out.kills    = Some(r),
+            "kps"      => out.kps      = Some(r),
+            "accuracy" => out.accuracy = Some(r),
+            "damage"   => out.damage   = Some(r),
+            "ttk"      => out.ttk      = Some(r),
+            _ => {}
+        }
+    }
+    out
 }
 
 // ─── App Entry Point ───────────────────────────────────────────────────────────
@@ -590,8 +929,6 @@ pub fn run() {
             start_mouse_hook,
             stop_mouse_hook,
             get_session_mouse_data,
-            get_session_raw_positions,
-            get_session_screen_frames,
             toggle_settings,
             toggle_overlay,
             set_mouse_passthrough,
@@ -599,14 +936,11 @@ pub fn run() {
             set_overlay_monitor,
             get_capture_preview,
             get_cursor_pos,
-            focus_game_window,
             open_speech_settings,
             open_natural_voices_store,
-            auto_setup::auto_detect_stats_regions,
-            auto_setup::start_auto_setup,
-            auto_setup::stop_auto_setup,
-            auto_setup::force_confirm_field,
-            auto_setup::force_reject_field,
+            auto_detect_stats_regions,
+            start_auto_setup,
+            stop_auto_setup,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
         ])
@@ -628,6 +962,11 @@ pub fn run() {
             logger::register_app(app.handle().clone());
             log::info!("KovaaK's Overlay starting up — log file: {}", logger::log_file_path().display());
 
+            // Migrate legacy session names: strip " - Challenge" / " - Challenge Start"
+            // suffixes that were incorrectly included before parse_filename was fixed.
+            // TODO(future): remove after a few releases (added 2026-02-25).
+            session_store::migrate_session_names(app.handle());
+
             // Start file watcher
             file_watcher::start(app.handle().clone(), &loaded.stats_dir);
 
@@ -637,28 +976,9 @@ pub fn run() {
             mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
             mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
 
-            // Migrate legacy `region` → `stats_field_regions.spm` once.
-            // Old settings.json files included a `region` field used as the SPM
-            // region.  If we find it and `spm` is not yet configured, copy it over
-            // and persist so the migration only runs once.
-            let loaded = if loaded.region.is_some() && loaded.stats_field_regions.spm.is_none() {
-                let mut migrated = loaded.clone();
-                migrated.stats_field_regions.spm = migrated.region.take();
-                log::info!("Migrated legacy `region` → `stats_field_regions.spm`");
-                let _ = settings::persist(app.handle(), &migrated);
-                {
-                    let state = app.state::<AppState>();
-                    let mut s = state.settings.lock().unwrap();
-                    *s = migrated.clone();
-                }
-                migrated
-            } else {
-                loaded
-            };
-
-            // Start OCR (drives session-start events using the SPM region)
+            // Start OCR (begins reading SPM once a region is configured)
             ocr::update_scenario_region(loaded.scenario_region);
-            ocr::start(app.handle().clone(), loaded.stats_field_regions.spm, loaded.ocr_poll_ms);
+            ocr::start(app.handle().clone(), loaded.region, loaded.ocr_poll_ms);
 
             // Start stats-panel OCR
             stats_ocr::update_field_regions(loaded.stats_field_regions);

@@ -122,8 +122,9 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             let smoothness = crate::mouse_hook::session_summary();
                             // Capture stats-panel snapshot before deactivating
                             let stats_panel = crate::stats_ocr::get_snapshot();
-                            // Stop smoothness tracking and reset OCR session state
+                            // Stop smoothness tracking, screen recording, and OCR session state
                             crate::mouse_hook::stop_session_tracking();
+                            crate::screen_recorder::stop();
                             crate::stats_ocr::set_active(false);
                             crate::ocr::reset_session();
                             // Persist to session history
@@ -295,22 +296,42 @@ fn time_str_to_secs(s: &str) -> Option<f64> {
 ///   `{Scenario} - Challenge Start - {YYYY.MM.DD-HH.mm.ss}`
 ///   `{Scenario} - Challenge - {YYYY.MM.DD-HH.mm.ss} Stats`
 ///
-/// Strategy: locate the timestamp by its fixed numeric pattern, then strip
-/// the ` - <label> - ` separator that precedes it.
+/// Strategy: locate the timestamp, strip the ` - <label> - ` separator that
+/// precedes it, then strip any remaining challenge-mode suffix so that the
+/// returned name matches the actual scenario title (not the file variant).
 fn parse_filename(stem: &str) -> (String, String) {
     if let Some(ts_start) = find_timestamp(stem) {
         let timestamp = stem[ts_start..ts_start + 19].to_string();
         // Everything before the timestamp, then rfind the last " - " separator.
         let prefix = &stem[..ts_start];
-        let scenario = match prefix.rfind(" - ") {
+        let after_sep = match prefix.rfind(" - ") {
             Some(sep) => stem[..sep].to_string(),
             None => prefix.trim_end_matches([' ', '-']).to_string(),
         };
+        // Strip any challenge-mode qualifier that is part of the filename but
+        // not the actual scenario name, e.g. " - Challenge Start" or " - Challenge".
+        let scenario = strip_challenge_suffix(&after_sep);
         (scenario, timestamp)
     } else {
         // No timestamp found — return the whole stem unchanged.
         (stem.to_string(), String::new())
     }
+}
+
+/// Remove trailing KovaaK's file-variant suffixes from a parsed scenario name.
+/// Order matters: longer/more-specific first.
+pub fn strip_challenge_suffix(name: &str) -> String {
+    const SUFFIXES: &[&str] = &[
+        " - Challenge Start",
+        " - Challenge End",
+        " - Challenge",
+    ];
+    for suffix in SUFFIXES {
+        if let Some(base) = name.strip_suffix(suffix) {
+            return base.to_string();
+        }
+    }
+    name.to_string()
 }
 
 /// Return the byte offset of the first `YYYY.MM.DD-HH.mm.ss` substring, or

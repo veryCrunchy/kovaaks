@@ -142,3 +142,47 @@ pub fn clear_sessions(app: &AppHandle) {
     store.set(STORE_KEY.to_string(), serde_json::Value::Array(vec![]));
     let _ = store.save();
 }
+
+/// One-time migration: strip " - Challenge" / " - Challenge Start" suffixes
+/// from existing session `scenario` names so they match the canonical title.
+///
+/// Each record is mutated in-place and persisted only when at least one name
+/// actually changed.  The `scenario_slug` part of `id` is not touched because
+/// changing it would invalidate any external references.
+///
+/// TODO(future): remove this migration once all users have run a build that
+/// includes the fix to `parse_filename` (introduced 2026-02-25).  Safe to
+/// delete after a few releases when no old sessions.json files remain.
+pub fn migrate_session_names(app: &AppHandle) {
+    use tauri_plugin_store::StoreExt;
+    let Ok(store) = app.store(STORE_PATH) else { return };
+
+    let mut sessions: Vec<SessionRecord> = store
+        .get(STORE_KEY)
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let mut changed = 0usize;
+    for record in &mut sessions {
+        let stripped = crate::file_watcher::strip_challenge_suffix(&record.scenario);
+        if stripped != record.scenario {
+            log::info!(
+                "session migration: {:?} → {:?}",
+                record.scenario, stripped,
+            );
+            record.scenario = stripped;
+            changed += 1;
+        }
+    }
+
+    if changed > 0 {
+        log::info!("session migration: updated {} record(s)", changed);
+        store.set(
+            STORE_KEY.to_string(),
+            serde_json::to_value(&sessions).unwrap_or_default(),
+        );
+        if let Err(e) = store.save() {
+            log::warn!("session migration: save error: {e}");
+        }
+    }
+}
