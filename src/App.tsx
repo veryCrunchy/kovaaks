@@ -8,7 +8,7 @@ import { LiveFeedbackToast } from "./overlay/LiveFeedbackToast";
 import { DebugStatsOCR } from "./overlay/DebugStatsOCR";
 import { DraggableHUD } from "./overlay/DraggableHUD";
 import { PostSessionOverview } from "./overlay/PostSessionOverview";
-import type { AppSettings } from "./types/stats";
+import type { AppSettings } from "./types/settings";
 import "./index.css";
 
 // Heavy components — only loaded on demand
@@ -18,8 +18,9 @@ const Settings = lazy(() =>
 const UnifiedRegionPicker = lazy(() =>
   import("./settings/UnifiedRegionPicker").then(m => ({ default: m.UnifiedRegionPicker }))
 );
+import { AutoSetupHUD } from "./overlay/AutoSetupHUD";
 
-type Mode = "overlay" | "settings" | "region-picker" | "layout";
+type Mode = "overlay" | "settings" | "region-picker" | "layout" | "auto-setup";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("overlay");
@@ -110,9 +111,9 @@ export default function App() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // Manage mouse click-through: only active in pure overlay mode
+  // Manage mouse click-through: active in overlay and auto-setup modes
   useEffect(() => {
-    const passthrough = mode === "overlay";
+    const passthrough = mode === "overlay" || mode === "auto-setup";
     invoke("set_mouse_passthrough", { enabled: passthrough }).catch(console.error);
   }, [mode]);
 
@@ -239,6 +240,12 @@ export default function App() {
                 onClose={() => { setMode("overlay"); reloadHudVis(); }}
                 onPickRegions={() => { setReturnMode("settings"); setMode("region-picker"); }}
                 onLayoutHUDs={() => { setReturnMode("settings"); setMode("layout"); }}
+                onAutoSetup={() => {
+                  setReturnMode("settings");
+                  setMode("auto-setup");
+                  // Give focus back to KovaaK's so the user can start playing
+                  invoke("focus_game_window").catch(console.error);
+                }}
               />
             </div>
           </div>
@@ -248,8 +255,23 @@ export default function App() {
       {/* Region picker — full-screen transparent overlay so user sees the game */}
       {mode === "region-picker" && (
         <Suspense fallback={null}>
-          <UnifiedRegionPicker onComplete={() => setMode(returnMode)} />
+          <UnifiedRegionPicker
+            onComplete={() => setMode(returnMode)}
+            onStartAutoSetup={() => {
+              setMode("auto-setup");
+              invoke("focus_game_window").catch(console.error);
+            }}
+          />
         </Suspense>
+      )}
+
+      {/* Auto-setup HUD — transparent corner widget, passthrough enabled so
+          KovaaK's receives full mouse/keyboard input while detection runs. */}
+      {mode === "auto-setup" && (
+        <AutoSetupHUD
+          onComplete={() => { reloadHudVis(); setMode(returnMode); }}
+          onCancel={() => setMode(returnMode)}
+        />
       )}
     </div>
   );
