@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.1](https://github.com/veryCrunchy/kovaaks/compare/v0.6.0...v0.6.1) (2026-02-25)
+
+
+### Bug Fixes
+
+* **mouse-hook:** add Windows Raw Input support for accurate mouse tracking ([9e7e346](https://github.com/veryCrunchy/kovaaks/commit/9e7e34641331ee424198ab6bc9c4d6437ad3279d))
+
 ## [0.6.0](https://github.com/veryCrunchy/kovaaks/compare/v0.5.0...v0.6.0) (2026-02-25)
 
 
