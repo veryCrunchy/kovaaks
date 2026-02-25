@@ -35,6 +35,14 @@ export interface MouseMetrics {
    * lower values mean the cursor curved/weaved toward the target.
    */
   path_efficiency: number;
+  /** Inter-click interval coefficient of variation. 0 = perfect metronome. */
+  click_timing_cv: number;
+  /** Fraction of movement in Fitts' correction phase. Lower = more decisive. */
+  correction_ratio: number;
+  /** Systematic overshoot direction bias. 0 = balanced, 1 = always same side. */
+  directional_bias: number;
+  /** Average LMB hold duration (ms) in the last tick window. Near-zero = tapping; high = holding. */
+  avg_hold_ms: number;
 }
 
 export interface MetricPoint {
@@ -51,6 +59,8 @@ export interface SessionResult {
   kills: number;
   deaths: number;
   duration_secs: number;
+  avg_ttk?: number;
+  damage_done?: number;
   timestamp: string;
   csv_path: string;
 }
@@ -88,6 +98,14 @@ export interface RegionRect {
   height: number;
 }
 
+export interface StatsFieldRegions {
+  kills: RegionRect | null;
+  kps: RegionRect | null;
+  accuracy: RegionRect | null;
+  damage: RegionRect | null;
+  ttk: RegionRect | null;
+}
+
 export interface AppSettings {
   stats_dir: string;
   region: RegionRect | null;
@@ -95,18 +113,27 @@ export interface AppSettings {
   overlay_visible: boolean;
   username: string;
   monitor_index: number;
-  /** Friends to compare scores against (rich profiles from KovaaK's API) */
   friends: FriendProfile[];
-  /** Optional screen region for OCR-reading the scenario name at session start */
   scenario_region: RegionRect | null;
-  /** Username of the friend chosen as battle opponent in VS mode */
   selected_friend: string | null;
-  /**
-   * Mouse DPI/CPI used to normalise smoothness metrics.
-   * avg_speed is divided by (mouse_dpi / 800) so scores are comparable
-   * across different sensitivity setups. Defaults to 800.
-   */
   mouse_dpi: number;
+  /** Per-field OCR regions for the stats panel — one small region per stat. */
+  stats_field_regions: StatsFieldRegions;
+  /** Whether live coaching notifications are shown during sessions. */
+  live_feedback_enabled: boolean;
+  /** Verbosity: 0=minimal, 1=standard, 2=verbose. */
+  live_feedback_verbosity: number;
+  /** Whether live coaching messages are read aloud via text-to-speech. */
+  live_feedback_tts_enabled: boolean;
+  /** Name of the selected TTS voice (SpeechSynthesisVoice.name). Null = auto. */
+  live_feedback_tts_voice: string | null;
+  /** Per-HUD visibility toggles. */
+  hud_vsmode_visible: boolean;
+  hud_smoothness_visible: boolean;
+  hud_stats_visible: boolean;
+  hud_feedback_visible: boolean;
+  /** Whether the post-session overview card is shown after each run. */
+  hud_post_session_visible: boolean;
 }
 
 export interface MonitorInfo {
@@ -116,4 +143,48 @@ export interface MonitorInfo {
   height: number;
   x: number;
   y: number;
+}
+
+// ─── Stats panel OCR ──────────────────────────────────────────────────────────
+
+/**
+ * Live reading from the KovaaK's in-game stats panel.
+ * Fields are null when the scenario doesn't populate them (e.g. pure tracking
+ * has no kills; one-shot scenarios have no damage).
+ * The `scenario_type` field is inferred from the presence pattern.
+ */
+export interface StatsPanelReading {
+  session_time_secs: number | null;
+  kills: number | null;
+  kps: number | null;
+  accuracy_hits: number | null;
+  accuracy_shots: number | null;
+  accuracy_pct: number | null;
+  damage_dealt: number | null;
+  damage_total: number | null;
+  spm: number | null;
+  ttk_secs: number | null;
+  /** "Unknown" | "Tracking" | "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" | "AccuracyDrill" */
+  scenario_type: string;
+}
+
+/** A single shot event detected by the stats-panel delta engine. */
+export interface ShotEvent {
+  hit: boolean;
+  kill: boolean;
+  timestamp_ms: number;
+  ttk_ms: number | null;
+  scenario_type: string;
+  mouse_overshoot: number;
+  mouse_correction_ratio: number;
+  mouse_jitter: number;
+}
+
+/** Live coaching notification (from mouse hook or stats OCR). */
+export interface LiveFeedback {
+  message: string;
+  /** "positive" | "tip" | "warning" */
+  kind: "positive" | "tip" | "warning";
+  /** Which metric key triggered this. */
+  metric: string;
 }
