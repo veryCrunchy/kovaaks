@@ -62,6 +62,7 @@
   "bundle": {
     "active": true,
     "publisher": "veryCrunchy",
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
