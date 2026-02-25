@@ -459,8 +459,12 @@ fn parse_accuracy_field(text: &str) -> (Option<u32>, Option<u32>, Option<f32>) {
 }
 
 fn parse_damage_field(text: &str) -> Option<f64> {
-    // Damage is a plain number, possibly thousands-formatted ("8,836").
-    let clean: String = text.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
+    // KovaaK's damage field can appear as:
+    //   "8,836"             — plain number (thousands-formatted)
+    //   "34/34 (100.0%)"    — same X/Y(pct) as the accuracy field
+    // When a slash is present, take only the numerator (damage dealt).
+    let source = if let Some(slash) = text.find('/') { &text[..slash] } else { text };
+    let clean: String = source.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
     clean.parse::<f64>().ok()
 }
 
@@ -521,6 +525,13 @@ fn sanitize_reading(r: &mut StatsPanelReading) {
     // TTK must be positive and below 30 s.
     if r.ttk_secs.map_or(false, |t| t <= 0.0 || t > 30.0) {
         r.ttk_secs = None;
+    }
+    // Damage dealt above 100 000 is an OCR parse artifact (e.g. "34/34 (100.0%)"
+    // naively stripped → 3 434 100).  Discard to prevent MultiHitClicking misclassification.
+    if r.damage_dealt.map_or(false, |d| d > 100_000.0) {
+        log::debug!("[stats-ocr] implausible damage_dealt={:?} → None", r.damage_dealt);
+        r.damage_dealt = None;
+        r.damage_total = None;
     }
 }
 
