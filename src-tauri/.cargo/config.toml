@@ -1,0 +1,12 @@
+[build]
+target = "x86_64-pc-windows-msvc"
+# Compiler cache — caches compiled crates so unchanged deps never recompile.
+# Install once with: cargo install sccache
+# Remove this line if sccache is not installed.
+rustc-wrapper = "sccache"
+
+# xwin downloads the MSVC CRT/SDK and provides lld-link as the linker.
+# Install once with: cargo install cargo-xwin
+[target.x86_64-pc-windows-msvc]
+linker = "lld-link"
+ar = "llvm-lib"
