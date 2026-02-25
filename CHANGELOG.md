@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.6.0](https://github.com/veryCrunchy/kovaaks/compare/v0.5.0...v0.6.0) (2026-02-25)
+
+
+### Features
+
+* **mouse-path-viewer:** add mouse path visualization and sensitivity suggestions ([be7ecee](https://github.com/veryCrunchy/kovaaks/commit/be7ecee32c7a204a85a46bfd955d075c5b749812))
+* **mouse-path:** raw cursor path recording for post-session visualisation ([58220e1](https://github.com/veryCrunchy/kovaaks/commit/58220e1ff804ffa5be23381ffab27c609614c45a))
+* **screen-recorder:** low-res JPEG session recording for mouse-path underlay ([d2fad2d](https://github.com/veryCrunchy/kovaaks/commit/d2fad2df05450bcb4d8ac3ddaf58a0e9098d33c1))
+* **session:** add commands to retrieve session mouse data, raw positions, and screen frames ([e50cfc6](https://github.com/veryCrunchy/kovaaks/commit/e50cfc60c8a571af341b5df445a43a21253165bb))
+* update kovaaks-overlay version and adjust monitor rectangle synchronization ([0603190](https://github.com/veryCrunchy/kovaaks/commit/0603190c1f39b9d9c87df4bd4e4c6cede812239e))
+
+
+### Bug Fixes
+
+* **scenario:** strip challenge-mode suffixes; migrate existing sessions ([d916fce](https://github.com/veryCrunchy/kovaaks/commit/d916fcea17d7d28f786941db8dfc0cdae8ddf645))
+* **settings:** add serde defaults, log deser errors, migrate region→spm on startup ([d7a831e](https://github.com/veryCrunchy/kovaaks/commit/d7a831e919925ff3555850327c9d1bda54404d78))
+* **stats-ocr:** fix damage parse for X/Y format, prevent MultiHit misclassification ([bb3499b](https://github.com/veryCrunchy/kovaaks/commit/bb3499b2a691f6ce529392253b53d78a5a103236))
+
 ## [0.5.0](https://github.com/veryCrunchy/kovaaks/compare/v0.4.0...v0.5.0) (2026-02-25)
 
 
