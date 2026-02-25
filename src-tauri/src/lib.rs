@@ -1,3 +1,4 @@
+mod auto_setup;
 mod file_watcher;
 mod kovaaks_api;
 mod logger;
@@ -5,6 +6,7 @@ mod mouse_hook;
 mod ocr;
 mod sapi;
 mod scenario_index;
+mod screen_recorder;
 mod session_store;
 mod settings;
 mod stats_ocr;
@@ -73,13 +75,22 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     let monitor = monitors.get(index).or_else(|| monitors.first());
     let Some(m) = monitor else { return };
 
-    let pos = m.position();
-    let sf = m.scale_factor();
+    let pos  = m.position();
+    let size = m.size();
+    let sf   = m.scale_factor();
     let logical_pos = pos.to_logical::<f64>(sf);
 
     let _ = win.set_fullscreen(false);
     let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
     let _ = win.set_fullscreen(true);
+
+    // Update screen recorder's centre-crop rect for this monitor
+    screen_recorder::update_monitor_rect(&settings::RegionRect {
+        x:      pos.x,
+        y:      pos.y,
+        width:  size.width,
+        height: size.height,
+    });
 }
 
 // ─── Tauri Commands ────────────────────────────────────────────────────────────
@@ -137,7 +148,7 @@ fn save_settings(
     *s = new_settings.clone();
     settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
     file_watcher::restart(&app, &new_settings.stats_dir);
-    ocr::update_region(&app, new_settings.region);
+    ocr::update_region(&app, new_settings.stats_field_regions.spm);
     ocr::update_scenario_region(new_settings.scenario_region);
     ocr::update_poll_ms(new_settings.ocr_poll_ms);
     mouse_hook::set_dpi(new_settings.mouse_dpi);
@@ -189,6 +200,8 @@ fn set_stats_field_regions(
     drop(s);
     settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     stats_ocr::update_field_regions(cloned.stats_field_regions);
+    // Keep the legacy OCR loop (session-start detection) pointed at the SPM region.
+    ocr::update_region(&app, cloned.stats_field_regions.spm);
     Ok(())
 }
 
@@ -360,6 +373,22 @@ fn get_session_mouse_data() -> Vec<mouse_hook::MetricPoint> {
     mouse_hook::drain_session_buffer()
 }
 
+/// Return all downsampled raw cursor positions recorded during the last session
+/// and clear the internal buffer.  Used by the frontend to render the mouse-path
+/// playback/visualisation in the Smoothness Report.
+#[tauri::command]
+fn get_session_raw_positions() -> Vec<mouse_hook::RawPositionPoint> {
+    mouse_hook::drain_raw_positions()
+}
+
+/// Return centre-crop JPEG frames recorded during the last session (5 fps,
+/// ≤320 px wide, quality 20) and clear the internal buffer.
+/// Returns an empty Vec when screen recording is not available.
+#[tauri::command]
+fn get_session_screen_frames() -> Vec<screen_recorder::ScreenFrame> {
+    screen_recorder::drain_frames()
+}
+
 #[tauri::command]
 fn get_monitors(app: AppHandle) -> Vec<MonitorInfo> {
     let Some(win) = app.get_webview_window("overlay") else {
@@ -468,9 +497,41 @@ fn clear_log_buffer() {
     logger::clear_buffer();
 }
 
+#[derive(serde::Serialize)]
+struct CursorPos { x: i32, y: i32 }
+
+/// Return the current cursor position in physical screen coordinates.
+/// Used by the frontend to implement cursor-proximity passthrough toggling.
+#[tauri::command]
+fn get_cursor_pos() -> CursorPos {
+    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        let mut pt = POINT { x: 0, y: 0 };
+        unsafe { let _ = GetCursorPos(&mut pt); }
+        return CursorPos { x: pt.x, y: pt.y };
+    }
+    #[allow(unreachable_code)]
+    CursorPos { x: 0, y: 0 }
+}
+
 #[tauri::command]
 fn get_capture_preview() -> Option<Vec<u8>> {
     ocr::get_capture_png()
+}
+
+/// Bring KovaaK's game window to the foreground so the user can start playing
+/// immediately after triggering auto-setup from the overlay.
+#[tauri::command]
+fn focus_game_window() {
+    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::SetForegroundWindow;
+        if let Some(hwnd) = window_tracker::get_game_hwnd() {
+            unsafe { let _ = SetForegroundWindow(hwnd); }
+        }
+    }
 }
 
 #[tauri::command]
@@ -529,14 +590,23 @@ pub fn run() {
             start_mouse_hook,
             stop_mouse_hook,
             get_session_mouse_data,
+            get_session_raw_positions,
+            get_session_screen_frames,
             toggle_settings,
             toggle_overlay,
             set_mouse_passthrough,
             get_monitors,
             set_overlay_monitor,
             get_capture_preview,
+            get_cursor_pos,
+            focus_game_window,
             open_speech_settings,
             open_natural_voices_store,
+            auto_setup::auto_detect_stats_regions,
+            auto_setup::start_auto_setup,
+            auto_setup::stop_auto_setup,
+            auto_setup::force_confirm_field,
+            auto_setup::force_reject_field,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
         ])
@@ -567,9 +637,28 @@ pub fn run() {
             mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
             mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
 
-            // Start OCR (begins reading SPM once a region is configured)
+            // Migrate legacy `region` → `stats_field_regions.spm` once.
+            // Old settings.json files included a `region` field used as the SPM
+            // region.  If we find it and `spm` is not yet configured, copy it over
+            // and persist so the migration only runs once.
+            let loaded = if loaded.region.is_some() && loaded.stats_field_regions.spm.is_none() {
+                let mut migrated = loaded.clone();
+                migrated.stats_field_regions.spm = migrated.region.take();
+                log::info!("Migrated legacy `region` → `stats_field_regions.spm`");
+                let _ = settings::persist(app.handle(), &migrated);
+                {
+                    let state = app.state::<AppState>();
+                    let mut s = state.settings.lock().unwrap();
+                    *s = migrated.clone();
+                }
+                migrated
+            } else {
+                loaded
+            };
+
+            // Start OCR (drives session-start events using the SPM region)
             ocr::update_scenario_region(loaded.scenario_region);
-            ocr::start(app.handle().clone(), loaded.region, loaded.ocr_poll_ms);
+            ocr::start(app.handle().clone(), loaded.stats_field_regions.spm, loaded.ocr_poll_ms);
 
             // Start stats-panel OCR
             stats_ocr::update_field_regions(loaded.stats_field_regions);
@@ -608,9 +697,13 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
 
     let menu = Menu::with_items(app, &[&open_settings, &open_stats, &toggle_overlay, &separator, &quit])?;
 
-    let _tray = TrayIconBuilder::with_id("main")
+    let mut tray_builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("KovaaK's Overlay")
+        .tooltip("KovaaK's Overlay");
+    if let Some(icon) = app.default_window_icon() {
+        tray_builder = tray_builder.icon(icon.clone());
+    }
+    let _tray = tray_builder
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open_settings" => {
                 // Emit to the overlay window — same as pressing F8
