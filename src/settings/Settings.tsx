@@ -7,8 +7,11 @@ import { useUpdater } from "../hooks/useUpdater";
 const SmoothnessReport = lazy(() =>
   import("../analytics/SmoothnessReport").then(m => ({ default: m.SmoothnessReport }))
 );
+const StatsWindowEmbed = lazy(() =>
+  import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
+);
 
-type Tab = "general" | "friends" | "smoothness";
+type Tab = "general" | "friends" | "smoothness" | "stats";
 
 interface SettingsProps {
   onClose: () => void;
@@ -60,6 +63,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
     { id: "general", label: "General" },
     { id: "friends", label: "Friends" },
     { id: "smoothness", label: "Smoothness" },
+    { id: "stats", label: "Session Stats" },
   ];
 
   return (
@@ -111,7 +115,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
-              className="text-left px-3 py-2 rounded-lg text-sm transition-all"
+              className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
               style={{
                 background: activeTab === tab.id ? "rgba(0,245,160,0.1)" : "transparent",
                 color: activeTab === tab.id ? "#00f5a0" : "rgba(255,255,255,0.45)",
@@ -127,7 +131,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
         </nav>
 
         <div
-          className="mt-auto flex flex-col gap-2 px-3 pt-4"
+          className="mt-auto flex flex-col gap-1.5 px-3 pt-3"
           style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}
         >
           <div className="flex flex-col gap-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>
@@ -156,7 +160,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
           </div>
           <button
             onClick={onLayoutHUDs}
-            className="text-left px-3 py-2 rounded-lg text-sm transition-all"
+            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
             style={{
               background: "transparent",
               color: "rgba(0,245,160,0.6)",
@@ -175,8 +179,28 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
             Reposition HUDs
           </button>
           <button
+            onClick={() => invoke("open_stats_window").catch(console.error)}
+            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
+            style={{
+              background: "transparent",
+              color: "rgba(255,255,255,0.45)",
+              border: "1px solid rgba(255,255,255,0.07)",
+              cursor: "pointer",
+            }}
+            onMouseEnter={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)";
+              (e.currentTarget as HTMLButtonElement).style.color = "#fff";
+            }}
+            onMouseLeave={(e) => {
+              (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.45)";
+            }}
+          >
+            Session Stats
+          </button>
+          <button
             onClick={() => invoke("open_logs_window").catch(console.error)}
-            className="text-left px-3 py-2 rounded-lg text-sm transition-all"
+            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
             style={{
               background: "transparent",
               color: "rgba(255,255,255,0.45)",
@@ -200,7 +224,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
               else checkForUpdate();
             }}
             disabled={updateStatus.state === "checking" || updateStatus.state === "downloading" || updateStatus.state === "ready"}
-            className="text-left px-3 py-2 rounded-lg text-sm transition-all"
+            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
             style={{
               background:
                 updateStatus.state === "available" ? "rgba(0,245,160,0.12)" : "transparent",
@@ -242,7 +266,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
           </button>
           <button
             onClick={() => invoke("quit_app")}
-            className="text-left px-3 py-2 rounded-lg text-sm transition-all"
+            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
             style={{
               background: "transparent",
               color: "rgba(255,100,100,0.6)",
@@ -264,7 +288,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
       </div>
 
       {/* Main content */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1" style={{ overflow: activeTab === "stats" ? "hidden" : "auto" }}>
         {activeTab === "general" && (
           <GeneralSettings
             settings={settings}
@@ -284,6 +308,17 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs }: SettingsProps
             </div>
           }>
             <SmoothnessReport />
+          </Suspense>
+        )}
+        {activeTab === "stats" && (
+          <Suspense fallback={
+            <div className="p-8" style={{ color: "rgba(255,255,255,0.35)", fontFamily: "'JetBrains Mono', monospace" }}>
+              Loading…
+            </div>
+          }>
+            <div style={{ height: "100%", overflow: "hidden" }}>
+              <StatsWindowEmbed embedded />
+            </div>
           </Suspense>
         )}
       </div>

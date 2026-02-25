@@ -1642,7 +1642,7 @@ function ScenarioDetails({ records }: { records: SessionRecord[] }) {
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-export function StatsWindow() {
+export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
   const [search, setSearch] = useState("");
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
@@ -1729,7 +1729,7 @@ export function StatsWindow() {
     <div
       style={{
         display: "flex",
-        height: "100vh",
+        height: embedded ? "100%" : "100vh",
         background: "#0a0a0f",
         color: "#fff",
         fontFamily: "'JetBrains Mono', monospace",
