@@ -26,7 +26,7 @@ export function SmoothnessHUD({ preview = false }: SmoothnessHUDProps) {
 
   const score = metrics ? Math.round(metrics.smoothness) : 0;
   const color = metrics ? getColor(score) : "rgba(255,255,255,0.3)";
-  const label = metrics ? getLabel(score) : "WAITING";
+  const label = metrics ? getLabel(score) : "IDLE";
 
   return (
     <AnimatePresence>
