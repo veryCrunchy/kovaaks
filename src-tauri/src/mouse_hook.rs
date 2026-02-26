@@ -456,6 +456,11 @@ unsafe extern "system" fn raw_input_wnd_proc(
                             if let Ok(mut s) = STATE.lock() {
                                 s.cursor_x += dx;
                                 s.cursor_y += dy;
+                                // Feed the metrics engine with delta-space coords so jitter/
+                                // velocity/overshoot calculations are immune to edge clamping.
+                                let (evx, evy) = (s.cursor_x, s.cursor_y);
+                                s.events.push(RawMouseEvent { x: evx, y: evy, time: now });
+                                if s.events.len() > 50_000 { s.events.drain(..10_000); }
                                 let sample = match s.last_raw_sample {
                                     None       => true,
                                     Some(last) => now.duration_since(last) >= Duration::from_millis(33),
@@ -499,26 +504,21 @@ fn mouse_event_callback(event: Event) {
             if TRACKING_ACTIVE.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
-                    s.events.push(RawMouseEvent { x, y, time: now });
-                    // Keep only last 5 seconds of raw events to bound memory
-                    if s.events.len() > 50_000 {
-                        s.events.drain(..10_000);
-                    }
-                    // On Windows the raw-input thread (raw_input_wnd_proc) owns
-                    // cursor_x/cursor_y and raw_positions using true hardware
-                    // deltas that are unaffected by monitor-edge clamping or the
-                    // game's SetCursorPos recentering.  Nothing to do here.
-                    //
-                    // On other platforms (no raw input) we fall back to
-                    // accumulated OS-cursor deltas, which is the best we have.
+                    // On Windows the raw-input thread owns events, cursor_x/cursor_y
+                    // and raw_positions using true hardware deltas that are unaffected
+                    // by monitor-edge clamping or the game's SetCursorPos recentering.
                     #[cfg(not(all(target_os = "windows", feature = "ocr")))]
                     {
+                        s.events.push(RawMouseEvent { x, y, time: now });
+                        if s.events.len() > 50_000 { s.events.drain(..10_000); }
                         let dx = x - s.last_x;
                         let dy = y - s.last_y;
                         if s.last_x != 0.0 || s.last_y != 0.0 {
                             s.cursor_x += dx;
                             s.cursor_y += dy;
                         }
+                        s.last_x = x;
+                        s.last_y = y;
                         let sample = match s.last_raw_sample {
                             None => true,
                             Some(last) => now.duration_since(last) >= Duration::from_millis(33),
@@ -541,10 +541,6 @@ fn mouse_event_callback(event: Event) {
                             }
                         }
                     }
-                    // Always update last_x/last_y — used for click-position
-                    // correlation and the metrics events buffer (absolute coords).
-                    s.last_x = x;
-                    s.last_y = y;
                 }
             }
         }
