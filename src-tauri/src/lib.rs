@@ -10,6 +10,7 @@ mod session_store;
 mod settings;
 mod stats_ocr;
 mod steam_api;
+mod steam_integration;
 mod window_tracker;
 
 use std::sync::{Arc, Mutex};
@@ -390,6 +391,198 @@ async fn fetch_friend_most_played(
     kovaaks_api::fetch_most_played(&username, 10)
         .await
         .map_err(|e| e.to_string())
+}
+
+/// Detect the currently logged-in Steam user and cross-reference their KovaaK's account.
+///
+/// Returns a `FriendProfile` for the active Steam user:
+/// - `username` is their KovaaK's username if they have a linked account, otherwise their Steam64 ID.
+/// - All other fields are populated from Steam + KovaaK's as available.
+///
+/// Intended to auto-populate the "your username" settings field without any manual entry.
+#[tauri::command]
+async fn detect_current_user() -> Result<FriendProfile, String> {
+    let steam_id = steam_integration::get_active_steam_id()
+        .ok_or_else(|| "Steam is not running or active user could not be detected".to_string())?;
+
+    let steam = steam_api::resolve_steam_user(&steam_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let kovaaks = kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
+        .await
+        .unwrap_or(None);
+
+    Ok(match kovaaks {
+        Some(p) => FriendProfile {
+            username: p.username,
+            steam_id: p.steam_id,
+            steam_account_name: p.steam_account_name,
+            avatar_url: p.avatar_url,
+            country: p.country,
+            kovaaks_plus: p.kovaaks_plus,
+        },
+        None => FriendProfile {
+            username: steam.steam_id.clone(),
+            steam_id: steam.steam_id.clone(),
+            steam_account_name: steam.display_name.clone(),
+            avatar_url: steam.avatar_url.clone(),
+            country: String::new(),
+            kovaaks_plus: false,
+        },
+    })
+}
+
+/// Returns the Steam 64-bit ID and display name of the currently logged-in Steam user.
+/// Reads the Windows registry — instant, no network, no API key.
+/// Returns `null` when Steam is not running or the platform is not Windows.
+#[derive(serde::Serialize)]
+pub struct ActiveSteamUser {
+    pub steam_id: String,
+    pub display_name: String,
+    pub avatar_url: String,
+}
+
+#[tauri::command]
+async fn get_active_steam_user() -> Option<ActiveSteamUser> {
+    let steam_id = steam_integration::get_active_steam_id()?;
+    // Resolve the full profile (display name + avatar) from the community XML.
+    match steam_api::resolve_steam_user(&steam_id).await {
+        Ok(p) => Some(ActiveSteamUser {
+            steam_id: p.steam_id,
+            display_name: p.display_name,
+            avatar_url: p.avatar_url,
+        }),
+        Err(e) => {
+            log::warn!("get_active_steam_user: profile fetch failed: {e}");
+            // Return with just the ID and no display info rather than failing.
+            Some(ActiveSteamUser {
+                steam_id: steam_id.clone(),
+                display_name: steam_id,
+                avatar_url: String::new(),
+            })
+        }
+    }
+}
+
+/// Import all Steam friends as FriendProfiles.
+///
+/// Priority order:
+///   1. Read `localconfig.vdf` from the local Steam install — works even for private lists.
+///   2. Fall back to the public Steam community XML if the VDF is unavailable.
+///
+/// Resolves all IDs concurrently (12 at a time) so 150 friends imports in ~10 s
+/// instead of several minutes.  Emits `steam-import-progress` events as friends
+/// resolve so the frontend can show a live counter.
+///
+/// Already-added friends (matched by steam_id) are skipped.
+/// Returns the newly added FriendProfiles.
+#[tauri::command]
+async fn import_steam_friends(
+    state: tauri::State<'_, AppState>,
+    app: AppHandle,
+) -> Result<Vec<FriendProfile>, String> {
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    let active_steam_id = steam_integration::get_active_steam_id()
+        .ok_or_else(|| "Steam is not running or active user could not be detected".to_string())?;
+
+    let friend_ids = steam_integration::get_friend_ids(&active_steam_id).await;
+    if friend_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Filter out already-added friends.
+    let existing_steam_ids: Vec<String> = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.friends.iter().map(|f| f.steam_id.clone()).collect()
+    };
+    let new_ids: Vec<String> = friend_ids
+        .into_iter()
+        .filter(|id| !existing_steam_ids.contains(id))
+        .collect();
+
+    if new_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let total = new_ids.len();
+    log::info!("import_steam_friends: resolving {} new friend IDs", total);
+
+    // Resolve concurrently — 12 in-flight at a time to avoid hammering the APIs.
+    let sem = Arc::new(Semaphore::new(12));
+    let mut handles = Vec::with_capacity(total);
+
+    for steam_id in new_ids {
+        let permit = sem.clone().acquire_owned().await.unwrap();
+        let app_handle = app.clone();
+        let handle = tokio::spawn(async move {
+            let _permit = permit; // released when task finishes
+
+            // 1. Resolve Steam profile (display name + avatar).
+            let steam = match steam_api::resolve_steam_user(&steam_id).await {
+                Ok(p) => p,
+                Err(e) => {
+                    log::warn!("import_steam_friends: skip {steam_id}: {e}");
+                    let _ = app_handle.emit("steam-import-progress", ());
+                    return None;
+                }
+            };
+
+            // 2. Cross-reference with KovaaK's — skip if they don't play KovaaK's.
+            let kovaaks = match kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
+                .await
+                .unwrap_or(None)
+            {
+                Some(p) => p,
+                None => {
+                    let _ = app_handle.emit("steam-import-progress", ());
+                    return None; // not a KovaaK's player — skip
+                }
+            };
+
+            let friend = FriendProfile {
+                username: kovaaks.username,
+                steam_id: kovaaks.steam_id,
+                steam_account_name: kovaaks.steam_account_name,
+                avatar_url: kovaaks.avatar_url,
+                country: kovaaks.country,
+                kovaaks_plus: kovaaks.kovaaks_plus,
+            };
+
+            let _ = app_handle.emit("steam-import-progress", ());
+            Some(friend)
+        });
+        handles.push(handle);
+    }
+
+    // Collect results.
+    let mut new_friends: Vec<FriendProfile> = Vec::new();
+    for handle in handles {
+        if let Ok(Some(f)) = handle.await {
+            new_friends.push(f);
+        }
+    }
+
+    // Persist.
+    {
+        let mut s = state.settings.lock().map_err(|e| e.to_string())?;
+        for f in &new_friends {
+            let dupe = if !f.steam_id.is_empty() {
+                s.friends.iter().any(|x| x.steam_id == f.steam_id)
+            } else {
+                s.friends.iter().any(|x| x.username.eq_ignore_ascii_case(&f.username))
+            };
+            if !dupe { s.friends.push(f.clone()); }
+        }
+        let cloned = s.clone();
+        drop(s);
+        settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
+    }
+
+    log::info!("import_steam_friends: imported {} friends", new_friends.len());
+    Ok(new_friends)
 }
 
 /// Validate an OCR-read scenario name and return the canonical spelling, or null if
@@ -984,9 +1177,43 @@ fn detect_field_regions_from_words(
     out
 }
 
+// ─── Single-instance helper ────────────────────────────────────────────────────
+
+/// Kills any previously running instance recorded in a PID file next to the
+/// executable, then writes our own PID.  This keeps development iteration fast:
+/// starting a new build automatically tears down the old one.
+fn kill_existing_instance() {
+    let pid_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("kovaaks-overlay.pid")))
+        .unwrap_or_else(|| std::env::temp_dir().join("kovaaks-overlay.pid"));
+
+    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+        if let Ok(old_pid) = contents.trim().parse::<u32>() {
+            if old_pid != std::process::id() {
+                eprintln!("[single-instance] killing old instance (PID {old_pid})");
+                #[cfg(target_os = "windows")]
+                let _ = std::process::Command::new("taskkill")
+                    .args(["/PID", &old_pid.to_string(), "/F"])
+                    .output();
+                #[cfg(not(target_os = "windows"))]
+                let _ = std::process::Command::new("kill")
+                    .args(["-15", &old_pid.to_string()])
+                    .output();
+                // Give the old process a moment to exit cleanly
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            }
+        }
+    }
+
+    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+}
+
 // ─── App Entry Point ───────────────────────────────────────────────────────────
 
 pub fn run() {
+    kill_existing_instance();
+
     // Our logger emits to stderr AND to the Tauri logs window
     logger::init().unwrap_or_else(|_| eprintln!("logger already set"));
 
@@ -1021,6 +1248,9 @@ pub fn run() {
             set_selected_friend,
             fetch_friend_score,
             fetch_friend_most_played,
+            get_active_steam_user,
+            import_steam_friends,
+            detect_current_user,
             validate_username,
             validate_scenario,
             start_ocr,

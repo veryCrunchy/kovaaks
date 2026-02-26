@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { AppSettings } from "../types/settings";
-import type { FriendProfile, MostPlayedEntry } from "../types/friends";
+import type { ActiveSteamUser, FriendProfile, MostPlayedEntry } from "../types/friends";
 
 interface FriendManagerProps {
   settings: AppSettings;
@@ -100,10 +101,21 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
   const [input, setInput] = useState("");
   const [searchType, setSearchType] = useState<SearchType>("auto");
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importProgress, setImportProgress] = useState(0);
+  const [steamUser, setSteamUser] = useState<ActiveSteamUser | null>(null);
+  const unlistenRef = useRef<(() => void) | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+
+  // Detect the active Steam user on mount so we can show the import button.
+  useEffect(() => {
+    invoke<ActiveSteamUser | null>("get_active_steam_user")
+      .then(setSteamUser)
+      .catch(() => setSteamUser(null));
+  }, []);
 
   const updateFriends = useCallback(
     (next: FriendProfile[]) => {
@@ -168,6 +180,33 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     [selectedOpponent, settings, onChange]
   );
 
+  const handleImportSteam = useCallback(async () => {
+    setImporting(true);
+    setImportProgress(0);
+    setError(null);
+    // Subscribe to per-friend progress events before invoking.
+    unlistenRef.current = await listen("steam-import-progress", () => {
+      setImportProgress((n) => n + 1);
+    });
+    try {
+      const added = await invoke<FriendProfile[]>("import_steam_friends");
+      if (added.length === 0) {
+        showSuccess("All Steam friends are already added (or list is empty).");
+      } else {
+        const next = await invoke<FriendProfile[]>("get_friends");
+        updateFriends(next);
+        showSuccess(`Imported ${added.length} Steam friend${added.length === 1 ? "" : "s"}.`);
+      }
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      unlistenRef.current?.();
+      unlistenRef.current = null;
+      setImporting(false);
+      setImportProgress(0);
+    }
+  }, [updateFriends]);
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") handleAdd();
   };
@@ -188,6 +227,56 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         Add friends by KovaaK's username, Steam64 ID, vanity URL, or steamcommunity.com link.
         Friends with a linked KovaaK's account support VS-mode score comparison.
       </p>
+
+      {/* Steam import banner */}
+      {steamUser && (
+        <div
+          className="flex items-center justify-between gap-3 mb-5 px-4 py-3 rounded-xl"
+          style={{
+            background: "rgba(23,144,255,0.06)",
+            border: "1px solid rgba(23,144,255,0.18)",
+          }}
+        >
+          <div className="flex items-center gap-3 min-w-0">
+            {steamUser.avatar_url ? (
+              <img
+                src={steamUser.avatar_url}
+                alt={steamUser.display_name}
+                className="w-8 h-8 rounded-full flex-shrink-0"
+                style={{ border: "1px solid rgba(23,144,255,0.3)" }}
+              />
+            ) : (
+              <div
+                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
+                style={{ background: "rgba(23,144,255,0.15)", color: "#1790ff" }}
+              >
+                {steamUser.display_name.slice(0, 1).toUpperCase()}
+              </div>
+            )}
+            <div className="min-w-0">
+              <div className="text-xs font-semibold truncate" style={{ color: "#fff" }}>
+                {steamUser.display_name}
+              </div>
+              <div className="text-xs" style={{ color: "rgba(23,144,255,0.7)" }}>
+                Steam detected
+              </div>
+            </div>
+          </div>
+          <button
+            onClick={handleImportSteam}
+            disabled={importing}
+            className="px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0"
+            style={{
+              background: importing ? "rgba(23,144,255,0.08)" : "rgba(23,144,255,0.15)",
+              border: "1px solid rgba(23,144,255,0.35)",
+              color: importing ? "rgba(23,144,255,0.4)" : "#1790ff",
+              cursor: importing ? "not-allowed" : "pointer",
+            }}
+          >
+            {importing ? `Importing… ${importProgress > 0 ? importProgress : ""}` : "Import Steam Friends"}
+          </button>
+        </div>
+      )}
 
       {/* Search type toggle */}
       <div className="flex gap-1 mb-3">

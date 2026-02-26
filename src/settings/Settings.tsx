@@ -1,6 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, MonitorInfo } from "../types/settings";
+import type { FriendProfile } from "../types/friends";
 import { FriendManager } from "./FriendManager";
 import { useUpdater } from "../hooks/useUpdater";
 
@@ -354,6 +355,26 @@ function GeneralSettings({
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [detectingUser, setDetectingUser] = useState(false);
+  const [detectError, setDetectError] = useState<string | null>(null);
+
+  const handleDetectSteamUser = async () => {
+    setDetectingUser(true);
+    setDetectError(null);
+    try {
+      const profile = await invoke<FriendProfile>("detect_current_user");
+      const name =
+        profile.username && !profile.username.startsWith("765611")
+          ? profile.username
+          : profile.steam_account_name || profile.username;
+      onChange({ ...settings, username: name });
+    } catch (e) {
+      setDetectError(String(e));
+      setTimeout(() => setDetectError(null), 4000);
+    } finally {
+      setDetectingUser(false);
+    }
+  };
 
   // Revoke object URL when preview is dismissed or component unmounts
   useEffect(() => {
@@ -402,14 +423,35 @@ function GeneralSettings({
 
       <div className="flex flex-col gap-6">
         {/* Username */}
-        <FieldGroup label="Display Name" description="Used when exporting your scores">
-          <input
-            type="text"
-            value={settings.username}
-            onChange={(e) => update("username", e.target.value)}
-            className="w-full rounded-lg px-3 py-2 text-sm"
-            style={inputStyle}
-          />
+        <FieldGroup label="Display Name" description="Your KovaaK's username — used for VS-mode score comparison">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={settings.username}
+              onChange={(e) => update("username", e.target.value)}
+              className="flex-1 rounded-lg px-3 py-2 text-sm"
+              style={inputStyle}
+              placeholder="KovaaK's username"
+            />
+            <button
+              onClick={handleDetectSteamUser}
+              disabled={detectingUser}
+              title="Auto-detect from the active Steam account"
+              className="px-3 py-2 rounded-lg text-xs font-semibold flex-shrink-0"
+              style={{
+                background: detectingUser ? "rgba(23,144,255,0.05)" : "rgba(23,144,255,0.12)",
+                border: "1px solid rgba(23,144,255,0.3)",
+                color: detectingUser ? "rgba(23,144,255,0.35)" : "#1790ff",
+                cursor: detectingUser ? "not-allowed" : "pointer",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {detectingUser ? "Detecting…" : "Detect from Steam"}
+            </button>
+          </div>
+          {detectError && (
+            <p className="text-xs mt-1.5" style={{ color: "#ff6b6b" }}>{detectError}</p>
+          )}
         </FieldGroup>
 
         {/* Monitor */}

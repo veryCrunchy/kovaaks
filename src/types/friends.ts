@@ -21,3 +21,10 @@ export interface FriendScore {
   username: string;
   score: number;
 }
+
+/** Active Steam user detected from the local Steam client. */
+export interface ActiveSteamUser {
+  steam_id: string;
+  display_name: string;
+  avatar_url: string;
+}
