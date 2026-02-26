@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.7.0](https://github.com/veryCrunchy/kovaaks/compare/v0.6.1...v0.7.0) (2026-02-26)
+
+
+### Features
+
+* **friend-manager:** add search type toggle for friend addition ([e63426c](https://github.com/veryCrunchy/kovaaks/commit/e63426c25fb6dbc3e805c43bae79024831ea8af5))
+* **friend-manager:** enhance friend addition with Steam profile resolution ([158e0f4](https://github.com/veryCrunchy/kovaaks/commit/158e0f486d1c0f2cac13454ab28e9f3a75fa1d8c))
+* **mouse-hook:** enhance raw mouse event handling for improved metrics accuracy ([3bcea1f](https://github.com/veryCrunchy/kovaaks/commit/3bcea1f3ae3021413d46a587d4f20a6b42199895))
+
+
+### Bug Fixes
+
+* **FieldGroup:** change description type from string to React.ReactNode ([8466e7e](https://github.com/veryCrunchy/kovaaks/commit/8466e7e8c39f4ac72ffd8cc828e42a565084d80b))
+
 ## [0.6.1](https://github.com/veryCrunchy/kovaaks/compare/v0.6.0...v0.6.1) (2026-02-25)
 
 
