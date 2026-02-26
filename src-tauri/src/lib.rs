@@ -9,6 +9,7 @@ mod scenario_index;
 mod session_store;
 mod settings;
 mod stats_ocr;
+mod steam_api;
 mod window_tracker;
 
 use std::sync::{Arc, Mutex};
@@ -248,17 +249,78 @@ fn get_friends(state: tauri::State<AppState>) -> Result<Vec<FriendProfile>, Stri
     Ok(s.friends.clone())
 }
 
-/// Look up a KovaaK's webapp username, fetch their full profile, then persist as a friend.
+/// Look up a user and persist them as a friend.
+///
+/// `search_type` controls the lookup strategy:
+///   - `"kovaaks"`  → exact KovaaK's webapp username match
+///   - `"steam"`    → resolve via Steam community XML (no API key needed),
+///                    then cross-reference KovaaK's by steamId
+///   - `None` / auto → Steam64 IDs / steamcommunity.com URLs go straight to steam path;
+///                     everything else tries KovaaK's username first, then falls back to
+///                     Steam (so vanity URLs like "aimicantaim" also work)
+///
+/// Friends resolved via Steam with no linked KovaaK's account are stored with
+/// their Steam64 ID as `username`; VS-mode comparison is unavailable for them.
 #[tauri::command]
 async fn add_friend(
     username: String,
+    search_type: Option<String>,
     state: tauri::State<'_, AppState>,
     app: AppHandle,
 ) -> Result<FriendProfile, String> {
-    let profile = kovaaks_api::fetch_user_profile(&username)
-        .await
-        .map_err(|e| e.to_string())?;
-    let profile = profile.ok_or_else(|| format!("No KovaaK's account found for '{}'", username))?;
+    let trimmed = username.trim().to_string();
+
+    let looks_like_steam = steam_api::is_steam64_id(&trimmed)
+        || trimmed.contains("steamcommunity.com");
+
+    /// Resolve via Steam community XML then cross-reference KovaaK's.
+    /// Returns a UserProfile with a real KovaaK's username when one is linked,
+    /// or using the Steam64 ID as the username when no KovaaK's account is found.
+    async fn resolve_via_steam(input: &str) -> Result<kovaaks_api::UserProfile, String> {
+        let steam = steam_api::resolve_steam_user(input)
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let kovaaks = kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
+            .await
+            .unwrap_or(None);
+
+        Ok(match kovaaks {
+            Some(p) => p,
+            None => kovaaks_api::UserProfile {
+                username: steam.steam_id.clone(),
+                steam_id: steam.steam_id,
+                steam_account_name: steam.display_name,
+                avatar_url: steam.avatar_url,
+                country: String::new(),
+                kovaaks_plus: false,
+            },
+        })
+    }
+
+    let profile = match search_type.as_deref() {
+        Some("steam") => resolve_via_steam(&trimmed).await?,
+        Some("kovaaks") => {
+            kovaaks_api::fetch_user_profile(&trimmed)
+                .await
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("No KovaaK's account found for '{}'", trimmed))?
+        }
+        _ => {
+            // Auto: if input is an obvious Steam ID/URL go straight to Steam path.
+            // Otherwise try KovaaK's username first, then fall back to Steam so that
+            // vanity URLs (e.g. "aimicantaim") and other Steam inputs also work.
+            if looks_like_steam {
+                resolve_via_steam(&trimmed).await?
+            } else {
+                match kovaaks_api::fetch_user_profile(&trimmed).await {
+                    Ok(Some(p)) => p,
+                    _ => resolve_via_steam(&trimmed).await?,
+                }
+            }
+        }
+    };
+
     let friend = FriendProfile {
         username: profile.username.clone(),
         steam_id: profile.steam_id.clone(),
@@ -268,7 +330,13 @@ async fn add_friend(
         kovaaks_plus: profile.kovaaks_plus,
     };
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    if !s.friends.iter().any(|f| f.username.eq_ignore_ascii_case(&username)) {
+    // Deduplicate by steam_id (if available) or username.
+    let already_exists = if !friend.steam_id.is_empty() {
+        s.friends.iter().any(|f| f.steam_id == friend.steam_id)
+    } else {
+        s.friends.iter().any(|f| f.username.eq_ignore_ascii_case(&friend.username))
+    };
+    if !already_exists {
         s.friends.push(friend.clone());
     }
     let cloned = s.clone();
@@ -276,6 +344,7 @@ async fn add_friend(
     settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     Ok(friend)
 }
+
 
 /// Remove a friend by username and persist.
 #[tauri::command]
@@ -292,22 +361,32 @@ fn remove_friend(
 }
 
 /// Fetch a friend's best score for a specific scenario from the KovaaK's API.
-/// Returns `null` if the user has never played that scenario.
+/// Returns `null` if the user has never played that scenario, or if the friend
+/// has no linked KovaaK's account (username is their Steam64 ID).
 #[tauri::command]
 async fn fetch_friend_score(
     username: String,
     scenario_name: String,
 ) -> Result<Option<f64>, String> {
+    // Friends without a KovaaK's account are stored with their Steam64 ID as
+    // username. The score endpoint requires a real username — return None early.
+    if steam_api::is_steam64_id(&username) {
+        return Ok(None);
+    }
     kovaaks_api::fetch_best_score(&username, &scenario_name)
         .await
         .map_err(|e| e.to_string())
 }
 
 /// Fetch a user's most-played scenarios (up to 10) sorted by play count.
+/// Returns empty for friends with no linked KovaaK's account (steam64 username).
 #[tauri::command]
 async fn fetch_friend_most_played(
     username: String,
 ) -> Result<Vec<kovaaks_api::MostPlayedEntry>, String> {
+    if steam_api::is_steam64_id(&username) {
+        return Ok(vec![]);
+    }
     kovaaks_api::fetch_most_played(&username, 10)
         .await
         .map_err(|e| e.to_string())

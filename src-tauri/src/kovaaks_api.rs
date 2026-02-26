@@ -176,14 +176,69 @@ pub async fn fetch_user_profile(username: &str) -> anyhow::Result<Option<UserPro
             .unwrap_or(false)
     });
 
-    Ok(found.map(|r| UserProfile {
+    Ok(found.map(search_result_to_profile))
+}
+
+/// Helper: convert a SearchResult into a UserProfile.
+fn search_result_to_profile(r: SearchResult) -> UserProfile {
+    UserProfile {
         username: r.username.unwrap_or_default(),
         steam_id: r.steam_id.unwrap_or_default(),
         steam_account_name: r.steam_account_name.unwrap_or_default(),
         avatar_url: r.steam_account_avatar.unwrap_or_default(),
         country: r.country.unwrap_or_default(),
         kovaaks_plus: r.kovaaks_plus_active.unwrap_or(false),
-    }))
+    }
+}
+
+/// Find a KovaaK's user profile by cross-referencing their Steam64 ID against
+/// KovaaK's search results.
+///
+/// The KovaaK's `/user/search` endpoint only accepts a `username` query, but each
+/// result includes the linked `steamId`.  This function searches with `display_name`
+/// (the Steam display name obtained from the Steam API) and checks if any result's
+/// `steamId` matches.  Falls back to searching with just the first token of
+/// `display_name` in case the KovaaK's username is only a partial match.
+///
+/// Returns `None` if no KovaaK's account is linked to that Steam ID.
+pub async fn find_user_by_steam_id(
+    steam_id: &str,
+    display_name: &str,
+) -> anyhow::Result<Option<UserProfile>> {
+    // Primary attempt: search by full display name and check steamId in results.
+    if let Some(profile) = search_by_query_match_steam_id(display_name, steam_id).await? {
+        return Ok(Some(profile));
+    }
+    // Fallback: first token only (in case KovaaK's username is an abbreviation).
+    let first = display_name.split_whitespace().next().unwrap_or(display_name);
+    if first != display_name {
+        return search_by_query_match_steam_id(first, steam_id).await;
+    }
+    Ok(None)
+}
+
+/// Search the KovaaK's `/user/search` endpoint with `query` and return the first
+/// result whose `steamId` field equals `steam_id`.
+async fn search_by_query_match_steam_id(
+    query: &str,
+    steam_id: &str,
+) -> anyhow::Result<Option<UserProfile>> {
+    let response = CLIENT
+        .get(format!("{}/webapp-backend/user/search", BASE_URL))
+        .query(&[("username", query)])
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Ok(None);
+    }
+
+    let results: Vec<SearchResult> = response.json().await.unwrap_or_default();
+    let found = results
+        .into_iter()
+        .find(|r| r.steam_id.as_deref().map(|s| s == steam_id).unwrap_or(false));
+    Ok(found.map(search_result_to_profile))
 }
 
 /// Fetch the most-played scenarios for a user (sorted by play count, descending).
