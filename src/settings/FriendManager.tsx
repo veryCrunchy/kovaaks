@@ -86,11 +86,21 @@ function MostPlayedRow({ username }: { username: string }) {
   );
 }
 
+type SearchType = "auto" | "kovaaks" | "steam";
+
+const SEARCH_TYPES: { label: string; value: SearchType; placeholder: string }[] = [
+  { label: "Auto",      value: "auto",    placeholder: "KovaaK's username or Steam ID" },
+  { label: "KovaaK's", value: "kovaaks", placeholder: "KovaaK's webapp username" },
+  { label: "Steam",    value: "steam",   placeholder: "Steam ID, vanity URL, or steamcommunity.com link" },
+];
+
 export function FriendManager({ settings, onChange }: FriendManagerProps) {
   const [friends, setFriends] = useState<FriendProfile[]>(settings.friends ?? []);
   const [selectedOpponent, setSelectedOpponent] = useState<string | null>(settings.selected_friend ?? null);
   const [input, setInput] = useState("");
+  const [searchType, setSearchType] = useState<SearchType>("auto");
   const [adding, setAdding] = useState(false);
+
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -114,8 +124,10 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     setAdding(true);
     setError(null);
     try {
-      // add_friend validates against KovaaK's API and returns the full profile
-      const profile = await invoke<FriendProfile>("add_friend", { username: trimmed });
+    const profile = await invoke<FriendProfile>("add_friend", {
+        username: trimmed,
+        searchType: searchType === "auto" ? null : searchType,
+      });
       const next = await invoke<FriendProfile[]>("get_friends");
       updateFriends(next);
       setInput("");
@@ -125,7 +137,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     } finally {
       setAdding(false);
     }
-  }, [input, updateFriends]);
+  }, [input, searchType, updateFriends]);
 
   const handleRemove = useCallback(
     async (username: string) => {
@@ -172,16 +184,35 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
       >
         Friends
       </h1>
-      <p className="text-xs mb-8" style={{ color: "rgba(255,255,255,0.35)" }}>
-        Add friends by their KovaaK's webapp username. Their best scores are fetched
-        automatically from the KovaaK's API when you start a scenario.
+      <p className="text-xs mb-6" style={{ color: "rgba(255,255,255,0.35)" }}>
+        Add friends by KovaaK's username, Steam64 ID, vanity URL, or steamcommunity.com link.
+        Friends with a linked KovaaK's account support VS-mode score comparison.
       </p>
+
+      {/* Search type toggle */}
+      <div className="flex gap-1 mb-3">
+        {SEARCH_TYPES.map((t) => (
+          <button
+            key={t.value}
+            onClick={() => setSearchType(t.value)}
+            className="px-3 py-1 rounded text-xs"
+            style={{
+              background: searchType === t.value ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.04)",
+              border: searchType === t.value ? "1px solid rgba(0,245,160,0.4)" : "1px solid rgba(255,255,255,0.08)",
+              color: searchType === t.value ? "#00f5a0" : "rgba(255,255,255,0.35)",
+              cursor: "pointer",
+            }}
+          >
+            {t.label}
+          </button>
+        ))}
+      </div>
 
       {/* Add input */}
       <div className="flex gap-2 mb-6">
         <input
           type="text"
-          placeholder="KovaaK's username"
+          placeholder={SEARCH_TYPES.find((t) => t.value === searchType)?.placeholder ?? ""}
           value={input}
           onChange={(e) => { setInput(e.target.value); setError(null); }}
           onKeyDown={handleKeyDown}
@@ -247,7 +278,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
             color: "rgba(255,255,255,0.3)",
           }}
         >
-          No friends added yet. Enter a KovaaK's username above.
+          No friends added yet. Enter a KovaaK's username, Steam name, or Steam ID above.
         </div>
       ) : (
         <div className="flex flex-col gap-2">

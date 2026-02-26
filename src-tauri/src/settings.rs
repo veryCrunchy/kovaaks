@@ -118,7 +118,8 @@ pub struct AppSettings {
     pub hud_feedback_visible: bool,
     /// Whether the post-session overview card is shown after each run.
     #[serde(default = "default_true")]
-    pub hud_post_session_visible: bool,}
+    pub hud_post_session_visible: bool,
+}
 
 impl Default for AppSettings {
     fn default() -> Self {
