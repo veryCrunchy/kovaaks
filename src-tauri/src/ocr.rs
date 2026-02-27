@@ -191,7 +191,8 @@ pub(crate) fn capture_text(rect: crate::settings::RegionRect) -> anyhow::Result<
         // at least 64 px tall — same logic as capture_and_ocr for the SPM counter.
         let scale = {
             let target_h: u32 = 64;
-            (target_h / h.max(1)).clamp(2, 6)
+            let h = h.max(1);
+            ((target_h + h - 1) / h).clamp(2, 6)
         };
         let (ocr_pixels, ocr_w, ocr_h) = upscale_nearest(&pixels, w, h, scale);
         return run_windows_ocr(ocr_pixels, ocr_w, ocr_h);
@@ -414,9 +415,11 @@ fn capture_and_ocr(rect: RegionRect) -> anyhow::Result<Option<LiveScorePayload>>
     // 4× nearest-neighbour keeps digits sharp; no blurry interpolation artefacts.
     let scale = {
         // Choose scale so the region is at least 64 px tall after scaling.
+        // Use ceiling division so a 25px region gets 3× (75px) not 2× (50px).
         // Minimum 2×, maximum 6× to avoid burning unnecessary CPU.
         let target_h: u32 = 64;
-        (target_h / h.max(1)).clamp(2, 6)
+        let h = h.max(1);
+        ((target_h + h - 1) / h).clamp(2, 6)
     };
     let (ocr_pixels, ocr_w, ocr_h) = upscale_nearest(&pixels, w, h, scale);
 

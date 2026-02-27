@@ -111,6 +111,11 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);  // mirrors session active
 static FIELD_REGIONS: Lazy<Mutex<StatsFieldRegions>> = Lazy::new(|| Mutex::new(StatsFieldRegions::default()));
 static POLL_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(100);
 
+/// API-provided aim type hint for the current scenario.
+/// Set when a scenario name is confirmed via `validate_scenario`.
+/// Values mirror the KovaaK's API: "Clicking", "Tracking", "Switching", "Other".
+static API_AIM_HINT: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
+
 struct StatsState {
     prev: Option<StatsPanelReading>,
     ttk_history: VecDeque<(f32, Instant)>, // (ttk_secs, captured_at)
@@ -162,8 +167,51 @@ pub fn set_active(active: bool) {
         s.scenario_type = ScenarioType::Unknown;
         s.active_readings = 0;
         s.type_vote_window.clear();
+        // Pre-seed vote window from API hint so classification is immediate.
+        seed_votes_from_api_hint(&mut s);
         s.cooldowns.clear();
         s.streaks.clear();
+    }
+}
+
+/// Called from `validate_scenario` when the API resolves an aim type for the
+/// current scenario name.  Stores the hint and, if a session is already running,
+/// pre-seeds the vote window immediately so the type is known right away.
+///
+/// `aim_type` is the raw KovaaK's API string: "Clicking", "Tracking",
+/// "Switching", "Other", or `None` (unknown / not found).
+pub fn set_api_aim_hint(aim_type: Option<String>) {
+    log::info!("stats_ocr: API aim hint = {:?}", aim_type);
+    if let Ok(mut h) = API_AIM_HINT.lock() {
+        *h = aim_type;
+    }
+    // If a session is already running, re-seed the vote window immediately.
+    if ACTIVE.load(Ordering::Relaxed) {
+        if let Ok(mut s) = STATE.lock() {
+            seed_votes_from_api_hint(&mut s);
+        }
+    }
+}
+
+/// Inject 5 synthetic votes into the vote window based on the stored API hint.
+/// This seeds the classifier before any stats panel readings arrive, without
+/// permanently overriding the live signal (5 votes out of 20 = 25% weight,
+/// quickly diluted once real ticks land).
+fn seed_votes_from_api_hint(s: &mut StatsState) {
+    let hint = API_AIM_HINT.lock().ok().and_then(|h| h.clone());
+    let seed = match hint.as_deref() {
+        Some("Tracking")            => Some(ScenarioType::PureTracking),
+        Some("Clicking")            => Some(ScenarioType::OneShotClicking),
+        Some("Switching")           => Some(ScenarioType::OneShotClicking),
+        // "Other" and None → no seed; let the stats signals decide.
+        _ => None,
+    };
+    if let Some(vote) = seed {
+        for _ in 0..5 {
+            s.type_vote_window.push_back(vote.clone());
+            if s.type_vote_window.len() > 20 { s.type_vote_window.pop_front(); }
+        }
+        log::info!("stats_ocr: seeded 5× {:?} votes from API hint {:?}", vote.as_str(), hint);
     }
 }
 
@@ -396,20 +444,39 @@ fn poll_loop(app: AppHandle) {
 
 fn parse_kills_field(text: &str) -> Option<u32> {
     // Kill count is a plain integer, possibly thousands-formatted ("1,234").
-    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u32>().ok()
+    // Parse the FIRST whitespace-delimited token only — concatenating all digits
+    // across the whole text would merge bleed-in numbers (e.g. "29 30" → 2930).
+    let normalised = normalise_ocr_digits(text);
+    for tok in normalised.split_whitespace() {
+        let digits: String = tok.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            if let Ok(v) = digits.parse::<u32>() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn parse_spm_field(text: &str) -> Option<u32> {
-    // SPM is a plain integer (score per minute), same format as kill count.
-    let digits: String = text.chars().filter(|c| c.is_ascii_digit()).collect();
-    digits.parse::<u32>().ok()
+    // SPM is a plain integer (score per minute), same token-first logic as kills.
+    let normalised = normalise_ocr_digits(text);
+    for tok in normalised.split_whitespace() {
+        let digits: String = tok.chars().filter(|c| c.is_ascii_digit()).collect();
+        if !digits.is_empty() {
+            if let Ok(v) = digits.parse::<u32>() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn parse_kps_field(text: &str) -> Option<f32> {
     // KPS is a decimal like "2.3" or "0.84".
-    // Take the first whitespace token that parses as f32.
-    let normalised = text.replace(',', ".");
+    // Apply full confusable normalisation (O→0, l→1, ,→.) before digit filtering
+    // so "l.5" parses as 1.5 instead of 0.5.
+    let normalised = normalise_ocr_digits(text);
     for tok in normalised.split_whitespace() {
         // Keep only digit/dot characters in case OCR adds stray letters.
         let clean: String = tok.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
@@ -426,13 +493,21 @@ fn parse_accuracy_field(text: &str) -> (Option<u32>, Option<u32>, Option<f32>) {
     //   "2,833/5,658 (50.1%)"   — KovaaK's default
     //   "2833/5658(50.1%)"      — compact (no spaces)
     //   "(50.1%)"               — pct only if user draws a tight box
-    // Strategy: extract the fraction first, then the percentage.
+    // Apply confusable normalisation first so "5O.1%" parses as 50.1% not 5.1%.
+    // We strip commas directly (thousands separators) rather than converting them
+    // to periods — the fraction digits are integers, not decimals.
+    let normalised: String = text.chars().map(|c| match c {
+        'O' | 'o' => '0',
+        'l' | 'I' => '1',
+        other => other,
+    }).collect();
+
     let mut hits: Option<u32> = None;
     let mut shots: Option<u32> = None;
     let mut pct: Option<f32> = None;
 
     // Try to find "NNN/NNN" where N may include commas.
-    let clean = text.replace(',', "");
+    let clean = normalised.replace(',', "");
     if let Some(slash_pos) = clean.find('/') {
         let lhs: String = clean[..slash_pos].chars().filter(|c| c.is_ascii_digit()).collect();
         let rhs: String = clean[slash_pos + 1..].chars()
@@ -443,8 +518,8 @@ fn parse_accuracy_field(text: &str) -> (Option<u32>, Option<u32>, Option<f32>) {
     }
 
     // Try to find "(NN.N%)" pattern for the percentage.
-    if let Some(open) = text.find('(') {
-        let after = &text[open + 1..];
+    if let Some(open) = normalised.find('(') {
+        let after = &normalised[open + 1..];
         let num: String = after.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
         pct = num.parse::<f32>().ok();
     }
@@ -464,15 +539,24 @@ fn parse_damage_field(text: &str) -> Option<f64> {
     //   "8,836"             — plain number (thousands-formatted)
     //   "34/34 (100.0%)"    — same X/Y(pct) as the accuracy field
     // When a slash is present, take only the numerator (damage dealt).
-    let source = if let Some(slash) = text.find('/') { &text[..slash] } else { text };
+    // Apply letter confusable fixes (O→0, l→1) but NOT comma→period:
+    // commas are thousands separators here ("8,836" → 8836, not 8.836).
+    let normalised: String = text.chars().map(|c| match c {
+        'O' | 'o' => '0',
+        'l' | 'I' => '1',
+        other => other,
+    }).collect();
+    let source = if let Some(slash) = normalised.find('/') { &normalised[..slash] } else { &normalised[..] };
     let clean: String = source.chars().filter(|c| c.is_ascii_digit() || *c == '.').collect();
     clean.parse::<f64>().ok()
 }
 
 fn parse_ttk_field(text: &str) -> Option<f32> {
     // TTK is shown as "0.243s" or "243ms" or "--" (no kills yet).
-    // Strip non-numeric except '.' to get the float value in seconds.
-    let lower = text.to_lowercase();
+    // Apply confusable normalisation before the digit filter so "l.489s" parses
+    // as 1.489 instead of 0.489 (l dropped without normalisation).
+    let normalised = normalise_ocr_digits(text);
+    let lower = normalised.to_lowercase();
     if lower.contains("--") || lower.contains("n/a") {
         return None;
     }
@@ -670,7 +754,7 @@ fn process_reading(app: &AppHandle, mut reading: StatsPanelReading, last_emitted
                     let miss_count = new_shots - new_hits;
                     if overshoot > 0.40 {
                         emit_feedback(app, "miss_overshoot",
-                            &format!("{} miss{} — overshoot detected, try to decelerate before clicking",
+                            &format!("{} miss{} from overshoot — shorten your flick and let the cursor settle before clicking",
                                 miss_count, if miss_count > 1 { "es" } else { "" }),
                             "warning", &mut s.cooldowns, 8);
                     }
@@ -684,11 +768,11 @@ fn process_reading(app: &AppHandle, mut reading: StatsPanelReading, last_emitted
                     let pct = reading.accuracy_pct.unwrap_or(0.0);
                     let msg = match s.scenario_type {
                         ScenarioType::PureTracking | ScenarioType::Unknown =>
-                            format!("Accuracy falling to {pct:.0}% — refocus on smooth cursor control"),
+                            format!("Accuracy slipping to {pct:.0}% — slow down slightly and focus on staying glued to the target"),
                         ScenarioType::ReactiveClicking =>
-                            format!("Accuracy {pct:.0}% dropping — slow your reaction, wait for target focus"),
+                            format!("Accuracy down to {pct:.0}% — wait a split second for full focus before clicking"),
                         _ =>
-                            format!("Accuracy falling to {pct:.0}% — reset tempo and pre-aim better"),
+                            format!("Accuracy at {pct:.0}% and dropping — take a breath and pre-aim the next spawn before it appears"),
                     };
                     emit_feedback(app, "accuracy_drop", &msg, "warning", &mut s.cooldowns, 15);
                 }
@@ -705,7 +789,7 @@ fn process_reading(app: &AppHandle, mut reading: StatsPanelReading, last_emitted
                         let avg_ms = (avg * 1000.0) as u32;
                         let std_ms = (std * 1000.0) as u32;
                         emit_feedback(app, "ttk_inconsistent",
-                            &format!("Inconsistent TTK ({avg_ms}ms avg \u{b1}{std_ms}ms) — work on pre-aim consistency"),
+                            &format!("Kill times all over the place ({avg_ms}ms avg \u{b1}{std_ms}ms) — try pre-aiming spawn points to get consistent timing"),
                             "tip", &mut s.cooldowns, 20);
                         *s.streaks.entry("ttk_inconsistent").or_insert(0) = 0;
                     }
@@ -851,7 +935,7 @@ fn scenario_positive_feedback(
                 let s = streaks.entry("high_spm").or_insert(0);
                 *s += 1;
                 if *s >= 10 {
-                    emit_feedback(app, "high_spm", "Excellent tracking — SPM consistently high", "positive", cooldowns, 20);
+                    emit_feedback(app, "high_spm", "Excellent tracking — you're locked in and scoring well!", "positive", cooldowns, 20);
                     *s = 0;
                 }
             } else {
@@ -868,7 +952,7 @@ fn scenario_positive_feedback(
                     *s += 1;
                     if *s >= 5 {
                         emit_feedback(app, "ttk_improving",
-                            &format!("Consistent TTK! Averaging {avg_ms:.0}ms — excellent aim control"),
+                            &format!("Consistent kill speed at {avg_ms:.0}ms — great aim control, keep it dialed in!"),
                             "positive", cooldowns, 25);
                         *s = 0;
                     }
@@ -883,7 +967,7 @@ fn scenario_positive_feedback(
                 *s += 1;
                 if *s >= 8 {
                     emit_feedback(app, "high_accuracy",
-                        &format!("Accuracy above 75% — great shot selection"),
+                        &format!("75%+ accuracy — excellent shot discipline, you're picking your shots well!"),
                         "positive", cooldowns, 30);
                     *s = 0;
                 }
