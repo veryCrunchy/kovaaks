@@ -1,4 +1,5 @@
 mod file_watcher;
+mod replay_store;
 mod screen_recorder;
 mod kovaaks_api;
 mod logger;
@@ -45,6 +46,8 @@ struct AutoSetupProgress {
 struct AutoSetupComplete {
     regions: settings::StatsFieldRegions,
     confirmed_count: usize,
+    /// Auto-detected scenario-title OCR region derived from UI.json (may be None).
+    scenario_region: Option<settings::RegionRect>,
 }
 
 // ─── Monitor helpers ──────────────────────────────────────────────────────────
@@ -262,7 +265,8 @@ fn get_friends(state: tauri::State<AppState>) -> Result<Vec<FriendProfile>, Stri
 ///                     Steam (so vanity URLs like "aimicantaim" also work)
 ///
 /// Friends resolved via Steam with no linked KovaaK's account are stored with
-/// their Steam64 ID as `username`; VS-mode comparison is unavailable for them.
+/// their Steam64 ID as `username`; scores are still fetched using the steamId
+/// query param so VS-mode comparison works for them too.
 #[tauri::command]
 async fn add_friend(
     username: String,
@@ -363,17 +367,19 @@ fn remove_friend(
 }
 
 /// Fetch a friend's best score for a specific scenario from the KovaaK's API.
-/// Returns `null` if the user has never played that scenario, or if the friend
-/// has no linked KovaaK's account (username is their Steam64 ID).
+/// Works for both KovaaK's-account holders (lookup by username) and Steam-only
+/// players (lookup by Steam64 ID via the `steamId` query param).
 #[tauri::command]
 async fn fetch_friend_score(
     username: String,
     scenario_name: String,
 ) -> Result<Option<f64>, String> {
-    // Friends without a KovaaK's account are stored with their Steam64 ID as
-    // username. The score endpoint requires a real username — return None early.
+    // Friends without a KovaaK's webapp account are stored with their Steam64 ID
+    // as the username field.  The API supports fetching scores by steamId directly.
     if steam_api::is_steam64_id(&username) {
-        return Ok(None);
+        return kovaaks_api::fetch_best_score_by_steam_id(&username, &scenario_name)
+            .await
+            .map_err(|e| e.to_string());
     }
     kovaaks_api::fetch_best_score(&username, &scenario_name)
         .await
@@ -674,6 +680,14 @@ fn get_session_screen_frames() -> Vec<screen_recorder::ScreenFrame> {
 }
 
 #[tauri::command]
+fn load_session_replay(
+    app: AppHandle,
+    session_id: String,
+) -> Option<replay_store::ReplayData> {
+    replay_store::load_replay(&app, &session_id)
+}
+
+#[tauri::command]
 fn get_monitors(app: AppHandle) -> Vec<MonitorInfo> {
     let Some(win) = app.get_webview_window("overlay") else {
         return vec![];
@@ -781,6 +795,37 @@ fn clear_log_buffer() {
     logger::clear_buffer();
 }
 
+#[tauri::command]
+async fn search_scenarios(
+    query: String,
+    page: u64,
+    max: u64,
+) -> Result<kovaaks_api::ScenarioPage, String> {
+    kovaaks_api::search_scenarios(&query, page, max)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_leaderboard_page(
+    leaderboard_id: u64,
+    page: u64,
+    max: u64,
+) -> Result<kovaaks_api::LeaderboardPage, String> {
+    kovaaks_api::get_leaderboard_page(leaderboard_id, page, max)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_scenario_details(
+    leaderboard_id: u64,
+) -> Result<kovaaks_api::ScenarioDetails, String> {
+    kovaaks_api::get_scenario_details(leaderboard_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 #[derive(serde::Serialize)]
 struct CursorPos { x: i32, y: i32 }
 
@@ -829,15 +874,15 @@ fn start_auto_setup(
     if AUTO_SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return Ok(()); // already running
     }
-    let monitor_index = {
+    let (monitor_index, stats_dir) = {
         let s = state.settings.lock().map_err(|e| e.to_string())?;
-        s.monitor_index
+        (s.monitor_index, s.stats_dir.clone())
     };
     let monitor_rect = resolve_monitor_rect(&app, monitor_index)?;
     let app_clone = app.clone();
     std::thread::Builder::new()
         .name("auto-setup".into())
-        .spawn(move || auto_setup_loop(app_clone, monitor_rect))
+        .spawn(move || auto_setup_loop(app_clone, monitor_rect, stats_dir))
         .map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -846,6 +891,36 @@ fn start_auto_setup(
 #[tauri::command]
 fn stop_auto_setup() {
     AUTO_SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+// ─── UI.json helpers ──────────────────────────────────────────────────────────
+
+/// Read KovaaK's UI.json from `{stats_dir}/../../Saved/SaveGames/UI.json`.
+fn read_kovaaks_ui_json(stats_dir: &str) -> Option<serde_json::Value> {
+    let base = std::path::Path::new(stats_dir).parent()?.parent()?;
+    let path = base.join("Saved").join("SaveGames").join("UI.json");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|e| log::debug!("ui_json: could not read {}: {e}", path.display()))
+        .ok()?;
+    serde_json::from_str(&text)
+        .map_err(|e| log::debug!("ui_json: parse error: {e}"))
+        .ok()
+}
+
+fn ui_window_pos(ui: &serde_json::Value, name: &str) -> Option<(f32, f32)> {
+    ui["windowPositionSettings"].as_array()?.iter()
+        .find(|w| w["windowName"].as_str() == Some(name))
+        .map(|w| (
+            w["position"]["x"].as_f64().unwrap_or(0.0) as f32,
+            w["position"]["y"].as_f64().unwrap_or(0.0) as f32,
+        ))
+}
+
+fn ui_window_scale(ui: &serde_json::Value, name: &str) -> f32 {
+    ui["windowScaleSettings"].as_array()
+        .and_then(|a| a.iter().find(|w| w["windowName"].as_str() == Some(name)))
+        .and_then(|w| w["scale"].as_f64())
+        .unwrap_or(1.0) as f32
 }
 
 /// Background loop for timed auto-setup.
@@ -862,14 +937,14 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
     const POLL_INTERVAL: Duration = Duration::from_millis(1500);
     const CONFIRM_THRESHOLD: u32 = 3;
     const TOLERANCE: i32 = 12;
-    const TOTAL: usize = 5;
+    const TOTAL: usize = 6;
 
     struct Candidate {
         rect: settings::RegionRect,
         consecutive: u32,
     }
 
-    let field_keys: [&str; TOTAL] = ["kills", "kps", "accuracy", "damage", "ttk"];
+    let field_keys: [&str; TOTAL] = ["kills", "kps", "accuracy", "damage", "spm", "ttk"];
     let mut candidates: HashMap<&str, Candidate> = HashMap::new();
     let mut confirmed_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut confirmed_regions = settings::StatsFieldRegions::default();
@@ -900,6 +975,7 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
             ("kps",      detected.kps),
             ("accuracy", detected.accuracy),
             ("damage",   detected.damage),
+            ("spm",      detected.spm),
             ("ttk",      detected.ttk),
         ];
 
@@ -930,6 +1006,7 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
                         "kps"      => confirmed_regions.kps      = Some(r),
                         "accuracy" => confirmed_regions.accuracy = Some(r),
                         "damage"   => confirmed_regions.damage   = Some(r),
+                        "spm"      => confirmed_regions.spm      = Some(r),
                         "ttk"      => confirmed_regions.ttk      = Some(r),
                         _ => {}
                     }
@@ -1047,30 +1124,49 @@ fn find_label_in_words(words: &[ocr::OcrWordResult], tokens: &[&str]) -> Option<
     if tokens.is_empty() || words.is_empty() {
         return None;
     }
-    'outer: for start in 0..words.len() {
-        if !words[start].text.eq_ignore_ascii_case(tokens[0]) {
-            continue;
-        }
-        let mut bbox = word_to_bbox(&words[start]);
-        let row_cy = bbox.centre_y();
-        for (ti, &tok) in tokens.iter().enumerate().skip(1) {
-            let mut found = false;
-            let end = (start + ti + 5).min(words.len());
-            for wi in (start + ti)..end {
-                let cand = &words[wi];
-                if cand.text.eq_ignore_ascii_case(tok)
-                    && (word_to_bbox(cand).centre_y() - row_cy).abs() < 20
-                {
-                    bbox = bbox.union(&word_to_bbox(cand));
-                    found = true;
-                    break;
+    // KovaaK's stats panel labels include a trailing colon in the rendered text
+    // (e.g. "Accuracy:" / "Kill Count:").  Windows.Media.Ocr preserves that colon
+    // as part of the word token.  Strip trailing punctuation before comparing so
+    // that label alternatives like "Accuracy" match the OCR word "Accuracy:".
+    fn clean(s: &str) -> &str {
+        s.trim_end_matches(|c: char| ":.,!?".contains(c))
+    }
+
+    // Two passes: first prefer words whose raw OCR text ends with ":"
+    // (KovaaK's stats-panel labels like "SPM:" / "KPS:"), then accept any
+    // match.  This prevents accidentally matching a plain "SPM" leaderboard
+    // column header that also appears on screen.
+    for require_colon in [true, false] {
+        'outer: for start in 0..words.len() {
+            let first_raw = &words[start].text;
+            if !clean(first_raw).eq_ignore_ascii_case(tokens[0]) {
+                continue;
+            }
+            // In pass 1 the first-token word must end with ":"
+            if require_colon && !first_raw.ends_with(':') {
+                continue;
+            }
+            let mut bbox = word_to_bbox(&words[start]);
+            let row_cy = bbox.centre_y();
+            for (ti, &tok) in tokens.iter().enumerate().skip(1) {
+                let mut found = false;
+                let end = (start + ti + 5).min(words.len());
+                for wi in (start + ti)..end {
+                    let cand = &words[wi];
+                    if clean(&cand.text).eq_ignore_ascii_case(tok)
+                        && (word_to_bbox(cand).centre_y() - row_cy).abs() < 20
+                    {
+                        bbox = bbox.union(&word_to_bbox(cand));
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    continue 'outer;
                 }
             }
-            if !found {
-                continue 'outer;
-            }
+            return Some(bbox);
         }
-        return Some(bbox);
     }
     None
 }
@@ -1086,26 +1182,49 @@ fn find_label_in_words(words: &[ocr::OcrWordResult], tokens: &[&str]) -> Option<
 fn find_value_box(words: &[ocr::OcrWordResult], label_box: &BBox) -> Option<BBox> {
     let row_cy = label_box.centre_y();
     let row_tolerance = (label_box.height as i32).max(12);
+    // Stop merging words once there is a horizontal gap larger than this.
+    // This prevents a distant timer or unrelated number from being pulled in.
+    const MAX_WORD_GAP: i32 = 40;
+
+    // Collect candidates: right of label, same row, contains a digit.
+    let mut candidates: Vec<BBox> = words
+        .iter()
+        .filter_map(|w| {
+            let wb = word_to_bbox(w);
+            if wb.x < label_box.right() - 4 {
+                return None;
+            }
+            if (wb.centre_y() - row_cy).abs() > row_tolerance {
+                return None;
+            }
+            if !w.text.chars().any(|c| c.is_ascii_digit()) {
+                return None;
+            }
+            Some(wb)
+        })
+        .collect();
+
+    // Work left-to-right so we stop at the first large gap.
+    candidates.sort_by_key(|wb| wb.x);
+
+    // The first digit word must be reasonably close to the label's right edge.
+    // If it isn't (e.g. value not yet rendered and the only digit on the row is
+    // the FPS counter 1600 px away), reject the entire match.
+    const MAX_LABEL_TO_VALUE: i32 = 200;
 
     let mut combined: Option<BBox> = None;
-    for w in words {
-        let wb = word_to_bbox(w);
-        // Right of the label
-        if wb.x < label_box.right() - 4 {
-            continue;
+    for wb in candidates {
+        if let Some(ref acc) = combined {
+            if wb.x - acc.right() > MAX_WORD_GAP {
+                break; // large gap → unrelated element, stop here
+            }
+            combined = Some(acc.union(&wb));
+        } else {
+            if wb.x - label_box.right() > MAX_LABEL_TO_VALUE {
+                break; // first candidate is too far — no value near label
+            }
+            combined = Some(wb);
         }
-        // Same row
-        if (wb.centre_y() - row_cy).abs() > row_tolerance {
-            continue;
-        }
-        // Must contain at least one digit
-        if !w.text.chars().any(|c| c.is_ascii_digit()) {
-            continue;
-        }
-        combined = Some(match combined {
-            Some(acc) => acc.union(&wb),
-            None => wb,
-        });
     }
     combined
 }
@@ -1126,6 +1245,7 @@ fn detect_field_regions_from_words(
         ("kps",      &[&["KPS"], &["K/s"], &["Kills/s"], &["k/s"]]),
         ("accuracy", &[&["Accuracy"], &["Acc"]]),
         ("damage",   &[&["Damage"], &["Damage", "Dealt"], &["Dmg"]]),
+        ("spm",      &[&["SPM"], &["Shots/m"], &["Shots/min"]]),
         ("ttk",      &[&["Avg", "TTK"], &["TTK"], &["Avg", "Time"]]),
     ];
 
@@ -1137,7 +1257,8 @@ fn detect_field_regions_from_words(
     }
 
     let mut out = settings::StatsFieldRegions::default();
-    const PAD: i32 = 6; // padding added on every side (physical pixels)
+    const PAD_V: i32 = 6;  // vertical padding (top / bottom)
+    const PAD_R: i32 = 30; // right padding — generous so growing numbers aren't clipped
 
     for &(field, alternatives) in LABELS {
         let mut found_label: Option<BBox> = None;
@@ -1156,11 +1277,20 @@ fn detect_field_regions_from_words(
             continue;
         };
 
+        // Left edge: anchored to the label's right side + a small gap.
+        // This ensures the region never clips leading digits as a number
+        // grows wider (e.g. "1/2" → "100/149") because the value always
+        // extends rightward from a fixed column just past the label.
+        const LEFT_GAP: i32 = 4;
+        let left  = capture_rect.x + label_box.right() + LEFT_GAP;
+        let right = capture_rect.x + val_box.right()   + PAD_R;
+        let top   = capture_rect.y + (val_box.y - PAD_V).max(0);
+        let bot   = capture_rect.y + val_box.bottom()   + PAD_V;
         let r = settings::RegionRect {
-            x: capture_rect.x + (val_box.x - PAD).max(0),
-            y: capture_rect.y + (val_box.y - PAD).max(0),
-            width: (val_box.width as i32 + PAD * 2) as u32,
-            height: (val_box.height as i32 + PAD * 2) as u32,
+            x:      left,
+            y:      top,
+            width:  (right - left).max(1) as u32,
+            height: (bot   - top ).max(1) as u32,
         };
         log::info!(
             "auto_detect: {} → ({},{}) {}×{}",
@@ -1171,6 +1301,7 @@ fn detect_field_regions_from_words(
             "kps"      => out.kps      = Some(r),
             "accuracy" => out.accuracy = Some(r),
             "damage"   => out.damage   = Some(r),
+            "spm"      => out.spm      = Some(r),
             "ttk"      => out.ttk      = Some(r),
             _ => {}
         }
@@ -1310,6 +1441,7 @@ pub fn run() {
             get_session_mouse_data,
             get_session_raw_positions,
             get_session_screen_frames,
+            load_session_replay,
             toggle_settings,
             toggle_overlay,
             set_mouse_passthrough,
@@ -1322,6 +1454,9 @@ pub fn run() {
             auto_detect_stats_regions,
             start_auto_setup,
             stop_auto_setup,
+            search_scenarios,
+            get_leaderboard_page,
+            get_scenario_details,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
         ])
