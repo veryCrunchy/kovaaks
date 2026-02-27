@@ -169,13 +169,14 @@ fn save_settings(
     *s = new_settings.clone();
     settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
     file_watcher::restart(&app, &new_settings.stats_dir);
-    ocr::update_region(&app, new_settings.region);
+    ocr::update_region(&app, new_settings.stats_field_regions.spm);
     ocr::update_scenario_region(new_settings.scenario_region);
     ocr::update_poll_ms(new_settings.ocr_poll_ms);
     mouse_hook::set_dpi(new_settings.mouse_dpi);
     mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
     stats_ocr::update_field_regions(new_settings.stats_field_regions);
+    let _ = app.emit("settings-changed", ());
     Ok(())
 }
 

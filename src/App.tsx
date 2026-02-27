@@ -54,6 +54,12 @@ export default function App() {
   // Load initial visibility
   useEffect(() => { reloadHudVis(); }, []);
 
+  // Reload HUD visibility whenever settings are saved (from any context)
+  useEffect(() => {
+    const unlisten = listen<void>("settings-changed", () => { reloadHudVis(); });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
   // F8 — toggle settings panel
   useEffect(() => {
     const unlisten = listen<void>("toggle-settings", () => {
