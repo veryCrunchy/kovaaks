@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.1](https://github.com/veryCrunchy/kovaaks/compare/v0.8.0...v0.8.1) (2026-02-27)
+
+
+### Bug Fixes
+
+* **mouse-hook:** reduce input latency by optimizing raw mouse event processing ([57a0432](https://github.com/veryCrunchy/kovaaks/commit/57a043231b383fae47c455e1e3882ddabc5b30c4))
+* **window-tracker:** optimize overlay visibility handling and reassert TOPMOST state ([e855e59](https://github.com/veryCrunchy/kovaaks/commit/e855e59ecea341588f4f22cb965ce09c4400ac7a))
+
 ## [0.8.0](https://github.com/veryCrunchy/kovaaks/compare/v0.7.0...v0.8.0) (2026-02-27)
 
 
