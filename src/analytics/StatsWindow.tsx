@@ -1,17 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
+import { MousePathViewer } from "./MousePathViewer";
+import type { RawPositionPoint, MetricPoint, ScreenFrame } from "../types/mouse";
 import {
-  AreaChart,
-  Area,
   LineChart,
   Line,
+  BarChart,
+  Bar,
+  Cell,
+  RadarChart,
+  PolarGrid,
+  PolarAngleAxis,
+  PolarRadiusAxis,
+  Radar,
   XAxis,
   YAxis,
   Tooltip,
   ResponsiveContainer,
   CartesianGrid,
   ReferenceLine,
+  ReferenceArea,
   TooltipProps,
 } from "recharts";
 
@@ -52,9 +62,16 @@ interface SessionRecord {
   timestamp: string;
   smoothness: SmoothnessSnapshot | null;
   stats_panel: StatsPanelSnapshot | null;
+  has_replay: boolean;
 }
 
-type Tab = "overview" | "mouse" | "gamestats" | "trends";
+interface ReplayData {
+  positions: RawPositionPoint[];
+  metrics: MetricPoint[];
+  frames?: ScreenFrame[];
+}
+
+type Tab = "overview" | "movement" | "performance" | "coaching" | "replay" | "leaderboard";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -139,6 +156,96 @@ function mean(arr: number[]) {
   return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
 
+function stddev(arr: number[]): number {
+  if (arr.length < 2) return 0;
+  const m = mean(arr);
+  return Math.sqrt(mean(arr.map((v) => (v - m) ** 2)));
+}
+
+function linearRegression(xs: number[], ys: number[]): { slope: number; intercept: number } {
+  const n = xs.length;
+  if (n < 2) return { slope: 0, intercept: n === 1 ? ys[0] : 0 };
+  const sx = xs.reduce((a, b) => a + b, 0);
+  const sy = ys.reduce((a, b) => a + b, 0);
+  const sxy = xs.reduce((a, xi, i) => a + xi * ys[i], 0);
+  const sxx = xs.reduce((a, xi) => a + xi ** 2, 0);
+  const slope = (n * sxy - sx * sy) / (n * sxx - sx ** 2);
+  const intercept = (sy - slope * sx) / n;
+  return { slope, intercept };
+}
+
+function rollingMean(arr: number[], window: number): (number | null)[] {
+  return arr.map((_, i) => {
+    if (i < window - 1) return null;
+    const slice = arr.slice(i - window + 1, i + 1);
+    return Math.round(mean(slice));
+  });
+}
+
+function percentileOf(sortedArr: number[], p: number): number {
+  if (!sortedArr.length) return 0;
+  const idx = Math.max(0, Math.ceil((sortedArr.length * p) / 100) - 1);
+  return sortedArr[idx];
+}
+
+// ─── Warmup detection ─────────────────────────────────────────────────────────
+
+/** Sessions within a single continuous play block (gap < WARMUP_GAP_MS). */
+interface PlayBlock {
+  sessions: SessionRecord[];
+  /** ms gap from last session of previous block; null = first ever block. */
+  gapBeforeMs: number | null;
+}
+
+const WARMUP_GAP_MS = 6 * 60 * 60 * 1000; // 6 h gap → new play block
+const WARMUP_SESSION_COUNT = 2;             // first N sessions in a new block = candidates
+const WARMUP_SCORE_SD = 0.8;               // below (avg − N·σ) = warmup candidate
+
+function groupIntoPlayBlocks(sorted: SessionRecord[]): PlayBlock[] {
+  if (sorted.length === 0) return [];
+  const blocks: PlayBlock[] = [];
+  let current: SessionRecord[] = [sorted[0]];
+  let blockGap: number | null = null;
+  for (let i = 1; i < sorted.length; i++) {
+    const prev = parseTimestamp(sorted[i - 1].timestamp)?.getTime() ?? 0;
+    const cur  = parseTimestamp(sorted[i].timestamp)?.getTime() ?? 0;
+    const gap  = cur - prev;
+    if (gap > WARMUP_GAP_MS) {
+      blocks.push({ sessions: current, gapBeforeMs: blockGap });
+      blockGap = gap;
+      current = [sorted[i]];
+    } else {
+      current.push(sorted[i]);
+    }
+  }
+  blocks.push({ sessions: current, gapBeforeMs: blockGap });
+  return blocks;
+}
+
+/**
+ * Returns a Set of session IDs classified as warmup runs.
+ * A session is warmup if it's one of the first N sessions in a play block
+ * that starts after a 6+ hour gap AND its score is below (avg − 0.8σ).
+ * Requires ≥ 5 sessions for a reliable baseline.
+ */
+function classifyWarmup(sorted: SessionRecord[]): Set<string> {
+  if (sorted.length < 5) return new Set();
+  const scores = sorted.map((r) => r.score);
+  const avg = mean(scores);
+  const sd  = stddev(scores);
+  const threshold = avg - WARMUP_SCORE_SD * sd;
+  const warmupIds = new Set<string>();
+  for (const block of groupIntoPlayBlocks(sorted)) {
+    if (!block.gapBeforeMs || block.gapBeforeMs < WARMUP_GAP_MS) continue;
+    for (const s of block.sessions.slice(0, WARMUP_SESSION_COUNT)) {
+      if (s.score < threshold) warmupIds.add(s.id);
+    }
+  }
+  return warmupIds;
+}
+
+type SessionFilter = "all" | "warmup" | "warmedup";
+
 // ─── Sub-components ────────────────────────────────────────────────────────────
 
 function StatCard({
@@ -167,13 +274,28 @@ function StatCard({
       </div>
       <div
         style={{
-          fontSize: 20,
-          fontWeight: 700,
-          color: accent ?? "#fff",
-          lineHeight: 1,
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          width: "100%",
+          minWidth: 0,
         }}
       >
-        {value}
+        <span
+          style={{
+            fontSize: "clamp(14px, 2.5vw, 20px)",
+            fontWeight: 700,
+            color: accent ?? "#fff",
+            lineHeight: 1,
+            maxWidth: "100%",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {value}
+        </span>
       </div>
       {sub && (
         <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
@@ -291,132 +413,132 @@ function detectInsights(records: SessionRecord[]): Insight[] {
       :               "Consider lowering your sensitivity or using a larger mousepad.";
 
     if (composite >= 75)
-      insights.push({ kind: "positive", category: "mouse", title: "Excellent smoothness", description: `Average composite ${composite.toFixed(1)}/100 — your ${smoothPositiveCtx}.` });
+      insights.push({ kind: "positive", category: "mouse", title: "Great movement quality", description: `Overall smoothness ${composite.toFixed(1)}/100 — your ${smoothPositiveCtx}.` });
     else if (composite < 40)
-      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Very low smoothness", description: `Average composite ${composite.toFixed(1)}/100. ${smoothHighIssueCtx}` });
+      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Movement needs work", description: `Overall smoothness ${composite.toFixed(1)}/100. ${smoothHighIssueCtx}` });
     else if (composite < 60)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Below-average smoothness", description: `Average composite ${composite.toFixed(1)}/100. Slow, deliberate practice builds the muscle memory needed for consistent ${isTracking ? "tracking" : "aim"}.` });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Smoothness has room to grow", description: `Overall smoothness ${composite.toFixed(1)}/100. Slow, deliberate practice builds the muscle memory for more consistent ${isTracking ? "tracking" : "aim"}.` });
 
-    // Jitter
+    // Jitter / wobble
     const jitterHighCtx = isTracking
-      ? "Lateral wobble directly reduces on-target time. Check mouse feet wear, grip tension, or try a lower polling rate."
+      ? "Your cursor wobbles off the tracking line. Try relaxing your grip — mouse wobble usually comes from grip tension, not from moving too fast."
       : isAccuracy
-      ? "Micro-tremor on precision targets wastes micro-adjustments. Try lower sensitivity, more wrist support, or relaxing your grip."
-      : "Frequent micro-direction changes. Check mouse feet wear, grip tension, or try a lower polling rate.";
+      ? "Micro-tremor on small precision targets costs you hits. Try a lighter grip, more wrist support, or slightly lower sensitivity."
+      : "Your cursor shakes between movements. Check if your mouse feet are worn, relax your grip, or try moving with your arm rather than your wrist.";
 
     if (jitter > 0.5)
-      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "High jitter", description: jitterHighCtx });
+      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "A lot of aim wobble", description: jitterHighCtx });
     else if (jitter > 0.3)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Moderate jitter", description: isTracking
-        ? "Off-axis wobble during tracking segments. Ensure your grip is relaxed and elbow rests comfortably."
-        : "Some jitter present. Ensure your grip is relaxed and elbow rests comfortably." });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Some aim wobble", description: isTracking
+        ? "Cursor drifts off the tracking line between movements. Relax your grip and let your elbow rest comfortably."
+        : "Some wobble in your movements. Relax your grip and make sure your elbow is supported." });
     else if (jitter < 0.15)
-      insights.push({ kind: "positive", category: "mouse", title: "Very steady aim", description: `Low jitter (${jitter.toFixed(3)})${isTracking ? " — cursor stays locked on-axis with minimal lateral drift" : " — clean aim line with minimal micro-tremor"}.` });
+      insights.push({ kind: "positive", category: "mouse", title: "Rock-steady aim", description: `Very low wobble${isTracking ? " — cursor stays glued to the target with almost no lateral drift" : " — clean, shake-free aim line"}.` });
 
     // Overshoot
     const overshootHighCtx = isOneShot
-      ? "Each overshoot on a one-shot target costs a kill. Practice braking earlier so the cursor arrives on target, not past it."
+      ? "You're shooting past the target on most flicks — each overshoot costs a kill. Practice slowing down right before you arrive so the cursor lands on target, not past it."
       : isReactive
-      ? "Overshooting increases effective reaction TTK. Practice decelerating into the target zone rather than snapping through it."
-      : "You overshoot targets often after flicks. Try deceleration drills or wrist aim exercises.";
+      ? "Overshooting adds time before you can fire — your cursor has to come back. Practice braking into the target zone rather than snapping straight through it."
+      : "You regularly overshoot targets after flicking. Try deceleration drills — flick 80% of the way then let momentum carry you the rest.";
 
     const overshootLowCtx = isOneShot
-      ? "Light overshooting on one-tap flicks. A touch more deceleration near the target will improve first-bullet accuracy."
-      : "Light overshooting after flicks. Practice controlled micro-adjustments after each flick.";
+      ? "Slight overshoot on some flicks. A little more braking right before the target will improve your first-shot accuracy."
+      : "Slight overshoot on some movements. Practice stopping cleanly at the target instead of correcting back.";
 
     const overshootGoodCtx = isOneShot
-      ? "flicks land on target first-try, maximising kills per bullet"
-      : "flicks land accurately without excess correction";
+      ? "flicks land on target on the first try — no wasted bullet"
+      : "flicks land accurately without drifting past";
 
     if (overshoot > 0.4)
-      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Frequent overshooting", description: overshootHighCtx });
+      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Overshooting often", description: overshootHighCtx });
     else if (overshoot > 0.2)
-      insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Occasional overshooting", description: overshootLowCtx });
+      insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Slight overshoot", description: overshootLowCtx });
     else if (overshoot < 0.1)
-      insights.push({ kind: "positive", category: "mouse", title: "Precise flick control", description: `Very low overshoot rate — ${overshootGoodCtx}.` });
+      insights.push({ kind: "positive", category: "mouse", title: "Clean, precise flicks", description: `Very low overshoot — ${overshootGoodCtx}.` });
 
-    // Path efficiency
+    // Path quality
     const pathHighIssueCtx = isTracking
-      ? "Cursor weaves around the tracking target instead of staying locked. Forearm tension or over-gripping is common — relax and try to follow the target in a straight arc."
+      ? "Your cursor weaves around the target instead of sticking to it. This usually means forearm tension or an overly tight grip — relax and try to follow the target in one smooth arc."
       : isAccuracy
-      ? "Curved approaches to precision targets build inconsistent muscle memory. Slow down and approach each target from a consistent angle."
-      : "Cursor takes a noticeably curved route to targets. Wrist instability or over-gripping. Relax grip and slow deliberate movements.";
+      ? "Your cursor curves toward precision targets rather than going straight. Slow down and approach from a consistent angle each time to build reliable muscle memory."
+      : "Your cursor takes a curved route to targets. This often comes from wrist tension or gripping too hard — relax and try to move with your whole arm.";
 
     const pathGoodCtx = isTracking
-      ? "cursor stays locked on the tracking target with minimal drift"
-      : "cursor travels in a nearly straight line to targets";
+      ? "cursor stays locked on the tracking target with almost no drift"
+      : "cursor travels in a nearly straight line to each target";
 
     if (path < 0.72)
-      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Severely curved paths", description: pathHighIssueCtx });
+      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Very curved aim paths", description: pathHighIssueCtx });
     else if (path < 0.82)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Wobbly paths", description: isTracking
-        ? "Cursor drifts off the tracking line. Forearm or wrist tension is a common cause."
-        : "Cursor drifts off-axis during flicks. Forearm or wrist tension is a common cause." });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Slightly curved paths", description: isTracking
+        ? "Cursor drifts off the tracking line. Wrist or forearm tension is usually the cause — consciously relax between movements."
+        : "Cursor curves a little on the way to targets. Wrist tension is usually the cause — try to move from the elbow." });
     else if (path > 0.92)
-      insights.push({ kind: "positive", category: "mouse", title: "Straight aim paths", description: `Path efficiency ${(path * 100).toFixed(1)}% — ${pathGoodCtx}.` });
+      insights.push({ kind: "positive", category: "mouse", title: "Straight, efficient paths", description: `Path quality ${(path * 100).toFixed(1)}% — ${pathGoodCtx}.` });
 
-    // Correction ratio
+    // Over-aim / micro-corrections
     const corrHighCtx = isMultiHit
-      ? "Too long in the correction phase on multi-hit targets — decisiveness wins more damage. Slightly lower sensitivity can improve micro-adjustment precision."
+      ? "You're spending too long fine-tuning your aim on each target — on multi-hit scenarios, being decisive and committing earlier wins more damage. Slightly lower sensitivity can make small adjustments easier."
       : isReactive
-      ? "High correction time on reactive targets increases effective TTK. Trust your initial flick and commit to the shot sooner."
-      : "High time in Fitts' correction phase. You may be unsure of target positions — reduce sensitivity for more precise micro-adjustments.";
+      ? "Too much time adjusting after your initial flick adds to your kill time. Trust where your cursor lands and fire — hesitation costs more than a slight miss."
+      : "A lot of small adjustments after each movement. This means you're not fully confident in your aim yet — try lowering sensitivity slightly so small corrections feel easier.";
 
     const corrGoodCtx = isReactive
       ? "reacting and committing to the kill in one clean motion"
-      : "committing to shots quickly and with confidence";
+      : "committing to each shot quickly and confidently";
 
     if (correction > 0.45)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Over-correction behavior", description: corrHighCtx });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Too many micro-corrections", description: corrHighCtx });
     else if (correction < 0.2)
-      insights.push({ kind: "positive", category: "mouse", title: "Decisive aim", description: `Low correction ratio — ${corrGoodCtx}.` });
+      insights.push({ kind: "positive", category: "mouse", title: "Confident, decisive aim", description: `Very few corrections needed — ${corrGoodCtx}.` });
 
-    // Directional bias
+    // Directional drift
     if (bias > 0.6)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Consistent overshoot bias", description: "You systematically overshoot to the same side. Check if mousepad is angled or if you have a dominant wrist rotation." });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Drifting consistently one direction", description: "Your aim consistently overshoots to the same side. Check whether your mousepad is angled, or whether your elbow position is pulling your wrist in one direction." });
     else if (bias < 0.2)
-      insights.push({ kind: "positive", category: "mouse", title: "Balanced directional control", description: "No systematic bias — overshoot correction is well-calibrated in both directions." });
+      insights.push({ kind: "positive", category: "mouse", title: "Balanced in both directions", description: "No consistent left-right drift — your aim is well-calibrated in both directions." });
 
-    // Click timing — only meaningful for clicking scenarios
+    // Click rhythm — only meaningful for clicking scenarios
     if (!isTracking) {
       const clickHighCtx = isMultiHit
-        ? "Rhythmic clicking while tracking multi-hit targets maximises damage output. Click timing trainers can lock in a consistent rhythm."
+        ? "Your clicks aren't evenly spaced on multi-hit targets — a steady rhythm maximises damage output. Click timing trainers can help lock in a consistent tempo."
         : isReactive
-        ? "Inconsistent reaction-to-click gap. Practice pre-committing — once your cursor lands on the target, fire immediately."
-        : "High click timing variance. Rhythm drills or click-timing trainers can improve consistency.";
+        ? "There's a gap between your cursor landing and clicking. Practice committing immediately — once your cursor is on the target, fire without hesitation."
+        : "Click timing varies a lot between shots. Rhythm drills or click-timing trainers can help build a consistent firing tempo.";
 
       const clickGoodCtx = isMultiHit
-        ? "rhythmic shots are maximising DPS on multi-hit targets"
-        : "clicks are rhythmically precise";
+        ? "rhythmic shots are maximising damage output on multi-hit targets"
+        : "clicks land with a consistent, reliable rhythm";
 
       if (clickCV > 0.5)
-        insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Inconsistent click timing", description: clickHighCtx });
+        insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Uneven click rhythm", description: clickHighCtx });
       else if (clickCV < 0.15)
-        insights.push({ kind: "positive", category: "mouse", title: "Consistent click rhythm", description: `Very low click timing variance — ${clickGoodCtx}.` });
+        insights.push({ kind: "positive", category: "mouse", title: "Consistent click rhythm", description: `Very even click timing — ${clickGoodCtx}.` });
     }
 
-    // Tracking-specific: velocity consistency
+    // Tracking-specific: speed consistency
     if (isTracking) {
       if (velStd > 0.6)
-        insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Uneven tracking speed", description: `Speed CV ${(velStd * 100).toFixed(0)}% — cursor accelerates and brakes rather than smoothly following the target. Focus on matching and anticipating the target's velocity.` });
+        insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Choppy tracking speed", description: `Speed varies ${(velStd * 100).toFixed(0)}% around your average — your cursor speeds up and brakes rather than smoothly following the target. Try anticipating where the target is going rather than reacting to where it is.` });
       else if (velStd < 0.3)
-        insights.push({ kind: "positive", category: "mouse", title: "Smooth tracking velocity", description: `Speed CV ${(velStd * 100).toFixed(0)}% — consistent velocity shows strong target prediction and arm control.` });
+        insights.push({ kind: "positive", category: "mouse", title: "Smooth, even tracking speed", description: `Speed is very consistent (${(velStd * 100).toFixed(0)}% variation) — shows strong target prediction and relaxed arm control.` });
     }
   }
 
-  // ── Stats-panel / game insights ───────────────────────────────────────────
+  // ── Game-stats insights ───────────────────────────────────────────────────
   if (panelRecords.length >= 3) {
     const withTrend = panelRecords.filter((r) => r.stats_panel!.accuracy_trend != null);
     if (withTrend.length >= 2) {
       const avgTrend = mean(withTrend.map((r) => r.stats_panel!.accuracy_trend!));
       if (avgTrend < -5) {
         const ctx = isTracking
-          ? `On-target time drops ~${Math.abs(avgTrend).toFixed(1)}% from first to second half. Consider shorter sessions or breaks between runs.`
-          : `Accuracy drops ~${Math.abs(avgTrend).toFixed(1)}% from first to second half. Consider shorter sessions or mental fatigue breaks.`;
-        insights.push({ kind: "issue", severity: "medium", category: "game", title: "Accuracy fatigue", description: ctx });
+          ? `On-target time drops ~${Math.abs(avgTrend).toFixed(1)}% from the first to the second half of each session. You're getting tired partway through — shorter sessions or a break between runs would help.`
+          : `Accuracy drops ~${Math.abs(avgTrend).toFixed(1)}% from the first to the second half of each session. Mental fatigue sets in mid-session — try capping sessions at 30–45 minutes.`;
+        insights.push({ kind: "issue", severity: "medium", category: "game", title: "Accuracy drops over time", description: ctx });
       } else if (avgTrend > 5) {
-        const metric = isTracking ? "Tracking accuracy" : "Accuracy";
-        insights.push({ kind: "positive", category: "game", title: "Warming up well", description: `${metric} improves ~${avgTrend.toFixed(1)}% as sessions progress — you warm up effectively.` });
+        const metric = isTracking ? "On-target time" : "Accuracy";
+        insights.push({ kind: "positive", category: "game", title: "Gets better as you play", description: `${metric} improves ~${avgTrend.toFixed(1)}% as each session goes on — you warm up well. Consider a brief warm-up routine to get there faster.` });
       }
     }
 
@@ -431,42 +553,42 @@ function detectInsights(records: SessionRecord[]): Insight[] {
 
       if (cv > 0.5) {
         const ctx = isReactive
-          ? `Reaction TTK varies widely (CV ${(cv * 100).toFixed(0)}%). Build a consistent pre-aim routine so reaction windows are repeatable.`
+          ? `Your reaction kill times vary a lot (${(cv * 100).toFixed(0)}% spread). Some targets you hit fast, others much slower — try pre-aiming spawn points so every reaction starts from the same position.`
           : isOneShot
-          ? `Kill speed varies a lot (CV ${(cv * 100).toFixed(0)}%). Some targets take much longer than others — work on consistent flick tempo.`
-          : `High TTK variance (CV ${(cv * 100).toFixed(0)}%) — kill speed varies significantly. Work on consistent engagement timing.`;
-        insights.push({ kind: "issue", severity: "medium", category: "game", title: "Inconsistent TTK", description: ctx });
+          ? `Kill times are inconsistent (${(cv * 100).toFixed(0)}% spread) — some targets take much longer than others. Work on a consistent flick tempo regardless of target position.`
+          : `Kill times vary a lot (${(cv * 100).toFixed(0)}% spread). Consistent pre-aiming and a steady engagement tempo would smooth this out.`;
+        insights.push({ kind: "issue", severity: "medium", category: "game", title: "Kill speed varies a lot", description: ctx });
       } else if (cv < 0.2 && avgTtkMean < ttkGoodMs) {
         const ctx = isReactive
-          ? `Avg reaction TTK ${avgTtkMean.toFixed(0)}ms with low variance — fast, consistent reactions.`
-          : `Avg TTK ${avgTtkMean.toFixed(0)}ms with low variance (CV ${(cv * 100).toFixed(0)}%) — kills are landing reliably.`;
-        insights.push({ kind: "positive", category: "game", title: "Consistent TTK", description: ctx });
+          ? `Avg kill time ${avgTtkMean.toFixed(0)}ms with very little variation — fast and consistent reactions.`
+          : `Avg kill time ${avgTtkMean.toFixed(0)}ms with very little variation (${(cv * 100).toFixed(0)}% spread) — killing targets reliably every time.`;
+        insights.push({ kind: "positive", category: "game", title: "Very consistent kill speed", description: ctx });
       }
     }
 
-    // Per-type accuracy benchmarks
+    // Accuracy benchmarks
     const withAcc = panelRecords.filter((r) => r.stats_panel!.accuracy_pct != null);
     if (withAcc.length >= 3) {
-      const avgAcc       = mean(withAcc.map((r) => r.stats_panel!.accuracy_pct!));
+      const avgAcc        = mean(withAcc.map((r) => r.stats_panel!.accuracy_pct!));
       const goodThreshold = isTracking ? 65 : isMultiHit ? 50 : isAccuracy ? 75 : 58;
       const lowThreshold  = isTracking ? 40 : isMultiHit ? 30 : isAccuracy ? 50 : 38;
 
       if (avgAcc >= goodThreshold + 15) {
         const ctx = isTracking
-          ? `${avgAcc.toFixed(1)}% average on-target time — strong target lock throughout sessions.`
+          ? `${avgAcc.toFixed(1)}% on-target time — strong target lock throughout each session.`
           : isOneShot
           ? `${avgAcc.toFixed(1)}% on one-tap targets — nearly every flick is landing cleanly.`
-          : `${avgAcc.toFixed(1)}% average accuracy — few wasted shots.`;
-        insights.push({ kind: "positive", category: "game", title: isTracking ? "High tracking accuracy" : "High accuracy", description: ctx });
+          : `${avgAcc.toFixed(1)}% accuracy — very few wasted shots.`;
+        insights.push({ kind: "positive", category: "game", title: "High accuracy", description: ctx });
       } else if (avgAcc < lowThreshold) {
         const ctx = isTracking
-          ? `${avgAcc.toFixed(1)}% average on-target time. Focus on staying locked rather than chasing. Lower sensitivity may help.`
+          ? `${avgAcc.toFixed(1)}% on-target time. Focus on staying with the target rather than chasing it. Lower sensitivity often helps with this.`
           : isMultiHit
-          ? `${avgAcc.toFixed(1)}% accuracy — too many shots are missing. Prioritise target acquisition over firing speed.`
+          ? `${avgAcc.toFixed(1)}% accuracy — too many shots are missing. Focus on getting on target first, then shoot rather than shooting while still moving.`
           : isOneShot
-          ? `${avgAcc.toFixed(1)}% on one-taps. Work on controlled flicks — placement before speed.`
-          : `${avgAcc.toFixed(1)}% average accuracy. Slow down slightly and focus on placement before speed.`;
-        insights.push({ kind: "issue", severity: "medium", category: "game", title: isTracking ? "Low tracking accuracy" : "Low accuracy", description: ctx });
+          ? `${avgAcc.toFixed(1)}% on one-taps. Slow your flick down a little — getting placement right matters more than speed at this stage.`
+          : `${avgAcc.toFixed(1)}% accuracy — slow down slightly and focus on hitting cleanly before worrying about speed.`;
+        insights.push({ kind: "issue", severity: "medium", category: "game", title: "Low accuracy", description: ctx });
       }
     }
   }
@@ -476,6 +598,7 @@ function detectInsights(records: SessionRecord[]): Insight[] {
 
 function InsightCard({ ins }: { ins: Insight }) {
   const color = ins.kind === "positive" ? SEV_COLOR.good : SEV_COLOR[ins.severity!];
+
   return (
     <div
       style={{
@@ -505,7 +628,7 @@ function InsightCard({ ins }: { ins: Insight }) {
               letterSpacing: 1,
             }}
           >
-            {ins.severity}
+            {ins.severity === "high" ? "priority" : ins.severity === "medium" ? "worth fixing" : "minor"}
           </span>
         )}
       </div>
@@ -522,10 +645,12 @@ function OverviewTab({
   records,
   sorted,
   best,
+  warmupIds,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
   best: number;
+  warmupIds: Set<string>;
 }) {
   const avgScore = mean(records.map((r) => r.score));
   const accRecords = records.filter((r) => r.accuracy > 0);
@@ -535,11 +660,47 @@ function OverviewTab({
   const avgKills = killRecords.length ? mean(killRecords.map((r) => r.kills)) : null;
   const latestRecord = sorted[sorted.length - 1];
 
+  // ── Trend helpers (for enhanced score chart + half-delta cards) ──────────────
+  const hasSmooth = records.some((r) => r.smoothness != null);
+  const hasPanelAcc = records.some((r) => r.stats_panel?.accuracy_pct != null);
+  const hasTtk = records.some((r) => r.stats_panel?.avg_ttk_ms != null);
+
+  const trendScores = sorted.map((r) => r.score);
+  const trendAvg = mean(trendScores);
+  const trendSD = stddev(trendScores);
+  const trendRolling = rollingMean(trendScores, 5);
+  const trendXs = trendScores.map((_, i) => i + 1);
+  const { slope: trendSlope, intercept: trendIntercept } = linearRegression(trendXs, trendScores);
+
   const chartData = sorted.map((r, i) => ({
     i: i + 1,
     score: Math.round(r.score),
+    rolling: trendRolling[i],
+    trendLine: Math.round(trendIntercept + trendSlope * (i + 1)),
+    composite: r.smoothness?.composite != null ? +r.smoothness.composite.toFixed(1) : null,
+    acc: r.stats_panel?.accuracy_pct != null ? +r.stats_panel.accuracy_pct.toFixed(1) : null,
+    ttk: r.stats_panel?.avg_ttk_ms != null ? +r.stats_panel.avg_ttk_ms.toFixed(0) : null,
     dateLabel: formatDateTime(r.timestamp),
   }));
+
+  function halfDelta(key: keyof (typeof chartData)[0], invert = false): string {
+    const vals = chartData.map((d) => d[key]).filter((v): v is number => v !== null);
+    if (vals.length < 4) return "—";
+    const half = Math.floor(vals.length / 2);
+    const first = mean(vals.slice(0, half));
+    const second = mean(vals.slice(half));
+    const delta = second - first;
+    const pct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
+    const improved = invert ? delta < 0 : delta > 0;
+    return `${delta > 0 ? "+" : ""}${pct.toFixed(1)}% ${improved ? "↑" : "↓"}`;
+  }
+
+  const deltaCards = [
+    { label: "Score", key: "score" as const, invert: false, color: "#00f5a0" },
+    ...(hasSmooth ? [{ label: "Smoothness", key: "composite" as const, invert: false, color: "#00b4ff" }] : []),
+    ...(hasPanelAcc ? [{ label: "Accuracy", key: "acc" as const, invert: false, color: "#a78bfa" }] : []),
+    ...(hasTtk ? [{ label: "Avg TTK", key: "ttk" as const, invert: true, color: "#ffd700" }] : []),
+  ];
 
   const recentRuns = [...sorted].reverse().slice(0, 30);
 
@@ -574,17 +735,77 @@ function OverviewTab({
         )}
       </div>
 
-      {/* Score trend */}
+      {/* Progress delta cards: later sessions vs earlier sessions */}
+      {deltaCards.length > 1 && sorted.length >= 4 && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          {deltaCards.map((c) => {
+            const delta = halfDelta(c.key, c.invert);
+            const improved = delta.includes("↑");
+            const neutral = delta === "—";
+            return (
+              <div key={c.label} style={{ ...CARD_STYLE, minWidth: 130 }}>
+                <div
+                  style={{
+                    fontSize: 11,
+                    color: "rgba(255,255,255,0.38)",
+                    textTransform: "uppercase",
+                    letterSpacing: 1,
+                    marginBottom: 6,
+                  }}
+                >
+                  {c.label}
+                </div>
+                <div
+                  style={{
+                    fontSize: 18,
+                    fontWeight: 700,
+                    color: neutral ? "rgba(255,255,255,0.3)" : improved ? "#00f5a0" : "#ff6b6b",
+                  }}
+                >
+                  {delta}
+                </div>
+                <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                  later sessions vs earlier
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* Enhanced score chart with rolling avg + trend line + ±1σ band */}
       <div style={CHART_STYLE}>
-        <SectionTitle>Score over time</SectionTitle>
+        <SectionTitle>Score progression</SectionTitle>
+        <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
+          {[
+            { color: "#00f5a0", label: "Score" },
+            ...(trendScores.length >= 5 ? [{ color: "#ffd700", label: "5-session avg", dash: true }] : []),
+            ...(trendScores.length >= 4 ? [{ color: "#ff9f43", label: "Trend", dash: true }] : []),
+          ].map((l) => (
+            <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <div
+                style={{
+                  width: 14,
+                  height: 2,
+                  borderRadius: 2,
+                  background: l.color,
+                  opacity: (l as { dash?: boolean }).dash ? 0.7 : 1,
+                  backgroundImage: (l as { dash?: boolean }).dash
+                    ? `repeating-linear-gradient(90deg,${l.color} 0,${l.color} 4px,transparent 4px,transparent 7px)`
+                    : undefined,
+                }}
+              />
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>{l.label}</span>
+            </div>
+          ))}
+          {trendSD > 0 && (
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", marginLeft: 4 }}>
+              shaded = ±1σ range
+            </span>
+          )}
+        </div>
         <ResponsiveContainer width="100%" height={160}>
-          <AreaChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-            <defs>
-              <linearGradient id="scoreGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="5%" stopColor="#00f5a0" stopOpacity={0.25} />
-                <stop offset="95%" stopColor="#00f5a0" stopOpacity={0} />
-              </linearGradient>
-            </defs>
+          <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
             <XAxis
               dataKey="i"
@@ -602,17 +823,48 @@ function OverviewTab({
               }
             />
             <Tooltip content={<MiniTooltip />} />
-            <Area
+            {trendSD > 0 && (
+              <ReferenceArea
+                y1={Math.round(trendAvg - trendSD)}
+                y2={Math.round(trendAvg + trendSD)}
+                fill="rgba(0,180,255,0.06)"
+                stroke="none"
+              />
+            )}
+            <Line
               type="monotone"
               dataKey="score"
               name="Score"
               stroke="#00f5a0"
               strokeWidth={2}
-              fill="url(#scoreGrad)"
               dot={false}
-              activeDot={{ r: 4, fill: "#00f5a0" }}
+              connectNulls
             />
-          </AreaChart>
+            {trendScores.length >= 5 && (
+              <Line
+                type="monotone"
+                dataKey="rolling"
+                name="5-session avg"
+                stroke="#ffd700"
+                strokeWidth={2}
+                strokeDasharray="5 3"
+                dot={false}
+                connectNulls
+              />
+            )}
+            {trendScores.length >= 4 && (
+              <Line
+                type="monotone"
+                dataKey="trendLine"
+                name="Trend"
+                stroke="#ff9f43"
+                strokeWidth={1.5}
+                strokeDasharray="8 4"
+                dot={false}
+                connectNulls
+              />
+            )}
+          </LineChart>
         </ResponsiveContainer>
       </div>
 
@@ -639,11 +891,13 @@ function OverviewTab({
           <tbody>
             {recentRuns.map((r, idx) => {
               const isBest = r.score === best;
+              const isWarmup = warmupIds.has(r.id);
               return (
                 <tr
                   key={r.id}
                   style={{
                     borderBottom: "1px solid rgba(255,255,255,0.04)",
+                    opacity: isWarmup ? 0.55 : 1,
                     background: isBest
                       ? "rgba(0,245,160,0.04)"
                       : idx % 2 === 0
@@ -653,6 +907,21 @@ function OverviewTab({
                 >
                   <td style={{ padding: "8px 4px 8px 0", color: "rgba(255,255,255,0.5)" }}>
                     {formatDateTime(r.timestamp)}
+                    {isWarmup && (
+                      <span
+                        style={{
+                          fontSize: 9,
+                          background: "rgba(255,180,0,0.18)",
+                          color: "#ffb400",
+                          borderRadius: 3,
+                          padding: "1px 4px",
+                          marginLeft: 5,
+                          verticalAlign: "middle",
+                        }}
+                      >
+                        warm-up
+                      </span>
+                    )}
                   </td>
                   <td
                     style={{
@@ -693,15 +962,16 @@ function OverviewTab({
   );
 }
 
-// ─── Mouse tab ────────────────────────────────────────────────────────────────
+// ─── Movement tab ─────────────────────────────────────────────────────────────
 
-function MouseTab({
+function MovementTab({
   records,
   sorted,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
 }) {
+
   const smoothRecords = records.filter((r) => r.smoothness !== null);
 
   if (smoothRecords.length === 0) {
@@ -741,60 +1011,60 @@ function MouseTab({
 
   const metrics = [
     {
-      label: "Composite",
+      label: "Overall Smoothness",
       value: avgComposite.toFixed(1),
       unit: "/100",
-      note: "higher = better",
+      note: "higher = smoother movement",
       accent:
         avgComposite >= 70 ? "#00f5a0" : avgComposite >= 50 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Jitter",
+      label: "Wobble (Jitter)",
       value: avgJitter.toFixed(3),
-      note: "lower = better",
+      note: "lower = steadier aim",
       accent: avgJitter < 0.2 ? "#00f5a0" : avgJitter < 0.35 ? "#ffd700" : "#ff6b6b",
     },
     {
       label: "Overshoot",
       value: (avgOvershoot * 100).toFixed(1),
       unit: "%",
-      note: "lower = better",
+      note: "lower = fewer overshoots",
       accent:
         avgOvershoot < 0.15 ? "#00f5a0" : avgOvershoot < 0.3 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Path Eff.",
+      label: "Path Quality",
       value: (avgPath * 100).toFixed(1),
       unit: "%",
-      note: "higher = better",
+      note: "higher = straighter aim paths",
       accent: avgPath > 0.87 ? "#00f5a0" : avgPath > 0.75 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Speed CV",
+      label: "Speed Consistency",
       value: (avgVelStd * 100).toFixed(1),
       unit: "%",
-      note: "lower = consistent",
+      note: "lower = more even mouse speed",
       accent: avgVelStd < 0.4 ? "#00f5a0" : avgVelStd < 0.6 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Correction",
+      label: "Over-aim",
       value: (avgCorrection * 100).toFixed(1),
       unit: "%",
-      note: "lower = decisive",
+      note: "lower = fewer micro-corrections",
       accent:
         avgCorrection < 0.25 ? "#00f5a0" : avgCorrection < 0.4 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Dir. Bias",
+      label: "Side Drift",
       value: (avgBias * 100).toFixed(1),
       unit: "%",
-      note: "lower = balanced",
+      note: "lower = aim drifts neither way",
       accent: avgBias < 0.25 ? "#00f5a0" : avgBias < 0.5 ? "#ffd700" : "#ff6b6b",
     },
     {
-      label: "Click CV",
+      label: "Click Rhythm",
       value: avgClickCV.toFixed(3),
-      note: "lower = rhythmic",
+      note: "lower = more consistent clicks",
       accent:
         avgClickCV < 0.2 ? "#00f5a0" : avgClickCV < 0.4 ? "#ffd700" : "#ff6b6b",
     },
@@ -850,9 +1120,9 @@ function MouseTab({
         <SectionTitle>Smoothness trend</SectionTitle>
         <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
           {[
-            { color: "#00b4ff", label: "Composite" },
-            { color: "#00f5a0", label: "Path eff. %" },
-            { color: "#ffd700", label: "Speed CV %" },
+            { color: "#00b4ff", label: "Smoothness score" },
+            { color: "#00f5a0", label: "Path quality %" },
+            { color: "#ffd700", label: "Speed consistency %" },
           ].map((l) => (
             <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <div
@@ -888,7 +1158,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="composite"
-              name="Composite"
+              name="Smoothness score"
               stroke="#00b4ff"
               strokeWidth={2}
               dot={false}
@@ -897,7 +1167,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="path_eff"
-              name="Path eff. %"
+              name="Path quality %"
               stroke="#00f5a0"
               strokeWidth={1.5}
               dot={false}
@@ -906,7 +1176,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="vel_std"
-              name="Speed CV %"
+              name="Speed consistency %"
               stroke="#ffd700"
               strokeWidth={1.5}
               dot={false}
@@ -918,13 +1188,13 @@ function MouseTab({
 
       {/* Error metrics */}
       <div style={CHART_STYLE}>
-        <SectionTitle>Error metrics (lower = better)</SectionTitle>
+        <SectionTitle>Aim errors — all lower is better</SectionTitle>
         <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
           {[
-            { color: "#ff6b6b", label: "Jitter ×100" },
+            { color: "#ff6b6b", label: "Wobble ×100" },
             { color: "#ff9f43", label: "Overshoot %" },
-            { color: "#a78bfa", label: "Correction %" },
-            { color: "#e056fd", label: "Dir. Bias %" },
+            { color: "#a78bfa", label: "Over-aim %" },
+            { color: "#e056fd", label: "Side drift %" },
           ].map((l) => (
             <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
               <div
@@ -960,7 +1230,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="jitter"
-              name="Jitter ×100"
+              name="Wobble ×100"
               stroke="#ff6b6b"
               strokeWidth={1.5}
               dot={false}
@@ -978,7 +1248,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="correction"
-              name="Correction %"
+              name="Over-aim %"
               stroke="#a78bfa"
               strokeWidth={1.5}
               dot={false}
@@ -987,7 +1257,7 @@ function MouseTab({
             <Line
               type="monotone"
               dataKey="bias"
-              name="Dir. Bias %"
+              name="Side drift %"
               stroke="#e056fd"
               strokeWidth={1.5}
               dot={false}
@@ -1010,15 +1280,16 @@ function MouseTab({
   );
 }
 
-// ─── Game Stats tab ───────────────────────────────────────────────────────────
+// ─── Performance tab ──────────────────────────────────────────────────────────
 
-function GameStatsTab({
+function PerformanceTab({
   records,
   sorted,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
 }) {
+
   const panelRecords = records.filter((r) => r.stats_panel !== null);
 
   if (panelRecords.length === 0) {
@@ -1116,7 +1387,7 @@ function GameStatsTab({
           <StatCard
             label="Acc. Trend"
             value={(avgTrend > 0 ? "+" : "") + avgTrend.toFixed(1) + "%"}
-            sub="2nd half vs 1st half"
+            sub="later half of session vs earlier half"
             accent={avgTrend > 2 ? "#00f5a0" : avgTrend < -2 ? "#ff6b6b" : "rgba(255,255,255,0.6)"}
           />
         )}
@@ -1125,11 +1396,11 @@ function GameStatsTab({
       {/* TTK trend */}
       {withTtk.length > 1 && (
         <div style={CHART_STYLE}>
-          <SectionTitle>Time-to-kill (ms) — lower = faster</SectionTitle>
+          <SectionTitle>Time to Kill in milliseconds — lower is faster</SectionTitle>
           <div style={{ display: "flex", gap: 16, marginBottom: 10 }}>
             {[
-              { color: "#ffd700", label: "Avg TTK" },
-              { color: "#ff9f43", label: "TTK std dev" },
+              { color: "#ffd700", label: "Avg kill speed" },
+              { color: "#ff9f43", label: "Kill speed spread" },
             ].map((l) => (
               <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
                 <div
@@ -1169,7 +1440,7 @@ function GameStatsTab({
               <Line
                 type="monotone"
                 dataKey="ttk_std"
-                name="TTK std dev"
+                name="Kill speed spread"
                 stroke="#ff9f43"
                 strokeWidth={1.5}
                 strokeDasharray="4 3"
@@ -1220,7 +1491,7 @@ function GameStatsTab({
       {withTrend.length > 1 && (
         <div style={CHART_STYLE}>
           <SectionTitle>
-            Within-session accuracy trend — positive = improving as session progresses
+            Accuracy within each session — above zero means you get better as you play
           </SectionTitle>
           <ResponsiveContainer width="100%" height={120}>
             <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
@@ -1299,267 +1570,1076 @@ function GameStatsTab({
   );
 }
 
-// ─── Trends tab ───────────────────────────────────────────────────────────────
+// ─── Replay tab ───────────────────────────────────────────────────────────────
 
-function TrendsTab({
+function ReplayTab({
   records,
   sorted,
+  warmupIds,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
+  warmupIds: Set<string>;
 }) {
-  const hasSmooth = records.some((r) => r.smoothness != null);
-  const hasPanelAcc = records.some((r) => r.stats_panel?.accuracy_pct != null);
-  const hasTtk = records.some((r) => r.stats_panel?.avg_ttk_ms != null);
+  const replayRecords = useMemo(
+    () => [...sorted].reverse().filter((r) => r.has_replay),
+    [sorted],
+  );
+  const [selectedId, setSelectedId] = useState<string | null>(
+    replayRecords.length > 0 ? replayRecords[0].id : null,
+  );
+  const [replayData, setReplayData] = useState<ReplayData | null>(null);
+  const [loading, setLoading] = useState(false);
 
-  const chartData = sorted.map((r, i) => ({
-    i: i + 1,
-    score: Math.round(r.score),
-    composite: r.smoothness?.composite != null ? +r.smoothness.composite.toFixed(1) : null,
-    acc:
-      r.stats_panel?.accuracy_pct != null
-        ? +r.stats_panel.accuracy_pct.toFixed(1)
-        : null,
-    ttk:
-      r.stats_panel?.avg_ttk_ms != null
-        ? +r.stats_panel.avg_ttk_ms.toFixed(0)
-        : null,
-    path_eff:
-      r.smoothness?.path_efficiency != null
-        ? +(r.smoothness.path_efficiency * 100).toFixed(1)
-        : null,
-    dateLabel: formatDateTime(r.timestamp),
-  }));
+  useEffect(() => {
+    if (!selectedId) { setReplayData(null); return; }
+    setLoading(true);
+    invoke<ReplayData>("load_session_replay", { sessionId: selectedId })
+      .then((d) => { setReplayData(d); setLoading(false); })
+      .catch(() => { setReplayData(null); setLoading(false); });
+  }, [selectedId]);
 
-  // Compute % change between first and second half of sessions
-  function halfDelta(key: keyof (typeof chartData)[0], invert = false): string {
-    const vals = chartData
-      .map((d) => d[key])
-      .filter((v): v is number => v !== null);
-    if (vals.length < 4) return "—";
-    const half = Math.floor(vals.length / 2);
-    const first = mean(vals.slice(0, half));
-    const second = mean(vals.slice(half));
-    const delta = second - first;
-    const pct = first !== 0 ? (delta / Math.abs(first)) * 100 : 0;
-    const improved = invert ? delta < 0 : delta > 0;
-    return `${delta > 0 ? "+" : ""}${pct.toFixed(1)}% ${improved ? "↑" : "↓"}`;
+  // When new sessions arrive, auto-select the newest if nothing is selected
+  useEffect(() => {
+    if (!selectedId && replayRecords.length > 0) {
+      setSelectedId(replayRecords[0].id);
+    }
+  }, [replayRecords]);
+
+  const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
+
+  // Worst-moment clips removed — full interactive viewer is shown instead
+
+  if (replayRecords.length === 0) {
+    return (
+      <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
+        No replays saved yet.
+        <br />
+        Replays are recorded automatically during sessions when the mouse hook is active.
+      </div>
+    );
   }
-
-  const cards = [
-    { label: "Score", key: "score" as const, invert: false, color: "#00f5a0" },
-    ...(hasSmooth
-      ? [{ label: "Smoothness", key: "composite" as const, invert: false, color: "#00b4ff" }]
-      : []),
-    ...(hasPanelAcc
-      ? [{ label: "Accuracy", key: "acc" as const, invert: false, color: "#a78bfa" }]
-      : []),
-    ...(hasTtk
-      ? [{ label: "Avg TTK", key: "ttk" as const, invert: true, color: "#ffd700" }]
-      : []),
-  ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Half-delta summary */}
-      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-        {cards.map((c) => {
-          const delta = halfDelta(c.key, c.invert);
-          const improved = delta.includes("↑");
-          const neutral = delta === "—";
-          return (
-            <div key={c.label} style={{ ...CARD_STYLE, minWidth: 130 }}>
-              <div
-                style={{
-                  fontSize: 11,
-                  color: "rgba(255,255,255,0.38)",
-                  textTransform: "uppercase",
-                  letterSpacing: 1,
-                  marginBottom: 6,
-                }}
-              >
-                {c.label}
+      {/* Session selector */}
+      <div style={CHART_STYLE}>
+        <SectionTitle>Select session</SectionTitle>
+        <div style={{ maxHeight: 180, overflowY: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+            <thead>
+              <tr style={{ color: "rgba(255,255,255,0.3)" }}>
+                {["Date", "Score", "Acc", "Smooth"].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      paddingBottom: 6,
+                      fontWeight: 500,
+                      textAlign: "left",
+                      borderBottom: "1px solid rgba(255,255,255,0.07)",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {replayRecords.map((r) => {
+                const active = r.id === selectedId;
+                const isWarmup = warmupIds.has(r.id);
+                return (
+                  <tr
+                    key={r.id}
+                    onClick={() => setSelectedId(r.id)}
+                    style={{
+                      cursor: "pointer",
+                      opacity: isWarmup ? 0.65 : 1,
+                      background: active ? "rgba(0,245,160,0.07)" : "transparent",
+                      borderBottom: "1px solid rgba(255,255,255,0.04)",
+                    }}
+                  >
+                    <td style={{ padding: "7px 4px 7px 0", color: active ? "#00f5a0" : "rgba(255,255,255,0.5)" }}>
+                      {formatDateTime(r.timestamp)}
+                      {isWarmup && (
+                        <span
+                          style={{
+                            fontSize: 9,
+                            background: "rgba(255,180,0,0.18)",
+                            color: "#ffb400",
+                            borderRadius: 3,
+                            padding: "1px 4px",
+                            marginLeft: 5,
+                            verticalAlign: "middle",
+                          }}
+                        >
+                          warm-up
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ padding: "7px 4px", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(255,255,255,0.7)" }}>
+                      {fmtScore(r.score)}
+                    </td>
+                    <td style={{ padding: "7px 4px", color: "rgba(255,255,255,0.5)" }}>
+                      {r.accuracy > 0 ? (r.accuracy * 100).toFixed(1) + "%" : "—"}
+                    </td>
+                    <td style={{ padding: "7px 4px", color: r.smoothness ? "#00b4ff" : "rgba(255,255,255,0.2)" }}>
+                      {r.smoothness ? r.smoothness.composite.toFixed(1) : "—"}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Mouse path viewer */}
+      {loading && (
+        <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 12 }}>Loading replay…</div>
+      )}
+      {!loading && replayData && selectedRecord && (
+        <div style={CHART_STYLE}>
+          <SectionTitle>
+            Mouse path —{" "}
+            <span style={{ color: "#00f5a0", fontWeight: 700 }}>{fmtScore(selectedRecord.score)}</span>{" "}
+            pts · {formatDateTime(selectedRecord.timestamp)}
+          </SectionTitle>
+          <MousePathViewer
+            rawPositions={replayData.positions}
+            metricPoints={replayData.metrics}
+            screenFrames={replayData.frames ?? []}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Aim Fingerprint ──────────────────────────────────────────────────────────
+
+interface AimFingerprint {
+  precision: number;    // 0-100 (path efficiency + low jitter)
+  speed: number;        // 0-100 (avg_speed normalised)
+  control: number;      // 0-100 (1 - overshoot)
+  consistency: number;  // 0-100 (1 - velocity_std)
+  decisiveness: number; // 0-100 (1 - correction_ratio)
+  rhythm: number;       // 0-100 (1 - click_timing_cv)
+}
+
+function dominantScenarioType(records: SessionRecord[]): string {
+  const panelRecs = records.filter(
+    (r) => r.stats_panel?.scenario_type && r.stats_panel.scenario_type !== "Unknown",
+  );
+  if (!panelRecs.length) return "Unknown";
+  const counts = new Map<string, number>();
+  for (const r of panelRecs) {
+    const t = r.stats_panel!.scenario_type;
+    counts.set(t, (counts.get(t) ?? 0) + 1);
+  }
+  let best = "Unknown", bestCount = 0;
+  for (const [t, c] of counts) if (c > bestCount) { best = t; bestCount = c; }
+  return best;
+}
+
+function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: string): AimFingerprint {
+  const g = (fn: (s: SmoothnessSnapshot) => number) =>
+    mean(smoothRecords.map((r) => fn(r.smoothness!)));
+
+  const jitter     = g((s) => s.jitter);
+  const overshoot  = g((s) => s.overshoot_rate);
+  const velStd     = g((s) => s.velocity_std);
+  const avgSpeed   = g((s) => s.avg_speed);
+  const pathEff    = g((s) => s.path_efficiency);
+  const correction = g((s) => s.correction_ratio);
+  const clickCV    = g((s) => s.click_timing_cv);
+
+  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+
+  const precision    = Math.round(Math.min(100, Math.max(0, (pathEff * 0.65 + Math.max(0, 1 - jitter * 4) * 0.35) * 100)));
+  const speed        = Math.round(Math.min(100, Math.max(0, (avgSpeed - 100) / 19)));
+  const control      = Math.round(Math.min(100, Math.max(0, (1 - overshoot * 2.2) * 100)));
+  const consistency  = Math.round(Math.min(100, Math.max(0, (1 - velStd) * 100)));
+  const decisiveness = Math.round(Math.min(100, Math.max(0, (1 - correction * 2.5) * 100)));
+  // For tracking: 6th axis = tracking flow (speed evenness, not click timing)
+  // For clicking: 6th axis = click rhythm
+  const rhythm = isTracking
+    ? Math.round(Math.min(100, Math.max(0, (1 - Math.min(velStd * 1.5, 1)) * 100)))
+    : Math.round(Math.min(100, Math.max(0, (1 - Math.min(clickCV, 1)) * 100)));
+
+  return { precision, speed, control, consistency, decisiveness, rhythm };
+}
+
+interface AimStyle {
+  name: string;
+  tagline: string;
+  color: string;
+  description: string;
+  focus: string;
+}
+
+function classifyAimStyle(fp: AimFingerprint, scenarioType: string): AimStyle {
+  const { precision, speed, control, consistency, decisiveness, rhythm } = fp;
+  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+
+  if (isTracking) {
+    // rhythm axis = tracking flow (speed evenness) for tracking scenarios
+    if (precision > 70 && consistency > 70 && rhythm > 70)
+      return {
+        name: "The Rail",
+        tagline: "Locked on and flowing",
+        color: "#00f5a0",
+        description:
+          "Your tracking is smooth, consistent, and precise — you stay on target with minimal wobble and even speed. You're already a strong tracker; push into harder, faster-moving targets to keep growing.",
+        focus: "Faster target variants, smaller hitbox scenarios, long-session endurance",
+      };
+    if (speed > 65 && consistency < 50)
+      return {
+        name: "The Sprinter",
+        tagline: "Fast but choppy",
+        color: "#ff6b6b",
+        description:
+          "You can keep up with fast targets but your speed is uneven — you accelerate and decelerate in bursts instead of flowing continuously. This choppiness breaks your aim and loses score in longer tracking windows.",
+        focus: "Smooth-tracking drills, large target slow-tracking, constant-speed follow scenarios",
+      };
+    if (control > 70 && precision > 65 && rhythm > 60)
+      return {
+        name: "The Orbiter",
+        tagline: "Smooth and controlled",
+        color: "#00b4ff",
+        description:
+          "You maintain clean, controlled contact with targets and rarely overshoot. Your movement flows well. Speed is the next unlock — you're leaving points on the table by playing too conservatively on faster targets.",
+        focus: "Speed-ramp drills, reactive tracking, target-leading practice",
+      };
+    if (speed > 60 && control > 55 && decisiveness > 60)
+      return {
+        name: "The Overtaker",
+        tagline: "Aggressive and reactive",
+        color: "#ffd700",
+        description:
+          "You chase targets hard and react fast — your instincts are sharp. The gap to close is refining that speed into smoother, sustained contact rather than aggressive reacquisitions.",
+        focus: "Strafing target scenarios, smooth acceleration drills, reduce overcorrections",
+      };
+    if (consistency > 65 && speed < 40)
+      return {
+        name: "The Anchor",
+        tagline: "Steady but slow",
+        color: "#a78bfa",
+        description:
+          "Your tracking is mechanically consistent and clean, but you struggle when targets accelerate or change direction. Your foundation is solid — it's time to push your speed ceiling.",
+        focus: "Dynamic tracking scenarios, speed-increasing variants, reaction-based targets",
+      };
+    return {
+      name: "The Foundation Builder",
+      tagline: "Building tracking fundamentals",
+      color: "#ffd700",
+      description:
+        "Your tracking mechanics are still developing. Focus on staying on target continuously, matching target speed evenly, and reducing jitter before worrying about score.",
+      focus: "Beginner tracking scenarios, large slow targets, smooth-follow drills",
+    };
+  }
+
+  // Clicking/flicking archetypes
+  if (speed > 65 && control < 40)
+    return {
+      name: "The Aggressor",
+      tagline: "Raw speed, needs refinement",
+      color: "#ff6b6b",
+      description:
+        "You move fast and commit hard, but overshoot often. Your instincts are strong — channel that aggression into deliberate deceleration near the target.",
+      focus: "Deceleration drills, close-range flick scenarios, overshooting correction",
+    };
+  if (precision > 70 && control > 65 && speed < 50)
+    return {
+      name: "The Surgeon",
+      tagline: "Clean and controlled",
+      color: "#00f5a0",
+      description:
+        "Your mouse movement is exceptionally clean. You rarely miss, but you're playing conservatively. Match that precision at higher speed and your scores will jump.",
+      focus: "Reactive scenarios, tempo drills, increasing flick distance",
+    };
+  if (consistency > 70 && rhythm > 70)
+    return {
+      name: "The Metronome",
+      tagline: "Mechanically reliable",
+      color: "#00b4ff",
+      description:
+        "Extremely consistent mechanics with a reliable click rhythm. This repeatability is your foundation. Target harder scenarios that force you outside your comfort zone.",
+      focus: "Difficulty escalation, novel scenario types to raise your ceiling",
+    };
+  if (decisiveness > 70 && precision < 55)
+    return {
+      name: "The Gambler",
+      tagline: "Confident but imprecise",
+      color: "#ffd700",
+      description:
+        "You commit fast and trust your instincts — great for reaction time. But shots sometimes fire before fully acquiring the target. Slowing down 10% could dramatically improve accuracy.",
+      focus: "Micro-adjustment training, precision clicking, accuracy-first drills",
+    };
+  if (precision > 65 && consistency > 65)
+    return {
+      name: "The Technician",
+      tagline: "Solid all-around mechanics",
+      color: "#a78bfa",
+      description:
+        "A well-rounded, technically sound aimer with strong precision and consistency. Speed and reactive decision-making are your main remaining growth levers.",
+      focus: "Reactive flick scenarios, head-tracking, increasing pace",
+    };
+  return {
+    name: "The Foundation Builder",
+    tagline: "Developing core mechanics",
+    color: "#ffd700",
+    description:
+      "Your aim style is still taking shape. Focus on fundamentals: reduce jitter, clean up movement paths, and build consistent click timing before chasing scores.",
+    focus: "Tracking basics, precision clicking, click timing trainers",
+  };
+}
+
+// ─── Coaching Cards ────────────────────────────────────────────────────────────
+
+interface CoachingCardData {
+  title: string;
+  badge: string;
+  badgeColor: string;
+  body: string;
+  tip: string;
+}
+
+function generateCoachingCards(
+  records: SessionRecord[],
+  sorted: SessionRecord[],
+  fingerprint: AimFingerprint | null,
+  scoreCV: number,
+  slope: number,
+  avgScoreVal: number,
+  isPlateau: boolean,
+  scenarioType: string,
+): CoachingCardData[] {
+  const cards: CoachingCardData[] = [];
+  const panelRecords = records.filter((r) => r.stats_panel != null);
+  const n = sorted.length;
+  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+
+  if (isPlateau)
+    cards.push({
+      title: "Plateau Detected",
+      badge: "Motor Learning",
+      badgeColor: "#ff9f43",
+      body: `Your last 7 sessions show minimal score movement (slope: ${slope > 0 ? "+" : ""}${Math.round(slope)} pts/run, low recent variance). This is completely normal — your nervous system needs new stimuli to adapt further. Grinding the same scenario will not break a plateau.`,
+      tip: "Switch to a harder scenario variant or cross-train on a different aim type (e.g. tracking → clicking) for 5–10 sessions, then return. Novel difficulty forces neural adaptation and produces fresh gains when you come back.",
+    });
+
+  if (scoreCV > 12 && n >= 5)
+    cards.push({
+      title: "High Score Variance",
+      badge: "Consistency Science",
+      badgeColor: "#ffd700",
+      body: `Your scores vary by ${scoreCV.toFixed(1)}% around your average (ideal: <8%). High variance typically signals inconsistent warm-up, mental state differences between sessions, or changing grip/posture.`,
+      tip: "Add 2–3 'warm-up only' runs before each real attempt. Research on motor skill shows consistent pre-performance routines reduce run-to-run variability by up to 30% by priming the correct movement patterns.",
+    });
+
+  const trendRecs = panelRecords.filter((r) => r.stats_panel?.accuracy_trend != null);
+  if (trendRecs.length >= 3) {
+    const avgTrend = mean(trendRecs.map((r) => r.stats_panel!.accuracy_trend!));
+    if (avgTrend < -5)
+      cards.push({
+        title: "Cognitive Fatigue Pattern",
+        badge: "Exercise Science",
+        badgeColor: "#ff6b6b",
+        body: `Your accuracy drops an average of ${Math.abs(avgTrend).toFixed(1)}% from the first half to the second half of sessions. Aim skill is among the first to degrade under cognitive load — your fine motor control deteriorates before you notice it consciously.`,
+        tip: "Cap continuous play at 45–60 minutes. Taking a 5-minute break every 20–25 minutes sustains performance significantly longer than marathon sessions. The break also accelerates within-session motor consolidation.",
+      });
+    else if (avgTrend > 5)
+      cards.push({
+        title: "Extended Warm-up Pattern",
+        badge: "Motor Activation",
+        badgeColor: "#00f5a0",
+        body: `Your accuracy improves ${avgTrend.toFixed(1)}% from session start to finish — your motor system takes time to fully activate. This means your early-session scores underrepresent your true skill level.`,
+        tip: "Add a dedicated warm-up before your main scenario: 2–3 minutes of easy tracking or large relaxed flicks. This pre-activates the motor cortex pathways used in aim and helps you peak sooner.",
+      });
+  }
+
+  if (fingerprint && fingerprint.control < 45 && n >= 5) {
+    if (isTracking)
+      cards.push({
+        title: "Overshooting Your Targets",
+        badge: "Tracking Control",
+        badgeColor: "#00b4ff",
+        body: `Your control score is ${fingerprint.control}/100, indicating you frequently swing past or overshoot the target. In tracking, overshooting breaks continuous contact and forces a recovery — those recovery gaps are where you bleed score.`,
+        tip: "Try 'micro-pressure' drills: maintain the lightest possible grip and focus on matching the target's speed exactly rather than chasing it. Think of it as escorting the target, not hunting it. After a few sessions your brain starts predicting target movement instead of reacting to it.",
+      });
+    else
+      cards.push({
+        title: "Speed-Accuracy Tradeoff",
+        badge: "Biomechanics",
+        badgeColor: "#00b4ff",
+        body: `Your control score is ${fingerprint.control}/100, indicating frequent overshoot. Fitts' Law states that as movement amplitude and speed increase, endpoint accuracy decreases. You are currently on the speed-dominant side of this tradeoff.`,
+        tip: "Practice 'deceleration drills': flick toward a target but consciously brake 20–30% before the target. The cursor should arrive on the target, not blow past it. After ~3 sessions, this decelerative movement ingrains as muscle memory and your speed-accuracy balance improves.",
+      });
+  }
+
+  if (fingerprint && fingerprint.rhythm < 40) {
+    if (isTracking)
+      cards.push({
+        title: "Choppy Tracking Speed",
+        badge: "Flow Training",
+        badgeColor: "#a78bfa",
+        body: `Your flow score is ${fingerprint.rhythm}/100 — your cursor speed is uneven across the target's movement. Choppy speed means you're constantly accelerating and braking, which leads to brief off-target moments and reduces your score window.`,
+        tip: "Run a slow, large-target tracking scenario with no time pressure. Focus only on keeping your cursor speed constant — imagine you're tracing a line at a fixed pace. This trains smooth speed regulation that then carries over to faster, more reactive scenarios.",
+      });
+    else
+      cards.push({
+        title: "Inconsistent Click Timing",
+        badge: "Rhythm Training",
+        badgeColor: "#a78bfa",
+        body: `Your rhythm score is ${fingerprint.rhythm}/100 — click timing varies significantly between shots. Studies on elite FPS players show consistent click timing correlates strongly with kill efficiency. Timing variation often means hesitating before each shot, which adds 50–150ms of latency.`,
+        tip: "Use click timing scenarios (KovaaK's has several) for 10 minutes per session. Build a consistent pre-shot commitment rhythm: acquire target → commit → click, without a hesitation gap between commit and click.",
+      });
+  }
+
+  // Tracking-specific: target prediction card
+  if (isTracking && n >= 5 && fingerprint && fingerprint.decisiveness < 50)
+    cards.push({
+      title: "Reacting Instead of Predicting",
+      badge: "Tracking Skill",
+      badgeColor: "#ff9f43",
+      body: `Your decisiveness score (${fingerprint.decisiveness}/100) suggests you're chasing targets reactively — your cursor follows behind rather than leading. Elite trackers spend 60–70% of their time slightly ahead of the target, predicting movement rather than reacting to it.`,
+      tip: "In your next session, consciously try to 'lead' the target by a tiny amount. It will feel wrong at first, but it trains predictive tracking which is far more stable under fast or erratic movement. Start with scenarios using consistent target paths before applying it to erratic ones.",
+    });
+
+  if (fingerprint && fingerprint.precision < 50 && n >= 3)
+    cards.push({
+      title: "Wrist Stability & Path Efficiency",
+      badge: "Biomechanics",
+      badgeColor: "#ff9f43",
+      body: `Your precision score is ${fingerprint.precision}/100, suggesting curved or erratic cursor paths. This typically indicates forearm/wrist tension, a too-tight grip, or a sensitivity that's high relative to your mousepad size.`,
+      tip: "Try the 'loose grip' drill: hold your mouse with barely enough pressure to lift it. Play a tracking scenario for 5 minutes. This forces arm-driven movement instead of wrist micro-corrections, which dramatically reduces micro-tremor and improves path straightness.",
+    });
+
+  if (slope > avgScoreVal * 0.005 && n >= 10) {
+    const sessionsToNext = Math.round(avgScoreVal * 0.1 / slope);
+    if (sessionsToNext > 0 && sessionsToNext < 150)
+      cards.push({
+        title: "Active Improvement Phase",
+        badge: "Motor Learning",
+        badgeColor: "#00f5a0",
+        body: `You're gaining ~${Math.round(slope)} pts/session. The motor learning 'power law of practice' predicts improvement rates slow as skill increases — but you're still in a productive growth phase.`,
+        tip: `At this rate you'd reach +10% of your current average in ~${sessionsToNext} more sessions. To sustain the pace, incrementally increase scenario difficulty rather than grinding at the same challenge level. Comfortable practice produces diminishing returns.`,
+      });
+  }
+
+  if (n >= 5)
+    cards.push({
+      title: "The Spacing Effect",
+      badge: "Cognitive Science",
+      badgeColor: "#00b4ff",
+      body: "Distributed practice (multiple short sessions across days) produces significantly better long-term skill retention than massed practice (marathon sessions). This is one of the most replicated findings in motor learning research.",
+      tip: "Aim for 20–30 minutes daily rather than 2+ hour weekend sessions. Even 15 minutes of focused practice 5 days a week outperforms a 2-hour Saturday grind for long-term skill retention and game transfer.",
+    });
+
+  if (n >= 8 && !isPlateau)
+    cards.push({
+      title: "Interleaved Practice",
+      badge: "Skill Transfer",
+      badgeColor: "#a78bfa",
+      body: "Mixing scenario types in a single session improves overall aim transfer to real games more than repeating the same scenario. The variety forces active pattern retrieval each time, which is harder but produces better long-term retention.",
+      tip: isTracking
+        ? "Structure sessions as: warm-up tracking (5 min) → a precision/clicking scenario (10 min) → your main tracking scenario (15 min). Crossing between tracking and clicking helps your brain build a more complete aim model."
+        : "Structure sessions as: warm-up flicking (5 min) → a tracking scenario to train smooth cursor control (10 min) → your main click scenario (15 min). This interleaved format feels harder but produces superior retention and cross-scenario skill transfer.",
+    });
+
+  return cards.slice(0, 6);
+}
+
+function CoachingCard({ card }: { card: CoachingCardData }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div
+      style={{
+        background: "rgba(255,255,255,0.04)",
+        border: "1px solid rgba(255,255,255,0.08)",
+        borderRadius: 10,
+        padding: "14px 16px",
+        cursor: "pointer",
+        userSelect: "none",
+      }}
+      onClick={() => setExpanded((x) => !x)}
+    >
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <span
+            style={{
+              background: `${card.badgeColor}20`,
+              border: `1px solid ${card.badgeColor}40`,
+              color: card.badgeColor,
+              borderRadius: 4,
+              fontSize: 10,
+              padding: "2px 7px",
+              textTransform: "uppercase",
+              letterSpacing: 0.8,
+              flexShrink: 0,
+              whiteSpace: "nowrap",
+            }}
+          >
+            {card.badge}
+          </span>
+          <span
+            style={{
+              fontWeight: 700,
+              fontSize: 13,
+              overflow: "hidden",
+              textOverflow: "ellipsis",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {card.title}
+          </span>
+        </div>
+        <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, flexShrink: 0 }}>
+          {expanded ? "▲" : "▼"}
+        </span>
+      </div>
+      {expanded && (
+        <div style={{ marginTop: 12, display: "flex", flexDirection: "column", gap: 10 }}>
+          <p
+            style={{
+              margin: 0,
+              fontSize: 12,
+              color: "rgba(255,255,255,0.55)",
+              lineHeight: 1.7,
+            }}
+          >
+            {card.body}
+          </p>
+          <div
+            style={{
+              background: `${card.badgeColor}12`,
+              borderLeft: `3px solid ${card.badgeColor}`,
+              padding: "8px 12px",
+              borderRadius: "0 6px 6px 0",
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                color: card.badgeColor,
+                textTransform: "uppercase",
+                letterSpacing: 0.8,
+                marginBottom: 5,
+              }}
+            >
+              Action
+            </div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12,
+                color: "rgba(255,255,255,0.7)",
+                lineHeight: 1.65,
+              }}
+            >
+              {card.tip}
+            </p>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ScoreDistributionChart({
+  scores,
+  p10,
+  p50,
+  p90,
+}: {
+  scores: number[];
+  p10: number;
+  p50: number;
+  p90: number;
+}) {
+  if (scores.length < 4) return null;
+  const min = scores[0];
+  const max = scores[scores.length - 1];
+  const range = max - min;
+  if (range === 0) return null;
+  const BINS = 10;
+  const binSize = range / BINS;
+  const bins = Array.from({ length: BINS }, (_, i) => {
+    const lo = min + i * binSize;
+    const hi = lo + binSize;
+    const count = scores.filter((s) =>
+      i === BINS - 1 ? s >= lo && s <= hi : s >= lo && s < hi,
+    ).length;
+    return { label: fmtScore(Math.round(lo)), count, lo, hi };
+  });
+  return (
+    <div style={CHART_STYLE}>
+      <SectionTitle>Score distribution</SectionTitle>
+      <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
+        {[
+          { color: "#a78bfa", label: `Floor (bottom 10%): ${fmtScore(p10)}` },
+          { color: "#ffd700", label: `Median: ${fmtScore(p50)}` },
+          { color: "#00f5a0", label: `Peak (top 10%): ${fmtScore(p90)}` },
+        ].map((l) => (
+          <div key={l.label} style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div
+              style={{ width: 8, height: 8, borderRadius: "50%", background: l.color }}
+            />
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.5)" }}>{l.label}</span>
+          </div>
+        ))}
+      </div>
+      <ResponsiveContainer width="100%" height={140}>
+        <BarChart data={bins} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+          <CartesianGrid
+            strokeDasharray="3 3"
+            stroke="rgba(255,255,255,0.06)"
+            vertical={false}
+          />
+          <XAxis
+            dataKey="label"
+            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 10 }}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis
+            tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+            tickLine={false}
+            axisLine={false}
+            width={28}
+            allowDecimals={false}
+          />
+          <Tooltip
+            content={({ active, payload }) => {
+              if (!active || !payload?.length) return null;
+              const d = payload[0]?.payload as (typeof bins)[0];
+              return (
+                <div style={{ ...TOOLTIP_STYLE, padding: "8px 12px" }}>
+                  <div
+                    style={{
+                      color: "rgba(255,255,255,0.5)",
+                      fontSize: 11,
+                      marginBottom: 4,
+                    }}
+                  >
+                    {fmtScore(Math.round(d.lo))} – {fmtScore(Math.round(d.hi))}
+                  </div>
+                  <div style={{ fontWeight: 700 }}>{d.count} sessions</div>
+                </div>
+              );
+            }}
+          />
+          <Bar dataKey="count" radius={[3, 3, 0, 0]}>
+            {bins.map((bin, i) => (
+              <Cell
+                key={i}
+                fill={bin.lo >= p90 ? "#00f5a0" : bin.hi <= p10 ? "#a78bfa80" : "#00b4ff50"}
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
+// ─── Coaching tab ─────────────────────────────────────────────────────────────
+
+function CoachingTab({
+  records,
+  sorted,
+  warmupIds,
+  sessionFilter,
+}: {
+  records: SessionRecord[];
+  sorted: SessionRecord[];
+  warmupIds: Set<string>;
+  sessionFilter: SessionFilter;
+}) {
+  // CoachingTab always works on the full dataset and handles splits internally.
+  const warmupSorted  = sorted.filter((r) => warmupIds.has(r.id));
+  const peakSorted    = sorted.filter((r) => !warmupIds.has(r.id));
+  const peakRecords   = records.filter((r) => !warmupIds.has(r.id));
+  const hasWarmupData = warmupSorted.length > 0;
+
+  // Use peak-only data for the main coaching analysis so warmup sessions don't skew it.
+  // Fall back to all records if there are no peak records yet.
+  const coachRecords = peakRecords.length >= 3 ? peakRecords : records;
+  const coachSorted  = peakRecords.length >= 3 ? peakSorted  : sorted;
+
+  const smoothRecords = coachRecords.filter((r) => r.smoothness !== null);
+  const scores = coachSorted.map((r) => r.score);
+
+  const showWarmupSection = sessionFilter !== "warmedup" && hasWarmupData;
+  const showPeakSection   = sessionFilter !== "warmup";
+
+  if (scores.length < 3 && !showWarmupSection) {
+    return (
+      <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
+        Play at least 3 sessions to unlock coaching analysis.
+      </div>
+    );
+  }
+
+  // ── Peak performance stats ────────────────────────────────────────────────
+  const avgScoreVal  = scores.length > 0 ? mean(scores) : 0;
+  const scoreStdDev  = stddev(scores);
+  const scoreCV      = avgScoreVal > 0 ? (scoreStdDev / avgScoreVal) * 100 : 0;
+  const xs           = scores.map((_, i) => i + 1);
+  const { slope }    = linearRegression(xs, scores);
+  const slopeNormPct = avgScoreVal > 0 ? (slope / avgScoreVal) * 100 : 0;
+  const recent7      = scores.slice(-7);
+  const recentCV     = mean(recent7) > 0 ? (stddev(recent7) / mean(recent7)) * 100 : 0;
+  const isPlateau    = scores.length >= 8 && Math.abs(slopeNormPct) < 0.5 && recentCV < 8;
+
+  const scenarioType = dominantScenarioType(coachRecords);
+  const isTracking   = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+
+  const fingerprint  = smoothRecords.length > 0 ? buildAimFingerprint(smoothRecords, scenarioType) : null;
+  const aimStyle     = fingerprint ? classifyAimStyle(fingerprint, scenarioType) : null;
+
+  const sixthAxisLabel = isTracking ? "Flow" : "Rhythm";
+
+  const radarData = fingerprint
+    ? [
+        { metric: "Precision",    value: fingerprint.precision },
+        { metric: "Speed",        value: fingerprint.speed },
+        { metric: "Control",      value: fingerprint.control },
+        { metric: "Consistency",  value: fingerprint.consistency },
+        { metric: "Decisiveness", value: fingerprint.decisiveness },
+        { metric: sixthAxisLabel, value: fingerprint.rhythm },
+      ]
+    : [];
+
+  const coachingCards = scores.length >= 3 ? generateCoachingCards(
+    coachRecords,
+    coachSorted,
+    fingerprint,
+    scoreCV,
+    slope,
+    avgScoreVal,
+    isPlateau,
+    scenarioType,
+  ) : [];
+
+  const sortedScores = [...scores].sort((a, b) => a - b);
+  const p10 = percentileOf(sortedScores, 10);
+  const p50 = percentileOf(sortedScores, 50);
+  const p90 = percentileOf(sortedScores, 90);
+
+  // ── Warmup stats ──────────────────────────────────────────────────────────
+  const warmupStats = (() => {
+    if (!hasWarmupData) return null;
+    const warmupScores = warmupSorted.map((r) => r.score);
+    const peakScores   = peakSorted.map((r) => r.score);
+    const warmupAvg    = mean(warmupScores);
+    const peakAvg      = peakScores.length > 0 ? mean(peakScores) : 0;
+    const dropPct      = peakAvg > 0 ? ((peakAvg - warmupAvg) / peakAvg) * 100 : 0;
+
+    // Count average warmup sessions per play block
+    const blocks = groupIntoPlayBlocks(sorted);
+    const warmupBlocks = blocks.filter(
+      (b) => b.gapBeforeMs && b.gapBeforeMs >= WARMUP_GAP_MS &&
+             b.sessions.some((s) => warmupIds.has(s.id)),
+    );
+    const avgWarmupSessions = warmupBlocks.length > 0
+      ? warmupBlocks.reduce(
+          (sum, b) => sum + b.sessions.filter((s) => warmupIds.has(s.id)).length, 0,
+        ) / warmupBlocks.length
+      : 0;
+
+    return { warmupAvg, peakAvg, dropPct, avgWarmupSessions, blockCount: warmupBlocks.length };
+  })();
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+
+      {/* ── Warmup section ───────────────────────────────────────────────── */}
+      {showWarmupSection && warmupStats && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              paddingBottom: 10,
+              borderBottom: "1px solid rgba(255,180,0,0.15)",
+            }}
+          >
+            <div
+              style={{
+                width: 8,
+                height: 8,
+                borderRadius: "50%",
+                background: "#ffb400",
+                flexShrink: 0,
+              }}
+            />
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 700,
+                color: "#ffb400",
+                textTransform: "uppercase",
+                letterSpacing: 1,
+              }}
+            >
+              Warmup Phase
+            </span>
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginLeft: 4 }}>
+              {warmupIds.size} session{warmupIds.size !== 1 ? "s" : ""} detected
+            </span>
+          </div>
+
+          {/* Warmup summary cards */}
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div style={CARD_STYLE}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Warmup drop
               </div>
-              <div
-                style={{
-                  fontSize: 18,
-                  fontWeight: 700,
-                  color: neutral
-                    ? "rgba(255,255,255,0.3)"
-                    : improved
-                      ? "#00f5a0"
-                      : "#ff6b6b",
-                }}
-              >
-                {delta}
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffb400" }}>
+                −{warmupStats.dropPct.toFixed(1)}%
               </div>
               <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                2nd half vs 1st half
+                vs your peak average
               </div>
             </div>
-          );
-        })}
-      </div>
-
-      {/* Score */}
-      <div style={CHART_STYLE}>
-        <SectionTitle>Score progression</SectionTitle>
-        <ResponsiveContainer width="100%" height={140}>
-          <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-            <XAxis
-              dataKey="i"
-              tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-              tickLine={false}
-              axisLine={false}
-            />
-            <YAxis
-              tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-              tickLine={false}
-              axisLine={false}
-              width={52}
-              tickFormatter={(v: number) =>
-                v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
-              }
-            />
-            <Tooltip content={<MiniTooltip />} />
-            <Line
-              type="monotone"
-              dataKey="score"
-              name="Score"
-              stroke="#00f5a0"
-              strokeWidth={2}
-              dot={false}
-              connectNulls
-            />
-          </LineChart>
-        </ResponsiveContainer>
-      </div>
-
-      {/* Smoothness + path */}
-      {hasSmooth && (
-        <div style={CHART_STYLE}>
-          <SectionTitle>Mouse quality over time</SectionTitle>
-          <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
-            {[
-              { color: "#00b4ff", label: "Composite" },
-              { color: "#00f5a0", label: "Path eff. %" },
-            ].map((l) => (
-              <div
-                key={l.label}
-                style={{ display: "flex", alignItems: "center", gap: 6 }}
-              >
-                <div
-                  style={{ width: 12, height: 2, borderRadius: 2, background: l.color }}
-                />
-                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
-                  {l.label}
-                </span>
+            <div style={CARD_STYLE}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Avg warmup sessions
               </div>
-            ))}
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffb400" }}>
+                {warmupStats.avgWarmupSessions.toFixed(1)}
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                per play block
+              </div>
+            </div>
+            <div style={CARD_STYLE}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Warmup avg score
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>
+                {fmtScore(warmupStats.warmupAvg)}
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                vs peak {fmtScore(warmupStats.peakAvg)}
+              </div>
+            </div>
           </div>
-          <ResponsiveContainer width="100%" height={130}>
-            <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-              <XAxis
-                dataKey="i"
-                tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-                width={38}
-              />
-              <Tooltip content={<MiniTooltip />} />
-              <Line
-                type="monotone"
-                dataKey="composite"
-                name="Composite"
-                stroke="#00b4ff"
-                strokeWidth={2}
-                dot={false}
-                connectNulls
-              />
-              <Line
-                type="monotone"
-                dataKey="path_eff"
-                name="Path eff. %"
-                stroke="#00f5a0"
-                strokeWidth={1.5}
-                dot={false}
-                connectNulls
-              />
-            </LineChart>
-          </ResponsiveContainer>
+
+          {/* Warmup coaching card */}
+          <div
+            style={{
+              background: "rgba(255,180,0,0.06)",
+              border: "1px solid rgba(255,180,0,0.2)",
+              borderRadius: 10,
+              padding: "14px 16px",
+              display: "flex",
+              flexDirection: "column",
+              gap: 10,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                style={{
+                  background: "rgba(255,180,0,0.2)",
+                  border: "1px solid rgba(255,180,0,0.4)",
+                  color: "#ffb400",
+                  borderRadius: 4,
+                  fontSize: 10,
+                  padding: "2px 7px",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.8,
+                }}
+              >
+                Warmup Science
+              </span>
+              <span style={{ fontWeight: 700, fontSize: 13 }}>
+                Your warmup takes ~{Math.ceil(warmupStats.avgWarmupSessions)} session{Math.ceil(warmupStats.avgWarmupSessions) !== 1 ? "s" : ""}
+              </span>
+            </div>
+            <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.55)", lineHeight: 1.7 }}>
+              After a 6+ hour break you score ~{warmupStats.dropPct.toFixed(0)}% below your peak
+              during the first {Math.ceil(warmupStats.avgWarmupSessions)} run{Math.ceil(warmupStats.avgWarmupSessions) !== 1 ? "s" : ""}.
+              This is completely normal — your motor system needs to re-activate the neural pathways
+              for fine aim control. These sessions are excluded from your peak-performance analysis above.
+            </p>
+            <div
+              style={{
+                background: "rgba(255,180,0,0.1)",
+                borderLeft: "3px solid #ffb400",
+                padding: "8px 12px",
+                borderRadius: "0 6px 6px 0",
+              }}
+            >
+              <div style={{ fontSize: 10, color: "#ffb400", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 5 }}>
+                Action
+              </div>
+              <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.7)", lineHeight: 1.65 }}>
+                {warmupStats.avgWarmupSessions <= 1
+                  ? "You warm up quickly. A 3-minute easy tracking or large-target flicking routine before your first real run would likely eliminate the dip entirely."
+                  : warmupStats.avgWarmupSessions <= 2
+                  ? "Add a 5-minute structured warm-up routine (slow tracking → medium flicks → main scenario) before treating any run as a 'real' attempt. This pre-activates the motor patterns your main scenario needs."
+                  : "Your warm-up is longer than average. Consider starting each session with 2–3 easy scenarios that progressively increase in difficulty, ending just below your main scenario's intensity. This structured ramp will tighten your warmup to 1–2 runs."}
+              </p>
+            </div>
+          </div>
         </div>
       )}
 
-      {/* Accuracy + TTK */}
-      {(hasPanelAcc || hasTtk) && (
-        <div style={CHART_STYLE}>
-          <SectionTitle>Game performance over time</SectionTitle>
-          <div style={{ display: "flex", gap: 16, marginBottom: 10, flexWrap: "wrap" }}>
-            {[
-              ...(hasPanelAcc ? [{ color: "#a78bfa", label: "Accuracy %" }] : []),
-              ...(hasTtk ? [{ color: "#ffd700", label: "Avg TTK (ms)" }] : []),
-            ].map((l) => (
-              <div
-                key={l.label}
-                style={{ display: "flex", alignItems: "center", gap: 6 }}
-              >
-                <div
-                  style={{ width: 12, height: 2, borderRadius: 2, background: l.color }}
-                />
-                <span style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
-                  {l.label}
-                </span>
-              </div>
-            ))}
-          </div>
-          <ResponsiveContainer width="100%" height={130}>
-            <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-              <XAxis
-                dataKey="i"
-                tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-              />
-              <YAxis
-                tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                tickLine={false}
-                axisLine={false}
-                width={38}
-              />
-              <Tooltip content={<MiniTooltip />} />
-              {hasPanelAcc && (
-                <Line
-                  type="monotone"
-                  dataKey="acc"
-                  name="Accuracy %"
-                  stroke="#a78bfa"
-                  strokeWidth={2}
-                  dot={false}
-                  connectNulls
-                />
-              )}
-              {hasTtk && (
-                <Line
-                  type="monotone"
-                  dataKey="ttk"
-                  name="Avg TTK (ms)"
-                  stroke="#ffd700"
-                  strokeWidth={2}
-                  dot={false}
-                  connectNulls
-                />
-              )}
-            </LineChart>
-          </ResponsiveContainer>
+      {/* Divider between sections when showing both */}
+      {showWarmupSection && showPeakSection && warmupStats && scores.length >= 3 && (
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            paddingBottom: 10,
+            borderBottom: "1px solid rgba(0,245,160,0.15)",
+          }}
+        >
+          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#00f5a0", flexShrink: 0 }} />
+          <span style={{ fontSize: 12, fontWeight: 700, color: "#00f5a0", textTransform: "uppercase", letterSpacing: 1 }}>
+            Peak Performance
+          </span>
+          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginLeft: 4 }}>
+            {coachSorted.length} session{coachSorted.length !== 1 ? "s" : ""} · warmup excluded
+          </span>
         </div>
+      )}
+
+      {/* ── Peak performance section ──────────────────────────────────────── */}
+      {showPeakSection && scores.length < 3 && (
+        <div style={{ color: "rgba(255,255,255,0.3)", padding: "10px 0", lineHeight: 1.7 }}>
+          Play at least 3 warmed-up sessions to unlock peak performance coaching.
+        </div>
+      )}
+      {showPeakSection && scores.length >= 3 && (
+      <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      {/* ── Aim Fingerprint ── */}
+      {fingerprint && aimStyle && (
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ ...CHART_STYLE, flex: "1 1 280px", minWidth: 220 }}>
+            <SectionTitle>Aim Fingerprint</SectionTitle>
+            <ResponsiveContainer width="100%" height={220}>
+              <RadarChart data={radarData} cx="50%" cy="50%">
+                <PolarGrid stroke="rgba(255,255,255,0.1)" />
+                <PolarAngleAxis
+                  dataKey="metric"
+                  tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 11 }}
+                />
+                <PolarRadiusAxis
+                  angle={90}
+                  domain={[0, 100]}
+                  tick={false}
+                  axisLine={false}
+                />
+                <Radar
+                  dataKey="value"
+                  stroke={aimStyle.color}
+                  fill={aimStyle.color}
+                  fillOpacity={0.18}
+                  strokeWidth={2}
+                />
+              </RadarChart>
+            </ResponsiveContainer>
+          </div>
+          <div
+            style={{
+              ...CHART_STYLE,
+              flex: "1 1 200px",
+              minWidth: 180,
+              display: "flex",
+              flexDirection: "column",
+              justifyContent: "center",
+              gap: 10,
+            }}
+          >
+            <div
+              style={{
+                fontSize: 10,
+                color: "rgba(255,255,255,0.35)",
+                textTransform: "uppercase",
+                letterSpacing: 1,
+              }}
+            >
+              Aim Style
+            </div>
+            <div
+              style={{ fontSize: 20, fontWeight: 800, color: aimStyle.color, lineHeight: 1.1 }}
+            >
+              {aimStyle.name}
+            </div>
+            <div style={{ fontSize: 12, color: "rgba(255,255,255,0.45)", fontStyle: "italic" }}>
+              {aimStyle.tagline}
+            </div>
+            <p
+              style={{
+                margin: 0,
+                fontSize: 12,
+                color: "rgba(255,255,255,0.55)",
+                lineHeight: 1.65,
+              }}
+            >
+              {aimStyle.description}
+            </p>
+            <div
+              style={{
+                fontSize: 11,
+                color: aimStyle.color,
+                borderTop: `1px solid ${aimStyle.color}30`,
+                paddingTop: 10,
+                lineHeight: 1.5,
+              }}
+            >
+              <span style={{ opacity: 0.6 }}>Focus: </span>
+              {aimStyle.focus}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Score analytics cards ── */}
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+        <StatCard
+          label="Consistency"
+          value={scoreCV.toFixed(1) + "% spread"}
+          sub={scoreCV < 5 ? "Very consistent" : scoreCV < 12 ? "Moderate variance" : "High variance"}
+          accent={scoreCV < 5 ? "#00f5a0" : scoreCV < 12 ? "#ffd700" : "#ff6b6b"}
+        />
+        <StatCard
+          label="Learning Rate"
+          value={(slope > 0 ? "+" : "") + Math.round(slope) + " pts/run"}
+          sub={isPlateau ? "Plateau detected" : slope > avgScoreVal * 0.005 ? "Trending up" : Math.abs(slope) < avgScoreVal * 0.005 ? "Stable" : "Trending down"}
+          accent={slope > avgScoreVal * 0.005 ? "#00f5a0" : slope < -avgScoreVal * 0.01 ? "#ff6b6b" : "#ffd700"}
+        />
+        <StatCard label="Score Floor"  value={fmtScore(p10)} sub="your bottom 10% of runs" accent="#a78bfa" />
+        <StatCard label="Typical Score" value={fmtScore(p50)} sub="your most common result" />
+        <StatCard label="Peak Zone"    value={fmtScore(p90)} sub="your top 10% of runs" accent="#00f5a0" />
+      </div>
+
+      {/* ── Distribution chart ── */}
+      <ScoreDistributionChart scores={sortedScores} p10={p10} p50={p50} p90={p90} />
+
+      {/* ── Coaching cards ── */}
+      {coachingCards.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <SectionTitle>Coaching Insights — click any card to expand</SectionTitle>
+          {coachingCards.map((card, i) => (
+            <CoachingCard key={i} card={card} />
+          ))}
+        </div>
+      )}
+      </div>  /* end peak performance section */
       )}
     </div>
   );
@@ -1567,8 +2647,9 @@ function TrendsTab({
 
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
-function ScenarioDetails({ records }: { records: SessionRecord[] }) {
+function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; scenarioName: string }) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
 
   const sorted = useMemo(
     () =>
@@ -1580,23 +2661,41 @@ function ScenarioDetails({ records }: { records: SessionRecord[] }) {
     [records],
   );
 
-  const best = Math.max(...records.map((r) => r.score));
+  const warmupIds = useMemo(() => classifyWarmup(sorted), [sorted]);
+  const hasWarmup = warmupIds.size > 0;
+
+  const filteredRecords = useMemo(() => {
+    if (sessionFilter === "warmup")   return records.filter((r) => warmupIds.has(r.id));
+    if (sessionFilter === "warmedup") return records.filter((r) => !warmupIds.has(r.id));
+    return records;
+  }, [records, warmupIds, sessionFilter]);
+
+  const filteredSorted = useMemo(() => {
+    if (sessionFilter === "warmup")   return sorted.filter((r) => warmupIds.has(r.id));
+    if (sessionFilter === "warmedup") return sorted.filter((r) => !warmupIds.has(r.id));
+    return sorted;
+  }, [sorted, warmupIds, sessionFilter]);
+
+  const best = Math.max(...filteredRecords.map((r) => r.score), 0);
   const hasSmooth = records.some((r) => r.smoothness != null);
   const hasPanel = records.some((r) => r.stats_panel != null);
 
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
-    { id: "mouse", label: "Mouse", hidden: !hasSmooth },
-    { id: "gamestats", label: "Game Stats", hidden: !hasPanel },
-    { id: "trends", label: "Trends" },
+    { id: "movement", label: "Movement", hidden: !hasSmooth },
+    { id: "performance", label: "Performance", hidden: !hasPanel },
+    { id: "coaching", label: "Coaching" },
+    { id: "replay", label: "Replay" },
+    { id: "leaderboard", label: "Leaderboard" },
   ];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      {/* Tab bar */}
+      {/* Tab bar + session filter toggle */}
       <div
         style={{
           display: "flex",
+          alignItems: "flex-end",
           gap: 4,
           borderBottom: "1px solid rgba(255,255,255,0.08)",
         }}
@@ -1626,21 +2725,76 @@ function ScenarioDetails({ records }: { records: SessionRecord[] }) {
             </button>
           );
         })}
+
+        {/* Session filter — only shown when warmup sessions have been detected */}
+        {hasWarmup && (
+          <div
+            style={{
+              display: "flex",
+              gap: 4,
+              marginLeft: "auto",
+              marginBottom: 6,
+              alignItems: "center",
+            }}
+          >
+            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginRight: 4, textTransform: "uppercase", letterSpacing: 0.8 }}>
+              View
+            </span>
+            {(["all", "warmup", "warmedup"] as SessionFilter[]).map((f) => (
+              <button
+                key={f}
+                onClick={() => setSessionFilter(f)}
+                style={{
+                  background: sessionFilter === f
+                    ? f === "warmup" ? "rgba(255,180,0,0.15)" : "rgba(0,245,160,0.12)"
+                    : "none",
+                  border: sessionFilter === f
+                    ? f === "warmup" ? "1px solid rgba(255,180,0,0.4)" : "1px solid rgba(0,245,160,0.3)"
+                    : "1px solid rgba(255,255,255,0.1)",
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  fontSize: 11,
+                  color: sessionFilter === f
+                    ? f === "warmup" ? "#ffb400" : "#00f5a0"
+                    : "rgba(255,255,255,0.4)",
+                  cursor: "pointer",
+                  fontFamily: "inherit",
+                  transition: "all 0.1s",
+                }}
+              >
+                {f === "all" ? "All" : f === "warmup" ? "Warm-up" : "Warmed-up"}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {activeTab === "overview" && (
-        <OverviewTab records={records} sorted={sorted} best={best} />
+        <OverviewTab records={filteredRecords} sorted={filteredSorted} best={best} warmupIds={warmupIds} />
       )}
-      {activeTab === "mouse" && <MouseTab records={records} sorted={sorted} />}
-      {activeTab === "gamestats" && (
-        <GameStatsTab records={records} sorted={sorted} />
+      {activeTab === "movement" && <MovementTab records={filteredRecords} sorted={filteredSorted} />}
+      {activeTab === "performance" && (
+        <PerformanceTab records={filteredRecords} sorted={filteredSorted} />
       )}
-      {activeTab === "trends" && <TrendsTab records={records} sorted={sorted} />}
+      {activeTab === "coaching" && (
+        <CoachingTab
+          records={records}
+          sorted={sorted}
+          warmupIds={warmupIds}
+          sessionFilter={sessionFilter}
+        />
+      )}
+      {activeTab === "replay" && (
+        <ReplayTab records={filteredRecords} sorted={filteredSorted} warmupIds={warmupIds} />
+      )}
+      {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
     </div>
   );
 }
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
+
+type RootMode = "sessions" | "leaderboards";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
@@ -1648,6 +2802,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [rootMode, setRootMode] = useState<RootMode>("sessions");
 
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
@@ -1729,6 +2884,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     <div
       style={{
         display: "flex",
+        flexDirection: "column",
         height: embedded ? "100%" : "100vh",
         background: "#0a0a0f",
         color: "#fff",
@@ -1737,6 +2893,42 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         overflow: "hidden",
       }}
     >
+      {/* ── Mode tab bar ── */}
+      <div
+        style={{
+          display: "flex",
+          gap: 0,
+          borderBottom: "1px solid rgba(255,255,255,0.08)",
+          padding: "0 16px",
+          background: "rgba(255,255,255,0.015)",
+          flexShrink: 0,
+        }}
+      >
+        {(["sessions", "leaderboards"] as RootMode[]).map((m) => (
+          <button
+            key={m}
+            onClick={() => setRootMode(m)}
+            style={{
+              background: "none",
+              border: "none",
+              borderBottom: rootMode === m ? "2px solid #00f5a0" : "2px solid transparent",
+              padding: "11px 16px",
+              marginBottom: -1,
+              cursor: "pointer",
+              color: rootMode === m ? "#fff" : "rgba(255,255,255,0.4)",
+              fontFamily: "inherit",
+              fontSize: 13,
+              fontWeight: rootMode === m ? 700 : 400,
+            }}
+          >
+            {m === "sessions" ? "Session Stats" : "Leaderboards"}
+          </button>
+        ))}
+      </div>
+
+      {/* ── Sessions content ── */}
+      {rootMode === "sessions" && (
+        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
       {/* ── Sidebar ── */}
       <div
         style={{
@@ -1893,7 +3085,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             >
               {selectedScenario}
             </h2>
-            <ScenarioDetails records={selectedRecords} />
+            <ScenarioDetails records={selectedRecords} scenarioName={selectedScenario!} />
           </>
         ) : (
           <div
@@ -1911,6 +3103,15 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           </div>
         )}
       </div>
+        </div>
+      )}
+
+      {/* ── Leaderboards content ── */}
+      {rootMode === "leaderboards" && (
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <LeaderboardBrowser />
+        </div>
+      )}
     </div>
   );
 }
