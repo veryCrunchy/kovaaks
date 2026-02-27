@@ -83,11 +83,18 @@ fn tracker_loop(app: AppHandle) {
     };
 
     const POLL_MS: u64 = 250;
+    // Re-assert TOPMOST every this many ticks even when state is unchanged, as a
+    // safety net against a game briefly stealing the TOPMOST layer on a mode switch.
+    // 8 ticks × 250 ms = 2 seconds — much less aggressive than every 250 ms.
+    const TOPMOST_REASSERT_TICKS: u32 = 8;
 
     let mut overlay_visible = true;
     let mut last_rect: Option<(i32, i32, u32, u32)> = None;
     // Cached game HWND. Cleared when the process is no longer found.
     let mut game_hwnd: Option<HWND> = None;
+    // Cached overlay HWND so we avoid a Tauri lock lookup every 250 ms.
+    let mut overlay_hwnd: Option<HWND> = None;
+    let mut topmost_ticks_remaining: u32 = 0;
 
     log::info!("Window tracker started — polling for FPSAimTrainer");
 
@@ -119,10 +126,14 @@ fn tracker_loop(app: AppHandle) {
         GAME_FOCUSED.store(is_kovaaks, Ordering::Relaxed);
 
         // ── 2. Overlay HWND for the "settings open" check ─────────────────────
-        let overlay_hwnd: Option<HWND> = app
-            .get_webview_window("overlay")
-            .and_then(|w| w.hwnd().ok())
-            .map(|h| HWND(h.0 as _));
+        // Resolve once and cache — get_webview_window() takes a Tauri manager
+        // lock every call; calling it 4×/sec is unnecessary overhead.
+        if overlay_hwnd.is_none() {
+            overlay_hwnd = app
+                .get_webview_window("overlay")
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| HWND(h.0 as _));
+        }
 
         let our_window_active = overlay_hwnd.map_or(false, |oh| fg == oh);
         let should_show = is_kovaaks || our_window_active || FORCE_SHOW.load(Ordering::Relaxed);
@@ -169,15 +180,24 @@ fn tracker_loop(app: AppHandle) {
             }
         }
 
-        // ── 4. Show / hide via SetWindowPos (re-asserts TOPMOST) ──────────────
+        // ── 4. Show / hide via SetWindowPos ───────────────────────────────────
+        // SetWindowPos is a kernel call that wakes the DWM compositor; calling it
+        // 4× per second when the state hasn't changed wastes CPU.  We now only
+        // call it on state transitions (hidden↔shown) plus a periodic 2-second
+        // safety pulse to reclaim TOPMOST if a game briefly stole it.
         if let Some(oh) = overlay_hwnd {
             if should_show {
-                // Always re-assert whether state changed or not — game may have
-                // briefly captured the TOPMOST layer during a mode switch.
-                unsafe {
-                    let _ = SetWindowPos(oh, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                let state_changed = !overlay_visible;
+                let reassert = state_changed || topmost_ticks_remaining == 0;
+                if reassert {
+                    unsafe {
+                        let _ = SetWindowPos(oh, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                    }
+                    topmost_ticks_remaining = TOPMOST_REASSERT_TICKS;
+                } else {
+                    topmost_ticks_remaining -= 1;
                 }
-                if !overlay_visible {
+                if state_changed {
                     let _ = app.emit("kovaaks-focused", true);
                     log::info!("Overlay shown (KovaaK's active)");
                     overlay_visible = true;
@@ -190,6 +210,7 @@ fn tracker_loop(app: AppHandle) {
                 let _ = app.emit("kovaaks-focused", false);
                 log::info!("Overlay hidden (alt-tabbed)");
                 overlay_visible = false;
+                topmost_ticks_remaining = 0; // reset so we re-assert immediately on next show
             }
         }
 

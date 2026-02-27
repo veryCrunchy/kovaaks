@@ -37,7 +37,10 @@ const FPS: u64 = 15;
 /// Cap at 2 700 frames ≈ 3-minute session at 15 fps.
 const MAX_FRAMES: usize = 2_700;
 /// Output width after downscaling; height is preserved from the source aspect ratio.
-const OUT_W: u32 = 640;
+/// 480 px is the replay target size, so we encode at that width directly during
+/// recording — this eliminates the decode→resize→re-encode pass in
+/// drain_frames_for_replay() that previously ran on the file-watcher thread.
+const OUT_W: u32 = 480;
 /// JPEG quality (0–100).
 const JPEG_QUALITY: u8 = 65;
 
@@ -117,16 +120,17 @@ pub fn get_frames() -> Vec<ScreenFrame> {
 
 /// Drain frames and return a replay-quality subset for persistent storage.
 ///
-/// - Keeps every 3rd frame (15 fps → 5 fps).
-/// - Re-encodes each kept frame at 480 px wide, JPEG quality 65 (≈ 8–12 KB/frame).
-///   A typical 60-second session produces ~300 frames ≈ 3 MB on disk.
-/// - On non-Windows / without `ocr` the buffer is always empty; returns `[]`.
+/// Drains the frame buffer and returns every 3rd frame (15 fps → 5 fps) for
+/// replay storage.  Frames are already encoded at OUT_W (480 px) and
+/// JPEG_QUALITY during recording, so no re-encoding is required here.
+/// A typical 60-second session produces ~300 frames ≈ 3 MB on disk.
+/// On non-Windows / without `ocr` the buffer is always empty; returns `[]`.
 pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
     drain_frames()
         .into_iter()
         .enumerate()
         .filter(|(i, _)| i % 3 == 0)
-        .map(|(_, f)| reencode_frame(f, 480, 65))
+        .map(|(_, f)| f)
         .collect()
 }
 
@@ -250,9 +254,16 @@ fn capture_one_frame() {
 fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
     use image::codecs::jpeg::JpegEncoder;
 
-    let (bgra, w, h) = crate::ocr::capture_region_gdi(rect)?;
+    // Use PrintWindow on the game HWND so the capture contains only game pixels.
+    // The DWM compositor is bypassed — our overlay and any other on-top windows
+    // are absent.  External tools (OBS, streaming) are unaffected.
+    // If the HWND isn't known yet, return Err so capture_one_frame skips this
+    // frame silently rather than recording composited screen content.
+    let hwnd = crate::window_tracker::get_game_hwnd()
+        .ok_or_else(|| anyhow::anyhow!("game HWND not yet detected — skipping frame"))?;
+    let (bgra, w, h) = capture_game_window_region(hwnd, rect)?;
 
-    // BGRA → RGB (GDI gives BGRA; image::Rgb expects RGB)
+    // BGRA → RGB (PrintWindow gives BGRA; image::Rgb expects RGB)
     let mut rgb = Vec::with_capacity((w * h * 3) as usize);
     for px in bgra.chunks_exact(4) {
         rgb.push(px[2]); // R
@@ -272,12 +283,106 @@ fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
         image::imageops::FilterType::Nearest,
     );
 
-    // JPEG encode at low quality
+    // JPEG encode
     let mut buf = Vec::new();
     JpegEncoder::new_with_quality(&mut buf, JPEG_QUALITY)
         .encode_image(&image::DynamicImage::ImageRgb8(resized))?;
 
     Ok(base64_encode(&buf))
+}
+
+/// Capture a subregion of the game window using PrintWindow.
+///
+/// PrintWindow renders the HWND directly into a memory DC, bypassing the DWM
+/// compositor — layered/transparent windows on top (our overlay, etc.) are
+/// never included.  `screen_rect` is in screen coordinates; we translate to
+/// client coordinates so the crop is correct for non-(0,0) game windows too.
+#[cfg(all(target_os = "windows", feature = "ocr"))]
+fn capture_game_window_region(
+    hwnd: windows::Win32::Foundation::HWND,
+    screen_rect: &RegionRect,
+) -> anyhow::Result<(Vec<u8>, u32, u32)> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
+        DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC,
+        SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    // PrintWindow is not re-exported by the windows crate under the feature
+    // flags we use, so bind it directly from user32.dll.
+    // Must be declared at item scope (not inside an unsafe block).
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn PrintWindow(hwnd: windows::Win32::Foundation::HWND, hdcBlt: HDC, nFlags: u32) -> i32;
+    }
+    const PW_RENDERFULLCONTENT: u32 = 0x0000_0002;
+
+    unsafe {
+        let mut client_rect = RECT::default();
+        GetClientRect(hwnd, &mut client_rect)
+            .map_err(|e| anyhow::anyhow!("GetClientRect: {e}"))?;
+        let cw = client_rect.right - client_rect.left;
+        let ch = client_rect.bottom - client_rect.top;
+        anyhow::ensure!(cw > 0 && ch > 0, "game window has zero client area");
+
+        let mut origin = POINT { x: 0, y: 0 };
+        // ClientToScreen only fails with an invalid HWND, which GetClientRect
+        // already proved is valid above.
+        let _ = ClientToScreen(hwnd, &mut origin);
+
+        // Translate screen_rect into client coordinates and clamp to window.
+        let crop_x = (screen_rect.x - origin.x).clamp(0, cw - 1);
+        let crop_y = (screen_rect.y - origin.y).clamp(0, ch - 1);
+        let crop_w = (screen_rect.width as i32).min(cw - crop_x);
+        let crop_h = (screen_rect.height as i32).min(ch - crop_y);
+        anyhow::ensure!(crop_w > 0 && crop_h > 0, "crop region is outside game window");
+
+        // Render the full game client area into a memory DC via PrintWindow,
+        // then BitBlt the desired subregion into a second DC for pixel readback.
+        let screen_dc = GetDC(None);
+        anyhow::ensure!(!screen_dc.is_invalid(), "GetDC(NULL) failed");
+        let mem_dc   = CreateCompatibleDC(Some(screen_dc));
+        let full_bmp = CreateCompatibleBitmap(screen_dc, cw, ch);
+        let old_full = SelectObject(mem_dc, HGDIOBJ(full_bmp.0));
+        let _ = PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT);
+
+        let crop_dc  = CreateCompatibleDC(Some(screen_dc));
+        let crop_bmp = CreateCompatibleBitmap(screen_dc, crop_w, crop_h);
+        let old_crop = SelectObject(crop_dc, HGDIOBJ(crop_bmp.0));
+        let _ = BitBlt(crop_dc, 0, 0, crop_w, crop_h, Some(mem_dc), crop_x, crop_y, SRCCOPY);
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize:        std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth:       crop_w,
+                biHeight:      -crop_h, // negative = top-down scan order
+                biPlanes:      1,
+                biBitCount:    32,
+                biCompression: BI_RGB.0,
+                biSizeImage:   (crop_w * crop_h * 4) as u32,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut pixels = vec![0u8; (crop_w * crop_h * 4) as usize];
+        let lines = GetDIBits(
+            crop_dc, crop_bmp, 0, crop_h as u32,
+            Some(pixels.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS,
+        );
+
+        let _ = SelectObject(crop_dc, old_crop);
+        let _ = DeleteObject(HGDIOBJ(crop_bmp.0));
+        let _ = DeleteDC(crop_dc);
+        let _ = SelectObject(mem_dc, old_full);
+        let _ = DeleteObject(HGDIOBJ(full_bmp.0));
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(None, screen_dc);
+
+        anyhow::ensure!(lines != 0, "GetDIBits returned 0 scan lines");
+        Ok((pixels, crop_w as u32, crop_h as u32))
+    }
 }
 
 /// RFC 4648 standard base64 encoder — avoids adding a dependency.
