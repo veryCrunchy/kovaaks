@@ -1,5 +1,31 @@
 # Changelog
 
+## [0.8.0](https://github.com/veryCrunchy/kovaaks/compare/v0.7.0...v0.8.0) (2026-02-27)
+
+
+### Features
+
+* **api:** add endpoints for fetching best score and scenario details ([61b2529](https://github.com/veryCrunchy/kovaaks/commit/61b2529bfb4fa157cf6d4661dc2fdaa724bf9398))
+* **auto-setup:** enhance auto-setup loop with dynamic OCR capture rect and scenario detection ([0937f4e](https://github.com/veryCrunchy/kovaaks/commit/0937f4e2a2c1ad6021c6efa7f162248e85658afa))
+* **leaderboard:** add LeaderboardBrowser component for scenario leaderboard display ([b59e47a](https://github.com/veryCrunchy/kovaaks/commit/b59e47a34d0e19d83d6cd25cad37c3a3b24f5d4a))
+* **replay:** add replay loading and scenario search functionality ([fcde742](https://github.com/veryCrunchy/kovaaks/commit/fcde742a0d8df1176a09fed336203bc7b437bdfe))
+* **replay:** enhance session handling with replay persistence ([e7ca82d](https://github.com/veryCrunchy/kovaaks/commit/e7ca82d3e15ff164fde15164b87ed2cb3f2e0acc))
+* **replay:** implement replay storage and management for session data ([8edeb7d](https://github.com/veryCrunchy/kovaaks/commit/8edeb7ddc1b1404eddd0debe1b8782556c3ffc7d))
+* **settings:** add tools section with session stats and logs buttons ([c0bbc9a](https://github.com/veryCrunchy/kovaaks/commit/c0bbc9a98d0af4c26c25c1329628ef71e3f12c83))
+* **steam-integration:** add Steam user detection and friend import functionality ([5f97502](https://github.com/veryCrunchy/kovaaks/commit/5f97502cc7bb31d4d801da80b7c708e66c12a69a))
+
+
+### Bug Fixes
+
+* **feedback:** improve clarity of feedback messages for mouse performance ([7e76128](https://github.com/veryCrunchy/kovaaks/commit/7e76128410b2ae3b5a56f1c6b7947587dab0f06d))
+* **mouse-path-viewer:** adjust image positioning and sizing for better alignment with canvas ([c249418](https://github.com/veryCrunchy/kovaaks/commit/c249418afbdf960539232a257ad2cf7279515b4d))
+* **ocr:** improve OCR reliability across all per-field stat parsers ([b736b09](https://github.com/veryCrunchy/kovaaks/commit/b736b09ebac225329a80349ee7585025857ea463))
+* **ocr:** remove hard upper bound on SPM in sanitize_reading function ([262a8da](https://github.com/veryCrunchy/kovaaks/commit/262a8da3248f8990d2c3e761fe3a57ea103477ba))
+* **settings:** OCR region cleared on save, visibility not reloaded ([b553b44](https://github.com/veryCrunchy/kovaaks/commit/b553b449eecf49a9d5513c12115a698ac19df207))
+* **single-instance:** improve process termination logic for overlay ([3923312](https://github.com/veryCrunchy/kovaaks/commit/3923312af2e5de7d72b2994e4e5535afa14e8e33))
+* **stats-overview:** improve language use to be easier to understand ([2942fe2](https://github.com/veryCrunchy/kovaaks/commit/2942fe274b0c7480a14b8f6a90b3959eb35baeb2))
+* **stats:** make session stats window visible by default ([b68ea07](https://github.com/veryCrunchy/kovaaks/commit/b68ea0710d22f26ff6030fbb111f3541da2958af))
+
 ## [0.7.0](https://github.com/veryCrunchy/kovaaks/compare/v0.6.1...v0.7.0) (2026-02-26)
 
 
