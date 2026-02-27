@@ -1179,34 +1179,83 @@ fn detect_field_regions_from_words(
 
 // ─── Single-instance helper ────────────────────────────────────────────────────
 
-/// Kills any previously running instance recorded in a PID file next to the
-/// executable, then writes our own PID.  This keeps development iteration fast:
-/// starting a new build automatically tears down the old one.
+/// Kills any previously running instance of the overlay.
+///
+/// On Windows we query `tasklist` by executable name so we never accidentally
+/// kill an unrelated process that happens to have reused an old PID (a known
+/// hazard of the naive PID-file approach).
+///
+/// On other platforms we fall back to a PID file.
 fn kill_existing_instance() {
-    let pid_path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("kovaaks-overlay.pid")))
-        .unwrap_or_else(|| std::env::temp_dir().join("kovaaks-overlay.pid"));
+    let our_pid = std::process::id();
 
-    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-        if let Ok(old_pid) = contents.trim().parse::<u32>() {
-            if old_pid != std::process::id() {
-                eprintln!("[single-instance] killing old instance (PID {old_pid})");
-                #[cfg(target_os = "windows")]
-                let _ = std::process::Command::new("taskkill")
-                    .args(["/PID", &old_pid.to_string(), "/F"])
-                    .output();
-                #[cfg(not(target_os = "windows"))]
-                let _ = std::process::Command::new("kill")
-                    .args(["-15", &old_pid.to_string()])
-                    .output();
-                // Give the old process a moment to exit cleanly
+    #[cfg(target_os = "windows")]
+    {
+        // Resolve just the file name of our own executable (e.g. "kovaaks-overlay.exe").
+        let exe_name = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+            .unwrap_or_default();
+
+        if exe_name.is_empty() {
+            return;
+        }
+
+        // Ask Windows for every running process whose image name matches ours.
+        let result = std::process::Command::new("tasklist")
+            .args(["/FI", &format!("IMAGENAME eq {exe_name}"), "/FO", "CSV", "/NH"])
+            .output();
+
+        if let Ok(output) = result {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut killed_any = false;
+
+            for line in stdout.lines() {
+                // CSV columns: "ImageName","PID","SessionName","Session#","MemUsage"
+                let mut parts = line.splitn(3, ',');
+                let _name = parts.next();
+                if let Some(pid_field) = parts.next() {
+                    let pid_str = pid_field.trim().trim_matches('"');
+                    if let Ok(pid) = pid_str.parse::<u32>() {
+                        if pid != our_pid {
+                            eprintln!("[single-instance] killing old instance (PID {pid})");
+                            let _ = std::process::Command::new("taskkill")
+                                .args(["/PID", &pid.to_string(), "/F"])
+                                .output();
+                            killed_any = true;
+                        }
+                    }
+                }
+            }
+
+            if killed_any {
+                // Give the old process a moment to release file handles etc.
                 std::thread::sleep(std::time::Duration::from_millis(400));
             }
         }
     }
 
-    let _ = std::fs::write(&pid_path, std::process::id().to_string());
+    #[cfg(not(target_os = "windows"))]
+    {
+        let pid_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("kovaaks-overlay.pid")))
+            .unwrap_or_else(|| std::env::temp_dir().join("kovaaks-overlay.pid"));
+
+        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+            if let Ok(old_pid) = contents.trim().parse::<u32>() {
+                if old_pid != our_pid {
+                    eprintln!("[single-instance] killing old instance (PID {old_pid})");
+                    let _ = std::process::Command::new("kill")
+                        .args(["-15", &old_pid.to_string()])
+                        .output();
+                    std::thread::sleep(std::time::Duration::from_millis(400));
+                }
+            }
+        }
+
+        let _ = std::fs::write(&pid_path, our_pid.to_string());
+    }
 }
 
 // ─── App Entry Point ───────────────────────────────────────────────────────────
