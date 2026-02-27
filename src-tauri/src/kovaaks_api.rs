@@ -153,6 +153,38 @@ pub async fn fetch_best_score(
     Ok(best)
 }
 
+/// Fetch the best score for a user identified by their Steam64 ID (no KovaaK's account required).
+///
+/// Uses the `steamId` query param variant of `last-scores/by-name`, which works for any player
+/// who has linked their Steam account to KovaaK's in-game, even without a webapp account.
+/// Returns `None` if they have never played the scenario or their scores are not public.
+pub async fn fetch_best_score_by_steam_id(
+    steam_id: &str,
+    scenario_name: &str,
+) -> anyhow::Result<Option<f64>> {
+    let response = CLIENT
+        .get(format!(
+            "{}/webapp-backend/user/scenario/last-scores/by-name",
+            BASE_URL
+        ))
+        .query(&[("steamId", steam_id), ("scenarioName", scenario_name)])
+        .header("Accept", "application/json")
+        .send()
+        .await?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    if !response.status().is_success() {
+        anyhow::bail!("API error {} (steamId={})", response.status(), steam_id);
+    }
+
+    let scores: Vec<ScoreData> = response.json().await?;
+    let best = scores.into_iter().map(|s| s.score).reduce(f64::max);
+    Ok(best)
+}
+
 /// Fetch the full user profile for a KovaaK's webapp username.
 ///
 /// Returns `None` if no user with that username exists.
@@ -389,6 +421,224 @@ pub async fn validate_scenario_name(name: &str) -> Option<String> {
             result
         }
     }
+}
+
+// ─── Leaderboard / scenario browser types ─────────────────────────────────────
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ScenarioSearchResult {
+    pub leaderboard_id: u64,
+    pub scenario_name: String,
+    pub aim_type: Option<String>,
+    pub description: Option<String>,
+    pub play_count: u64,
+    pub entry_count: u64,
+    pub top_score: f64,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ScenarioPage {
+    pub total: u64,
+    pub page: u64,
+    pub data: Vec<ScenarioSearchResult>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LeaderboardEntry {
+    pub rank: u64,
+    pub steam_id: String,
+    pub steam_account_name: String,
+    pub webapp_username: Option<String>,
+    pub score: f64,
+    pub country: Option<String>,
+    pub kovaaks_plus: bool,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct LeaderboardPage {
+    pub total: u64,
+    pub page: u64,
+    pub data: Vec<LeaderboardEntry>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct ScenarioDetails {
+    pub scenario_name: String,
+    pub aim_type: Option<String>,
+    pub play_count: u64,
+    pub description: Option<String>,
+    pub tags: Vec<String>,
+    pub created: Option<String>,
+    pub author_steam_account_name: Option<String>,
+}
+
+// ─── Leaderboard / scenario browser API ───────────────────────────────────────
+
+/// Search scenarios by name using the popular endpoint (max 100 per page).
+pub async fn search_scenarios(query: &str, page: u64, max: u64) -> anyhow::Result<ScenarioPage> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ScenarioCounts { plays: u64, entries: u64 }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ScenarioInner { aim_type: Option<String>, description: Option<String> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct TopScore { score: f64 }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        leaderboard_id: u64,
+        scenario_name: String,
+        scenario: ScenarioInner,
+        counts: ScenarioCounts,
+        top_score: TopScore,
+    }
+    #[derive(Deserialize)]
+    struct Resp { total: u64, page: u64, data: Vec<Row> }
+
+    let capped = max.min(100);
+    let resp: Resp = CLIENT
+        .get(format!("{}/webapp-backend/scenario/popular", BASE_URL))
+        .query(&[
+            ("page", page.to_string()),
+            ("max", capped.to_string()),
+            ("scenarioNameSearch", query.to_string()),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(ScenarioPage {
+        total: resp.total,
+        page: resp.page,
+        data: resp.data.into_iter().map(|r| ScenarioSearchResult {
+            leaderboard_id: r.leaderboard_id,
+            scenario_name: r.scenario_name,
+            aim_type: r.scenario.aim_type,
+            description: r.scenario.description,
+            play_count: r.counts.plays,
+            entry_count: r.counts.entries,
+            top_score: r.top_score.score,
+        }).collect(),
+    })
+}
+
+/// Fetch one page of global leaderboard scores for a given leaderboard ID (max 100).
+pub async fn get_leaderboard_page(leaderboard_id: u64, page: u64, max: u64) -> anyhow::Result<LeaderboardPage> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        rank: u64,
+        steam_id: String,
+        steam_account_name: String,
+        webapp_username: Option<String>,
+        score: f64,
+        country: Option<String>,
+        kovaaks_plus_active: Option<bool>,
+    }
+    #[derive(Deserialize)]
+    struct Resp { total: u64, page: u64, data: Vec<Row> }
+
+    let capped = max.min(100);
+    let resp: Resp = CLIENT
+        .get(format!("{}/webapp-backend/leaderboard/scores/global", BASE_URL))
+        .query(&[
+            ("leaderboardId", leaderboard_id.to_string()),
+            ("page", page.to_string()),
+            ("max", capped.to_string()),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(LeaderboardPage {
+        total: resp.total,
+        page: resp.page,
+        data: resp.data.into_iter().map(|r| LeaderboardEntry {
+            rank: r.rank,
+            steam_id: r.steam_id,
+            steam_account_name: r.steam_account_name,
+            webapp_username: r.webapp_username,
+            score: r.score,
+            country: r.country,
+            kovaaks_plus: r.kovaaks_plus_active.unwrap_or(false),
+        }).collect(),
+    })
+}
+
+/// Fetch metadata for a single scenario by leaderboard ID.
+pub async fn get_scenario_details(leaderboard_id: u64) -> anyhow::Result<ScenarioDetails> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Resp {
+        scenario_name: String,
+        aim_type: Option<String>,
+        play_count: u64,
+        steam_account_name: Option<String>,
+        description: Option<String>,
+        tags: Option<Vec<String>>,
+        created: Option<String>,
+    }
+
+    let resp: Resp = CLIENT
+        .get(format!("{}/webapp-backend/scenario/details", BASE_URL))
+        .query(&[("leaderboardId", leaderboard_id.to_string())])
+        .header("Accept", "application/json")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+
+    Ok(ScenarioDetails {
+        scenario_name: resp.scenario_name,
+        aim_type: resp.aim_type,
+        play_count: resp.play_count,
+        description: resp.description,
+        tags: resp.tags.unwrap_or_default().into_iter().filter(|t| !t.is_empty()).collect(),
+        created: resp.created,
+        author_steam_account_name: resp.steam_account_name,
+    })
+}
+
+/// Look up the KovaaK's `aimType` field for a scenario by name.
+/// Returns `None` if no matching scenario is found or the field is absent.
+/// The returned value is one of: "Clicking", "Tracking", "Switching", "Other" (or None).
+pub async fn get_aim_type_for_scenario(canonical_name: &str) -> Option<String> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct ScenarioInner { aim_type: Option<String> }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row { scenario_name: String, scenario: ScenarioInner }
+    #[derive(Deserialize)]
+    struct Resp { data: Vec<Row> }
+
+    let resp = CLIENT
+        .get(format!("{}/webapp-backend/scenario/popular", BASE_URL))
+        .query(&[
+            ("page", "0"),
+            ("max", "10"),
+            ("scenarioNameSearch", canonical_name),
+        ])
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() { return None; }
+    let body: Resp = resp.json().await.ok()?;
+    // Find the exact name match (case-insensitive).
+    body.data.into_iter()
+        .find(|r| r.scenario_name.eq_ignore_ascii_case(canonical_name))
+        .and_then(|r| r.scenario.aim_type)
+        .filter(|t| !t.is_empty())
 }
 
 /// Fetch up to `max` scenario names from the popular endpoint for a given query string.
