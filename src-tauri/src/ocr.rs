@@ -265,18 +265,25 @@ fn ocr_loop(app: AppHandle) {
 
         if let Some(rect) = region {
             match capture_and_ocr(rect) {
-                // Discard readings whose SPM exceeds any plausible KovaaK's value.
-                // World-record tracking SPM is ~12 000–15 000; 30 000 gives ample
-                // headroom while filtering noise like "113,204" or "32,170" that
-                // arise when the score region is captured mid-transition and the
-                // digit separator is mis-read as part of the integer.
-                Ok(Some(ref payload)) if payload.score > 30_000 => {
-                    log::debug!("SPM {} implausible (>30 000), discarding OCR reading", payload.score);
-                }
+                // Accept all plausible SPM readings; rely on jump/decay detection for filtering.
                 Ok(Some(payload)) => {
                     let spm = payload.score;
                     let prev_spm_x100 = LAST_SPM_X100.load(Ordering::Relaxed);
                     let prev_spm = prev_spm_x100 / 100;
+
+                    // ── OCR sanity guard ─────────────────────────────────────────────
+                    // Reject readings that jump more than 25× upward from the previous
+                    // value — these are OCR noise (digit concatenation, partial captures).
+                    // Large drops are always plausible (genuine restart), so only upward
+                    // spikes are suppressed.  Skipping stores prev unchanged.
+                    if prev_spm > 0 && spm > prev_spm.saturating_mul(25) {
+                        log::debug!(
+                            "OCR sanity: rejecting implausible spike {} → {} (>25×); ignoring",
+                            prev_spm, spm
+                        );
+                        std::thread::sleep(Duration::from_millis(POLL_MS.load(Ordering::Relaxed)));
+                        continue;
+                    }
 
                     // Restart detection: if SPM was high (>500) and has now crashed
                     // to less than 10% of that value, the user restarted the scenario.
@@ -285,10 +292,19 @@ fn ocr_loop(app: AppHandle) {
 
                     if is_restart {
                         log::info!("Restart detected: SPM dropped from {} → {}; re-starting session", prev_spm, spm);
-                        SESSION_STARTED.store(false, Ordering::SeqCst);
+                        // Reset LAST_SPM to 0 so the next tick starts fresh and
+                        // cannot immediately re-trigger the restart condition on the
+                        // same low value.
+                        LAST_SPM_X100.store(0, Ordering::Relaxed);
+                        // Start tracking/recording for the new run.
                         let ss = crate::mouse_hook::start_session_tracking();
                         crate::screen_recorder::start(ss);
                         crate::stats_ocr::set_active(true);
+                        // Emit session-start and mark as started so the session-start
+                        // block below does NOT fire a second time for this same restart
+                        // (which would cause a double start_session_tracking() call).
+                        let _ = app.emit(EVENT_SESSION_START, ());
+                        SESSION_STARTED.store(true, Ordering::SeqCst);
                         // Reset decay counter — a restart is a legitimate SPM drop,
                         // not a rolling-window decay, so we must not suppress events.
                         consecutive_decreases = 0;
@@ -296,9 +312,9 @@ fn ocr_loop(app: AppHandle) {
                         last_scenario_check = last_scenario_check
                             .checked_sub(SCENARIO_CHECK_INTERVAL)
                             .unwrap_or(last_scenario_check);
+                    } else {
+                        LAST_SPM_X100.store(spm * 100, Ordering::Relaxed);
                     }
-
-                    LAST_SPM_X100.store(spm * 100, Ordering::Relaxed);
 
                     // Track consecutive strictly-decreasing readings to identify
                     // rolling-window decay (player has stopped scoring).

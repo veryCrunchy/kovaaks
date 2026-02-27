@@ -118,15 +118,15 @@ pub fn get_frames() -> Vec<ScreenFrame> {
 /// Drain frames and return a replay-quality subset for persistent storage.
 ///
 /// - Keeps every 3rd frame (15 fps → 5 fps).
-/// - Re-encodes each kept frame at 320 px wide, JPEG quality 50 (≈ 3–5 KB/frame).
-///   A typical 60-second session produces ~300 frames ≈ 1.5 MB on disk.
+/// - Re-encodes each kept frame at 480 px wide, JPEG quality 65 (≈ 8–12 KB/frame).
+///   A typical 60-second session produces ~300 frames ≈ 3 MB on disk.
 /// - On non-Windows / without `ocr` the buffer is always empty; returns `[]`.
 pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
     drain_frames()
         .into_iter()
         .enumerate()
         .filter(|(i, _)| i % 3 == 0)
-        .map(|(_, f)| reencode_frame(f, 320, 50))
+        .map(|(_, f)| reencode_frame(f, 480, 65))
         .collect()
 }
 

@@ -929,7 +929,7 @@ fn ui_window_scale(ui: &serde_json::Value, name: &str) -> f32 {
 /// per-field results across frames.  A field is "confirmed" after CONFIRM_THRESHOLD
 /// consecutive detections that agree within TOLERANCE pixels.  Once all 5 fields
 /// are confirmed (or the loop is stopped), emits `auto-setup-complete`.
-fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
+fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect, stats_dir: String) {
     use std::collections::HashMap;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
@@ -949,16 +949,59 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
     let mut confirmed_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut confirmed_regions = settings::StatsFieldRegions::default();
 
+    // Try to read KovaaK's UI.json to narrow the OCR capture rect to just the
+    // SessionStats panel and derive the ScenarioTitle region automatically.
+    let (ocr_capture_rect, scenario_region_from_ui) = Some(stats_dir.as_str())
+        .and_then(read_kovaaks_ui_json)
+        .map(|ui| {
+            // ── SessionStats capture rect ──────────────────────────────────────
+            let stats_capture = ui_window_pos(&ui, "SessionStats").map(|(sx, sy)| {
+                let scale = ui_window_scale(&ui, "SessionStats");
+                // The panel origin is its top-left corner.  Use generous dimensions
+                // (320 × 220 at scale=1) so all 6 stat rows fit comfortably.
+                let x = (monitor_rect.x + sx as i32 - 5).max(monitor_rect.x);
+                let y = (monitor_rect.y + sy as i32 - 5).max(monitor_rect.y);
+                let w = (325.0 * scale).ceil() as u32;
+                let h = (225.0 * scale).ceil() as u32;
+                log::info!(
+                    "auto-setup: UI.json SessionStats ({sx},{sy}) scale={scale:.3} \
+                     → OCR rect ({x},{y}) {w}×{h}",
+                );
+                settings::RegionRect { x, y, width: w, height: h }
+            }).unwrap_or(monitor_rect);
+
+            // ── ScenarioTitle OCR region ───────────────────────────────────────
+            let scenario = ui_window_pos(&ui, "ScenarioTitle").map(|(tx, ty)| {
+                let scale = ui_window_scale(&ui, "ScenarioTitle");
+                // Position is the widget's top-left anchor.  The text box is wide and
+                // may extend above/below the anchor, so use generous padding.
+                // -70 left / -20 top covers variations in anchor placement.
+                let x = (monitor_rect.x + tx as i32 - 70).max(monitor_rect.x);
+                let y = (monitor_rect.y + ty as i32 - 20).max(monitor_rect.y);
+                let w = ((700.0 * scale) as u32).min(monitor_rect.width);
+                let h = (80.0 * scale).ceil() as u32;
+                log::info!(
+                    "auto-setup: UI.json ScenarioTitle ({tx},{ty}) scale={scale:.3} \
+                     → scenario region ({x},{y}) {w}×{h}",
+                );
+                settings::RegionRect { x, y, width: w, height: h }
+            });
+
+            (stats_capture, scenario)
+        })
+        .unwrap_or((monitor_rect, None));
+
     log::info!(
-        "auto-setup: started — monitor ({},{}) {}×{}",
+        "auto-setup: started — monitor ({},{}) {}×{}, OCR rect ({},{}) {}×{}",
         monitor_rect.x, monitor_rect.y, monitor_rect.width, monitor_rect.height,
+        ocr_capture_rect.x, ocr_capture_rect.y, ocr_capture_rect.width, ocr_capture_rect.height,
     );
 
     while AUTO_SETUP_RUNNING.load(Ordering::SeqCst) {
         std::thread::sleep(POLL_INTERVAL);
         if !AUTO_SETUP_RUNNING.load(Ordering::SeqCst) { break; }
 
-        let words = match ocr::capture_screen_words(&monitor_rect) {
+        let words = match ocr::capture_screen_words(&ocr_capture_rect) {
             Ok(w) => w,
             Err(e) => { log::debug!("auto-setup: capture failed: {e}"); continue; }
         };
@@ -969,7 +1012,7 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
             }
         }
 
-        let detected = detect_field_regions_from_words(&words, &monitor_rect);
+        let detected = detect_field_regions_from_words(&words, &ocr_capture_rect);
         let detected_per_field: [(&str, Option<settings::RegionRect>); TOTAL] = [
             ("kills",    detected.kills),
             ("kps",      detected.kps),
@@ -1027,6 +1070,7 @@ fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect) {
             let _ = app.emit(EVENT_AUTO_SETUP_COMPLETE, AutoSetupComplete {
                 regions: confirmed_regions,
                 confirmed_count: TOTAL,
+                scenario_region: scenario_region_from_ui,
             });
             break;
         }
@@ -1531,6 +1575,20 @@ pub fn run() {
                 // Force the window background to fully transparent so the DWM
                 // compositor does not tint or dim the game colours underneath.
                 let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+            }
+
+            // Keep the stats window alive when the user clicks X so that its
+            // session-complete listener remains registered.  Closing hides
+            // instead of destroying; the window is shown again on the next
+            // session-complete event or via the tray menu.
+            if let Some(stats_win) = app.get_webview_window("stats") {
+                let w = stats_win.clone();
+                stats_win.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        api.prevent_close();
+                        w.hide().ok();
+                    }
+                });
             }
 
             Ok(())
