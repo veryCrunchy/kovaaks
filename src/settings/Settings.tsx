@@ -81,6 +81,8 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
           borderRight: "1px solid rgba(255,255,255,0.06)",
           background: "rgba(0,0,0,0.5)",
           flexShrink: 0,
+          overflowY: "auto",
+          minHeight: 0,
         }}
       >
         <div className="flex items-start justify-between mb-8 px-3">
@@ -132,6 +134,42 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
           ))}
         </nav>
 
+        {/* Window launchers — always visible below tabs */}
+        <div className="flex flex-col gap-1 mt-4">
+          <div
+            className="px-3 pb-1 text-xs"
+            style={{ color: "rgba(255,255,255,0.18)", letterSpacing: "0.08em", textTransform: "uppercase", fontSize: 10 }}
+          >
+            Tools
+          </div>
+          {[
+            { label: "Session Stats", invoke: "open_stats_window" },
+            { label: "View Logs",     invoke: "open_logs_window" },
+          ].map(({ label, invoke: cmd }) => (
+            <button
+              key={cmd}
+              onClick={() => invoke(cmd).catch(console.error)}
+              className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
+              style={{
+                background: "transparent",
+                color: "rgba(255,255,255,0.45)",
+                border: "1px solid transparent",
+                cursor: "pointer",
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)";
+                (e.currentTarget as HTMLButtonElement).style.color = "#fff";
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLButtonElement).style.background = "transparent";
+                (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.45)";
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         <div
           className="mt-auto flex flex-col gap-1.5 px-3 pt-3"
           style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}
@@ -179,46 +217,6 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
             }}
           >
             Reposition HUDs
-          </button>
-          <button
-            onClick={() => invoke("open_stats_window").catch(console.error)}
-            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
-            style={{
-              background: "transparent",
-              color: "rgba(255,255,255,0.45)",
-              border: "1px solid rgba(255,255,255,0.07)",
-              cursor: "pointer",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)";
-              (e.currentTarget as HTMLButtonElement).style.color = "#fff";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "transparent";
-              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.45)";
-            }}
-          >
-            Session Stats
-          </button>
-          <button
-            onClick={() => invoke("open_logs_window").catch(console.error)}
-            className="text-left px-2.5 py-1.5 rounded text-xs transition-all"
-            style={{
-              background: "transparent",
-              color: "rgba(255,255,255,0.45)",
-              border: "1px solid rgba(255,255,255,0.07)",
-              cursor: "pointer",
-            }}
-            onMouseEnter={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "rgba(255,255,255,0.06)";
-              (e.currentTarget as HTMLButtonElement).style.color = "#fff";
-            }}
-            onMouseLeave={(e) => {
-              (e.currentTarget as HTMLButtonElement).style.background = "transparent";
-              (e.currentTarget as HTMLButtonElement).style.color = "rgba(255,255,255,0.45)";
-            }}
-          >
-            View Logs
           </button>
           <button
             onClick={() => {
