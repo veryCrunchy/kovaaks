@@ -463,7 +463,7 @@ unsafe extern "system" fn raw_input_wnd_proc(
                                 if s.events.len() > 50_000 { s.events.drain(..10_000); }
                                 let sample = match s.last_raw_sample {
                                     None       => true,
-                                    Some(last) => now.duration_since(last) >= Duration::from_millis(33),
+                                    Some(last) => now.duration_since(last) >= Duration::from_millis(16),
                                 };
                                 if sample {
                                     let ts_ms = now
@@ -499,51 +499,49 @@ fn mouse_event_callback(event: Event) {
     }
 
     match event.event_type {
+        // On Windows+ocr the raw-input thread owns all mouse events and
+        // raw_positions; the rdev callback is only used for hotkeys and clicks.
+        #[cfg(not(all(target_os = "windows", feature = "ocr")))]
         EventType::MouseMove { x, y } => {
-            // Only buffer events during an active session
             if TRACKING_ACTIVE.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
-                    // On Windows the raw-input thread owns events, cursor_x/cursor_y
-                    // and raw_positions using true hardware deltas that are unaffected
-                    // by monitor-edge clamping or the game's SetCursorPos recentering.
-                    #[cfg(not(all(target_os = "windows", feature = "ocr")))]
-                    {
-                        s.events.push(RawMouseEvent { x, y, time: now });
-                        if s.events.len() > 50_000 { s.events.drain(..10_000); }
-                        let dx = x - s.last_x;
-                        let dy = y - s.last_y;
-                        if s.last_x != 0.0 || s.last_y != 0.0 {
-                            s.cursor_x += dx;
-                            s.cursor_y += dy;
-                        }
-                        s.last_x = x;
-                        s.last_y = y;
-                        let sample = match s.last_raw_sample {
-                            None => true,
-                            Some(last) => now.duration_since(last) >= Duration::from_millis(33),
-                        };
-                        if sample {
-                            let ts_ms = now
-                                .saturating_duration_since(s.session_start)
-                                .as_millis() as u64;
-                            let cx = s.cursor_x;
-                            let cy = s.cursor_y;
-                            s.raw_positions.push(RawPositionPoint {
-                                x: cx,
-                                y: cy,
-                                timestamp_ms: ts_ms,
-                                is_click: false,
-                            });
-                            s.last_raw_sample = Some(now);
-                            if s.raw_positions.len() > 30_000 {
-                                s.raw_positions.drain(..5_000);
-                            }
+                    s.events.push(RawMouseEvent { x, y, time: now });
+                    if s.events.len() > 50_000 { s.events.drain(..10_000); }
+                    let dx = x - s.last_x;
+                    let dy = y - s.last_y;
+                    if s.last_x != 0.0 || s.last_y != 0.0 {
+                        s.cursor_x += dx;
+                        s.cursor_y += dy;
+                    }
+                    s.last_x = x;
+                    s.last_y = y;
+                    let sample = match s.last_raw_sample {
+                        None => true,
+                        Some(last) => now.duration_since(last) >= Duration::from_millis(16),
+                    };
+                    if sample {
+                        let ts_ms = now
+                            .saturating_duration_since(s.session_start)
+                            .as_millis() as u64;
+                        let cx = s.cursor_x;
+                        let cy = s.cursor_y;
+                        s.raw_positions.push(RawPositionPoint {
+                            x: cx,
+                            y: cy,
+                            timestamp_ms: ts_ms,
+                            is_click: false,
+                        });
+                        s.last_raw_sample = Some(now);
+                        if s.raw_positions.len() > 30_000 {
+                            s.raw_positions.drain(..5_000);
                         }
                     }
                 }
             }
         }
+        #[cfg(all(target_os = "windows", feature = "ocr"))]
+        EventType::MouseMove { .. } => {}
         EventType::ButtonPress(rdev::Button::Left) => {
             if TRACKING_ACTIVE.load(Ordering::Relaxed) {
                 let now = Instant::now();
@@ -629,46 +627,55 @@ fn metric_emitter_loop(app: AppHandle) {
             continue;
         }
 
+        // ── Snapshot raw data under a brief lock, then compute outside it ────────
+        // Previously the full compute_metrics() call (5-10 ms of PCA, sliding-window
+        // jitter, path-efficiency math) ran while STATE was locked.  Every incoming
+        // mouse event had to spin-wait for the lock during that computation, adding
+        // up to 10 ms of input latency once per second.
+        // Fix: hold the lock only long enough to clone the small data slices needed,
+        // then release it before doing any heavy work.
         let (metrics, timestamp_ms, scenario) = {
-            let s = STATE.lock().unwrap();
             let now = Instant::now();
             let cutoff = now - window;
 
-            let recent: Vec<&RawMouseEvent> =
-                s.events.iter().filter(|e| e.time >= cutoff).collect();
+            let (recent_owned, click_times_snap, hold_durations_snap, ts) = {
+                let s = STATE.lock().unwrap(); // ← held for clone only (~μs)
+                let recent_owned: Vec<RawMouseEvent> = s.events
+                    .iter()
+                    .filter(|e| e.time >= cutoff)
+                    .cloned()
+                    .collect();
+                let click_times_snap: Vec<Instant> = s.click_times
+                    .iter()
+                    .filter(|&&t| t >= cutoff)
+                    .copied()
+                    .collect();
+                let hold_durations_snap: Vec<f32> = s.hold_durations.iter().copied().collect();
+                let ts = s.session_start.elapsed().as_millis() as u64;
+                (recent_owned, click_times_snap, hold_durations_snap, ts)
+            }; // ← lock released — everything below is lock-free ──────────────
 
-            // Compute click intervals (ms) for the measurement window
-            let click_intervals_ms: Vec<f64> = s
-                .click_times
-                .iter()
-                .filter(|&&t| t >= cutoff)
-                .collect::<Vec<_>>()
+            let click_intervals_ms: Vec<f64> = click_times_snap
                 .windows(2)
-                .map(|w| w[1].duration_since(*w[0]).as_secs_f64() * 1000.0)
+                .map(|w| w[1].duration_since(w[0]).as_secs_f64() * 1000.0)
                 .collect();
 
-            // Compute average hold duration for the measurement window.
-            // Completed holds whose release falls within the window are included.
-            let hold_durations_ms: Vec<f32> = s.hold_durations
-                .iter().copied()
-                .collect::<Vec<_>>();
-            let avg_hold_ms = if hold_durations_ms.is_empty() {
+            let avg_hold_ms = if hold_durations_snap.is_empty() {
                 0.0f32
             } else {
-                hold_durations_ms.iter().sum::<f32>() / hold_durations_ms.len() as f32
+                hold_durations_snap.iter().sum::<f32>() / hold_durations_snap.len() as f32
             };
 
             let dpi = MOUSE_DPI.load(Ordering::Relaxed);
 
-            // Query scenario once — used for both scoring weights and feedback gating.
             #[cfg(feature = "ocr")]
             let scenario = crate::stats_ocr::get_scenario_type();
             #[cfg(not(feature = "ocr"))]
             let scenario = "Unknown".to_string();
 
-            let mut m = compute_metrics(&recent, dpi, &click_intervals_ms, &scenario);
+            let recent_refs: Vec<&RawMouseEvent> = recent_owned.iter().collect();
+            let mut m = compute_metrics(&recent_refs, dpi, &click_intervals_ms, &scenario);
             m.avg_hold_ms = avg_hold_ms;
-            let ts = s.session_start.elapsed().as_millis() as u64;
             (m, ts, scenario)
         };
 
@@ -1005,21 +1012,36 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
         / (1.0 - CV_NATURAL_BASELINE))
         .min(1.0) as f32;
 
-    // ── Overshoot: sharp axial reversals ────────────────────────────────────
-    // A "sharp" reversal is one where the axial speed stays above the threshold
-    // on *both* sides of the sign flip, meaning there was no smooth deceleration
-    // through zero.  This correctly ignores smooth target-following reversals
-    // (which decelerate naturally) while catching overcorrections.
-    let axial_threshold = mean_speed * 0.25;
+    // ── Overshoot: sharp velocity reversals via direct angle test ────────────
+    // The previous global-PCA approach projected all velocities onto one
+    // averaged axis and counted sign-flips.  That breaks for any scenario
+    // where movement is multi-directional (gridshot, reaction flicking,
+    // circular tracking): the single "dominant" axis is meaningless, so every
+    // legitimate change of direction between two targets registers as a false
+    // overshoot.
+    //
+    // Fix: test each consecutive velocity pair directly.  A "sharp reversal"
+    // is when the angle between v[i] and v[i+1] exceeds 120° (dot < -0.5)
+    // while both are above the speed threshold — meaning there was no
+    // deceleration through zero.  This matches detectOvershoots() in
+    // MousePathViewer.tsx exactly, keeping backend numbers consistent with
+    // what the path viewer displays.
+    let axial_threshold = mean_speed * 0.25; // kept for directional-bias block below
+    let speed_threshold = mean_speed * 0.25;
     let mut sharp_reversals = 0usize;
     let mut qualified_segments = 0usize;
-    for i in 0..axial.len().saturating_sub(1) {
-        let a0 = axial[i];
-        let a1 = axial[i + 1];
-        if a0.abs() > axial_threshold {
+    for i in 0..velocities.len().saturating_sub(1) {
+        let (vx0, vy0) = velocities[i];
+        let (vx1, vy1) = velocities[i + 1];
+        let spd0 = (vx0 * vx0 + vy0 * vy0).sqrt();
+        let spd1 = (vx1 * vx1 + vy1 * vy1).sqrt();
+        if spd0 > speed_threshold {
             qualified_segments += 1;
-            if a0 * a1 < 0.0 && a1.abs() > axial_threshold {
-                sharp_reversals += 1;
+            if spd1 > speed_threshold {
+                let dot = (vx0 * vx1 + vy0 * vy1) / (spd0 * spd1);
+                if dot < -0.5 { // angle > 120°
+                    sharp_reversals += 1;
+                }
             }
         }
     }
