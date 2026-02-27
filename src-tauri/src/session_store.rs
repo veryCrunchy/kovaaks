@@ -93,6 +93,9 @@ pub struct SessionRecord {
     /// Session stats panel snapshot (None if stats-panel OCR not configured)
     #[serde(default)]
     pub stats_panel: Option<StatsPanelSnapshot>,
+    /// True if a replay file (mouse path + per-second metrics) was saved.
+    #[serde(default)]
+    pub has_replay: bool,
 }
 
 // ─── Public API ────────────────────────────────────────────────────────────────

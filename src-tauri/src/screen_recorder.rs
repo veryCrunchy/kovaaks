@@ -115,6 +115,86 @@ pub fn get_frames() -> Vec<ScreenFrame> {
     FRAMES.lock().unwrap().clone()
 }
 
+/// Drain frames and return a replay-quality subset for persistent storage.
+///
+/// - Keeps every 3rd frame (15 fps → 5 fps).
+/// - Re-encodes each kept frame at 320 px wide, JPEG quality 50 (≈ 3–5 KB/frame).
+///   A typical 60-second session produces ~300 frames ≈ 1.5 MB on disk.
+/// - On non-Windows / without `ocr` the buffer is always empty; returns `[]`.
+pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
+    drain_frames()
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| i % 3 == 0)
+        .map(|(_, f)| reencode_frame(f, 320, 50))
+        .collect()
+}
+
+/// Re-encode a frame at a lower resolution and JPEG quality.
+/// Falls back to the original frame on any error.
+fn reencode_frame(frame: ScreenFrame, out_w: u32, quality: u8) -> ScreenFrame {
+    use image::codecs::jpeg::JpegEncoder;
+    let try_it = || -> anyhow::Result<ScreenFrame> {
+        let jpeg_bytes = base64_decode(&frame.jpeg_b64);
+        let img = image::load_from_memory(&jpeg_bytes)?;
+        let out_h = ((img.height() as f64 / img.width() as f64) * out_w as f64).round() as u32;
+        let resized = image::imageops::resize(
+            &img.to_rgb8(),
+            out_w,
+            out_h.max(1),
+            image::imageops::FilterType::Triangle,
+        );
+        let mut buf = Vec::new();
+        JpegEncoder::new_with_quality(&mut buf, quality)
+            .encode_image(&image::DynamicImage::ImageRgb8(resized))?;
+        Ok(ScreenFrame { timestamp_ms: frame.timestamp_ms, jpeg_b64: base64_encode(&buf) })
+    };
+    try_it().unwrap_or(frame)
+}
+
+/// RFC 4648 standard base64 decoder matching `base64_encode`.
+fn base64_decode(s: &str) -> Vec<u8> {
+    let mut rev = [64u8; 256];
+    for (i, &b) in b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+        .iter()
+        .enumerate()
+    {
+        rev[b as usize] = i as u8;
+    }
+    let s = s.trim_end_matches('=').as_bytes();
+    let mut out = Vec::with_capacity(s.len() * 3 / 4 + 1);
+    let mut i = 0;
+    while i + 3 < s.len() {
+        let (a, b, c, d) = (
+            rev[s[i] as usize],
+            rev[s[i + 1] as usize],
+            rev[s[i + 2] as usize],
+            rev[s[i + 3] as usize],
+        );
+        out.push((a << 2) | (b >> 4));
+        out.push((b << 4) | (c >> 2));
+        out.push((c << 6) | d);
+        i += 4;
+    }
+    match s.len() - i {
+        2 => {
+            let (a, b) = (rev[s[i] as usize], rev[s[i + 1] as usize]);
+            out.push((a << 2) | (b >> 4));
+        }
+        3 => {
+            let (a, b, c) = (
+                rev[s[i] as usize],
+                rev[s[i + 1] as usize],
+                rev[s[i + 2] as usize],
+            );
+            out.push((a << 2) | (b >> 4));
+            out.push((b << 4) | (c >> 2));
+        }
+        _ => {}
+    }
+    out
+}
+
 // ─── Recording loop ───────────────────────────────────────────────────────────
 
 fn record_loop(my_gen: u64) {
