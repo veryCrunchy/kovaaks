@@ -118,22 +118,37 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                     match parse_csv(path) {
                         Ok(result) => {
                             log::info!("Session complete: {} score={}", result.scenario, result.score);
-                            // Capture smoothness summary BEFORE stopping tracking (clears buffer)
+                            // Capture smoothness summary BEFORE draining buffers
                             let smoothness = crate::mouse_hook::session_summary();
                             // Capture stats-panel snapshot before deactivating
                             let stats_panel = crate::stats_ocr::get_snapshot();
+                            // Drain path + metric + video buffers for replay persistence
+                            let raw_positions = crate::mouse_hook::drain_raw_positions();
+                            let metric_points = crate::mouse_hook::drain_session_buffer();
+                            let screen_frames = crate::screen_recorder::drain_frames_for_replay();
                             // Stop smoothness tracking, screen recording, and OCR session state
                             crate::mouse_hook::stop_session_tracking();
                             crate::screen_recorder::stop();
                             crate::stats_ocr::set_active(false);
                             crate::ocr::reset_session();
+                            // Build session id and save replay file
+                            let session_id = format!(
+                                "{}-{}",
+                                result.scenario.to_lowercase().replace(' ', "_"),
+                                result.timestamp
+                            );
+                            let has_replay = crate::replay_store::save_replay(
+                                app,
+                                &session_id,
+                                crate::replay_store::ReplayData {
+                                    positions: raw_positions,
+                                    metrics: metric_points,
+                                    frames: screen_frames,
+                                },
+                            );
                             // Persist to session history
                             let record = crate::session_store::SessionRecord {
-                                id: format!(
-                                    "{}-{}",
-                                    result.scenario.to_lowercase().replace(' ', "_"),
-                                    result.timestamp
-                                ),
+                                id: session_id,
                                 scenario: result.scenario.clone(),
                                 score: result.score,
                                 accuracy: result.accuracy,
@@ -145,6 +160,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 timestamp: result.timestamp.clone(),
                                 smoothness,
                                 stats_panel,
+                                has_replay,
                             };
                             crate::session_store::add_session(app, record);
                             let _ = app.emit(EVENT_SESSION_COMPLETE, &result);
