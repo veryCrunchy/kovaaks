@@ -587,19 +587,22 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
 
         {/* Canvas + game recording underlay */}
         <div style={{ position: "relative", lineHeight: 0 }}>
-          {currentFrameSrc && (
+          {currentFrameSrc && !showFull && (
             <img
               src={currentFrameSrc}
               alt=""
               style={{
+                // The canvas is 900×520 internal px. The viewport rectangle is always
+                // 65% wide centred horizontally, and 65%×(9/16) tall centred vertically.
+                // Match those proportions exactly so the footage aligns with the path.
                 position: "absolute",
-                inset: 0,
-                width: "100%",
-                height: "100%",
-                objectFit: "cover",
+                left:   "17.5%",   // (1 - 0.65) / 2 × 100
+                top:    "18.37%",  // (1 - 0.65×9/16 / (520/900)) / 2 × 100
+                width:  "65%",
+                height: "63.27%",  // 0.65 × (9/16) × (900/520)
+                objectFit: "fill",
                 opacity: bgOpacity,
                 pointerEvents: "none",
-                filter: "blur(0.5px)",
               }}
             />
           )}
