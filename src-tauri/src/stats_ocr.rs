@@ -590,10 +590,7 @@ fn sanitize_reading(r: &mut StatsPanelReading) {
     }
     // SPM above 30 000 is implausible (world-record tracking ≈ 12 000–15 000).
     // "50 025" or "113 204" signals a partial-column OCR mis-assignment.
-    if r.spm.map_or(false, |s| s > 30_000) {
-        log::debug!("[stats-ocr] implausible spm={:?} → None", r.spm);
-        r.spm = None;
-    }
+    // No hard upper bound on SPM; rely on jump/decay detection in ocr.rs.
     // Accuracy: hits cannot exceed total shots — if so both values are bogus.
     if let (Some(hits), Some(shots)) = (r.accuracy_hits, r.accuracy_shots) {
         if hits > shots {
