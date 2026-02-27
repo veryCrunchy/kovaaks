@@ -747,11 +747,11 @@ fn maybe_emit_feedback(
     let overshoot_thresh = if is_clicking { 0.35 } else { 0.45 };
     if streak_tick(streaks, "overshoot", m.overshoot_rate > overshoot_thresh) >= 3 {
         let msg = if is_tracking {
-            "High overshoot — smooth out your cursor motion, less aggressive corrections"
+            "Overshooting — ease up and let the cursor settle onto the target"
         } else if is_clicking {
-            "High overshoot on clicks — slow your flick, let the target come to you"
+            "Overshooting your clicks — shorten your flick slightly so you land on the target, not past it"
         } else {
-            "High overshoot — try to decelerate before the target"
+            "Overshooting — slow down in the last stretch before the target"
         };
         maybe_emit(app, "overshoot", msg, "warning", cooldowns);
         streaks.insert("overshoot", 0);
@@ -762,11 +762,11 @@ fn maybe_emit_feedback(
     let smooth_thresh = if is_clicking { 88.0 } else { 82.0 };
     if streak_tick(streaks, "smooth_streak", m.smoothness > smooth_thresh) >= 5 {
         let msg = if is_clicking {
-            "Clean aim streak! Great flick precision"
+            "Precision streak! Flicks are landing clean"
         } else if is_tracking {
-            "Smooth tracking streak! Excellent movement quality"
+            "Smooth tracking — you're locked in, keep that flow!"
         } else {
-            "Smooth streak! Excellent movement quality"
+            "Smooth streak — aim is clean, keep it up!"
         };
         maybe_emit(app, "smooth_streak", msg, "positive", cooldowns);
         streaks.insert("smooth_streak", 0);
@@ -780,7 +780,7 @@ fn maybe_emit_feedback(
     if is_clicking && m.click_timing_cv > 0.0
         && streak_tick(streaks, "click_timing", m.click_timing_cv > 0.65) >= 2
     {
-        maybe_emit(app, "click_timing", "Inconsistent click rhythm — try to pace your shots evenly", "tip", cooldowns);
+        maybe_emit(app, "click_timing", "Click timing is uneven — try to find a steady rhythm between shots", "tip", cooldowns);
         streaks.insert("click_timing", 0);
     } else if !is_clicking {
         streaks.insert("click_timing", 0);
@@ -789,11 +789,11 @@ fn maybe_emit_feedback(
     // Over-correcting: applies to all scenarios, message varies
     if streak_tick(streaks, "correction", m.correction_ratio > 0.55) >= 3 {
         let msg = if is_clicking {
-            "Over-correcting between shots — trust your first flick, reduce micro-adjustments"
+            "Too many micro-corrections — trust your first flick and commit to the shot"
         } else if is_tracking {
-            "Over-correcting on target — stay on with steady pressure, resist over-steering"
+            "Over-steering on the target — apply steady pressure instead of chasing every movement"
         } else {
-            "Over-correcting — trust your first movement, reduce hesitation"
+            "Over-correcting — commit to your first move and stop fidgeting"
         };
         maybe_emit(app, "correction", msg, "tip", cooldowns);
         streaks.insert("correction", 0);
@@ -801,7 +801,7 @@ fn maybe_emit_feedback(
 
     // Speed inconsistency: only tracked for tracking — clicking is naturally stop-and-go
     if is_tracking && streak_tick(streaks, "velocity_std", m.velocity_std > 0.65) >= 3 {
-        maybe_emit(app, "velocity_std", "Inconsistent tracking speed — try to maintain even tempo on the target", "warning", cooldowns);
+        maybe_emit(app, "velocity_std", "Speed is too choppy — try to match the target's pace and keep a steady flow", "warning", cooldowns);
         streaks.insert("velocity_std", 0);
     } else if is_clicking {
         streaks.insert("velocity_std", 0);
@@ -810,9 +810,9 @@ fn maybe_emit_feedback(
     // Path efficiency: direct flicks matter for accuracy drills and clicking
     if (is_accuracy || is_clicking) && streak_tick(streaks, "path_eff", m.path_efficiency < 0.72) >= 3 {
         let msg = if is_clicking {
-            "Curved flick path — aim for straighter, more direct movements to each target"
+            "Curved flick paths — go straight to the target, don't curve in"
         } else {
-            "Wandering flick path — commit to a straight line when snapping to targets"
+            "Curved paths to targets — commit to a straight line when snapping"
         };
         maybe_emit(app, "path_eff", msg, "tip", cooldowns);
         streaks.insert("path_eff", 0);
@@ -827,9 +827,9 @@ fn maybe_emit_feedback(
     // Directional bias: applies to all
     if m.directional_bias > 0.0 && streak_tick(streaks, "bias", m.directional_bias > 0.55) >= 3 {
         let msg = if is_clicking {
-            "Directional flick bias — try varying your starting position relative to targets"
+            "Consistently drifting one direction — try repositioning your arm or centering your mouse"
         } else {
-            "Directional bias detected — check your aim starting position"
+            "Aim is drifting to one side — check if your mouse is angled or try re-centering your arm"
         };
         maybe_emit(app, "bias", msg, "tip", cooldowns);
         streaks.insert("bias", 0);
@@ -837,7 +837,7 @@ fn maybe_emit_feedback(
 
     // Jitter: only meaningful while actively tracking or unknown
     if (is_tracking || scenario == "Unknown") && streak_tick(streaks, "jitter", m.jitter > 0.25) >= 3 {
-        maybe_emit(app, "jitter", "High lateral jitter — relax your grip and use larger arm movements", "tip", cooldowns);
+        maybe_emit(app, "jitter", "Too much wobble — relax your grip and let your arm do the work instead of your wrist", "tip", cooldowns);
         streaks.insert("jitter", 0);
     } else if is_clicking {
         streaks.insert("jitter", 0);
@@ -845,7 +845,7 @@ fn maybe_emit_feedback(
 
     // Low path efficiency in tracking: wandering while following target
     if is_tracking && streak_tick(streaks, "path_eff_track", m.path_efficiency < 0.60) >= 3 {
-        maybe_emit(app, "path_eff_track", "Wandering path — keep your cursor locked on the target rather than drifting around it", "tip", cooldowns);
+        maybe_emit(app, "path_eff_track", "Drifting off target — keep your cursor glued to it rather than chasing it", "tip", cooldowns);
         streaks.insert("path_eff_track", 0);
     }
 }
