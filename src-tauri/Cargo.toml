@@ -1,6 +1,6 @@
 [package]
 name = "kovaaks-overlay"
-version = "0.7.0"
+version = "0.8.0"
 description = "KovaaK's aim trainer overlay with OCR, smoothness analytics, and VS mode"
 authors = []
 edition = "2024"
