@@ -423,10 +423,51 @@ function Test-SdkHeaders([string]$SdkDir) {
   return ($hasCppUserMod -and $hasHooks -and $hasUObjectGlobals -and $hasDynamicOutput)
 }
 
+function Get-Ue4ssGithubToken() {
+  $candidates = @(
+    $env:UE4SS_GITHUB_TOKEN,
+    $env:GH_TOKEN,
+    $env:GITHUB_TOKEN
+  )
+
+  foreach ($candidate in $candidates) {
+    if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+      return $candidate.Trim()
+    }
+  }
+
+  return $null
+}
+
+function Get-GitHubAuthGitConfigArgs([string]$Token, [bool]$ForceNonInteractive) {
+  $args = @()
+
+  if ($ForceNonInteractive -or -not [string]::IsNullOrWhiteSpace($Token)) {
+    $args += @("-c", "credential.interactive=never")
+    $args += @("-c", "core.askPass=")
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Token)) {
+    $authPayload = "x-access-token:$Token"
+    $basicAuth = [Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes($authPayload))
+    $args += @("-c", "http.https://github.com/.extraheader=AUTHORIZATION: basic $basicAuth")
+  }
+
+  return $args
+}
+
 function Initialize-TemplateSubmodules([string]$RepoRoot) {
   $templateParent = Join-Path $RepoRoot "external/UE4SSCPPTemplate"
   $templateRoot = Join-Path $RepoRoot "external/UE4SSCPPTemplate/RE-UE4SS"
   Assert-Command git
+
+  $isCi = ($env:CI -eq "true") -or ($env:GITHUB_ACTIONS -eq "true")
+  $githubToken = Get-Ue4ssGithubToken
+  $gitAuthArgs = Get-GitHubAuthGitConfigArgs -Token $githubToken -ForceNonInteractive:$isCi
+
+  if ($isCi -and [string]::IsNullOrWhiteSpace($githubToken)) {
+    Write-Warning "UE4SS_GITHUB_TOKEN is not set in CI. Private UEPseudo submodule access is expected to fail."
+  }
 
   if (-not (Test-Path $templateRoot -PathType Container)) {
     Write-Host "==> UE4SSCPPTemplate missing; cloning into external/UE4SSCPPTemplate"
@@ -444,31 +485,47 @@ function Initialize-TemplateSubmodules([string]$RepoRoot) {
     return
   }
 
-  Write-Host "==> Attempting to initialize UE4SS template submodules"
-  try {
-    & git -C $templateRoot submodule sync --recursive
-    if ($LASTEXITCODE -ne 0) { throw "git submodule sync failed" }
-    & git -C $templateRoot submodule update --init --recursive --depth 1
-    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
-    return
-  } catch {
-    Write-Warning "Submodule init via repo defaults failed; trying HTTPS URL overrides."
+  $hadGitTerminalPrompt = Test-Path Env:GIT_TERMINAL_PROMPT
+  $previousGitTerminalPrompt = $env:GIT_TERMINAL_PROMPT
+  if ($isCi) {
+    $env:GIT_TERMINAL_PROMPT = "0"
   }
 
   try {
-    & git -C $templateRoot submodule sync --recursive
-    if ($LASTEXITCODE -ne 0) { throw "git submodule sync failed" }
-    & git -C $templateRoot `
-      -c "submodule.deps/first/Unreal.url=https://github.com/Re-UE4SS/UEPseudo.git" `
-      -c "submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git" `
-      submodule update --init --recursive --depth 1
-    if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
-    return
-  } catch {
-    Write-Warning "Submodule init with public HTTPS failed."
-  }
+    Write-Host "==> Attempting to initialize UE4SS template submodules"
+    try {
+      & git @gitAuthArgs -C $templateRoot submodule sync --recursive
+      if ($LASTEXITCODE -ne 0) { throw "git submodule sync failed" }
+      & git @gitAuthArgs -C $templateRoot submodule update --init --recursive --depth 1
+      if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
+      return
+    } catch {
+      Write-Warning "Submodule init via repo defaults failed; trying HTTPS URL overrides."
+    }
 
-  Write-Warning "Submodule init failed. Continuing with existing SDK paths."
+    try {
+      & git @gitAuthArgs -C $templateRoot submodule sync --recursive
+      if ($LASTEXITCODE -ne 0) { throw "git submodule sync failed" }
+      & git @gitAuthArgs -C $templateRoot `
+        -c "submodule.deps/first/Unreal.url=https://github.com/Re-UE4SS/UEPseudo.git" `
+        -c "submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git" `
+        submodule update --init --recursive --depth 1
+      if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
+      return
+    } catch {
+      Write-Warning "Submodule init with public HTTPS failed."
+    }
+
+    Write-Warning "Submodule init failed. Continuing with existing SDK paths."
+  } finally {
+    if ($isCi) {
+      if ($hadGitTerminalPrompt) {
+        $env:GIT_TERMINAL_PROMPT = $previousGitTerminalPrompt
+      } else {
+        Remove-Item Env:GIT_TERMINAL_PROMPT -ErrorAction SilentlyContinue
+      }
+    }
+  }
 }
 
 function Resolve-Ue4ssSdkDir([string]$ExplicitSdkDir, [string]$RepoRoot) {
@@ -509,6 +566,7 @@ Options:
      git -C external/UE4SSCPPTemplate/RE-UE4SS submodule update --init --recursive
   2) Place a complete SDK at: external/ue4ss-cppsdk
   3) Set -Ue4ssSdkDir / UE4SS_SDK_DIR to an existing SDK path.
+  4) In CI, set UE4SS_GITHUB_TOKEN (PAT from an Epic-linked GitHub account with access to Re-UE4SS/UEPseudo).
 "@
 }
 

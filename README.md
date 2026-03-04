@@ -161,6 +161,7 @@ Notes:
 - SDK path is auto-detected from `external/` (prefers `external/ue4ss-cppsdk`, then template SDK fallbacks).
 - If the template SDK checkout is present but missing nested dependencies, the pipeline attempts `git submodule update --init --recursive` automatically.
 - Native C++ runtime builds require private Unreal headers (`UEPseudo`) via Epic-linked GitHub access.
+- In GitHub Actions, set secret `UE4SS_GITHUB_TOKEN` (PAT from an Epic-linked GitHub account with read access to `Re-UE4SS/UEPseudo`).
 - You can still override the SDK path manually via environment variable or with `--ue4ss-sdk-dir` on the script.
 - Incremental cache is enabled by default (`.cache/pipeline`) and skips unchanged steps (`pnpm install`, rust core build, native runtime build, staging, app build).
 - Use `--no-cache` to force all steps, or `--clear-cache` to wipe cache keys.

@@ -440,10 +440,44 @@ sdk_headers_present() {
   [[ "$has_cpp_user_mod" -eq 1 && "$has_hooks" -eq 1 && "$has_uobj_globals" -eq 1 && "$has_dyn_output" -eq 1 ]]
 }
 
+resolve_ue4ss_github_token() {
+  local candidate=""
+  for candidate in "${UE4SS_GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}"; do
+    if [[ -n "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
 maybe_init_template_submodules() {
   local template_parent="$REPO_ROOT/external/UE4SSCPPTemplate"
   local template_root="$template_parent/RE-UE4SS"
   require_cmd git
+  local github_token=""
+  local is_ci=0
+  local -a git_auth_args=()
+
+  if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    is_ci=1
+  fi
+
+  if github_token="$(resolve_ue4ss_github_token 2>/dev/null)"; then
+    local auth_b64=""
+    auth_b64="$(printf 'x-access-token:%s' "$github_token" | base64 | tr -d '\r\n')"
+    git_auth_args+=(
+      -c credential.interactive=never
+      -c core.askPass=
+      -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $auth_b64"
+    )
+  elif [[ "$is_ci" -eq 1 ]]; then
+    git_auth_args+=(
+      -c credential.interactive=never
+      -c core.askPass=
+    )
+    warn "UE4SS_GITHUB_TOKEN is not set in CI. Private UEPseudo submodule access is expected to fail."
+  fi
 
   if [[ ! -d "$template_root" ]]; then
     echo "==> UE4SSCPPTemplate missing; cloning into external/UE4SSCPPTemplate"
@@ -459,18 +493,31 @@ maybe_init_template_submodules() {
   echo "==> Attempting to initialize UE4SS template submodules"
   (
     set -e
-    git -C "$template_root" submodule sync --recursive
-    git -C "$template_root" submodule update --init --recursive --depth 1
+    if [[ "$is_ci" -eq 1 ]]; then
+      GIT_TERMINAL_PROMPT=0 git "${git_auth_args[@]}" -C "$template_root" submodule sync --recursive
+      GIT_TERMINAL_PROMPT=0 git "${git_auth_args[@]}" -C "$template_root" submodule update --init --recursive --depth 1
+    else
+      git "${git_auth_args[@]}" -C "$template_root" submodule sync --recursive
+      git "${git_auth_args[@]}" -C "$template_root" submodule update --init --recursive --depth 1
+    fi
   ) && return 0
 
   warn "Submodule init via repo defaults failed; trying HTTPS URL overrides."
   (
     set -e
-    git -C "$template_root" submodule sync --recursive
-    git -C "$template_root" \
-      -c submodule.deps/first/Unreal.url=https://github.com/Re-UE4SS/UEPseudo.git \
-      -c submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git \
-      submodule update --init --recursive --depth 1
+    if [[ "$is_ci" -eq 1 ]]; then
+      GIT_TERMINAL_PROMPT=0 git "${git_auth_args[@]}" -C "$template_root" submodule sync --recursive
+      GIT_TERMINAL_PROMPT=0 git "${git_auth_args[@]}" -C "$template_root" \
+        -c submodule.deps/first/Unreal.url=https://github.com/Re-UE4SS/UEPseudo.git \
+        -c submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git \
+        submodule update --init --recursive --depth 1
+    else
+      git "${git_auth_args[@]}" -C "$template_root" submodule sync --recursive
+      git "${git_auth_args[@]}" -C "$template_root" \
+        -c submodule.deps/first/Unreal.url=https://github.com/Re-UE4SS/UEPseudo.git \
+        -c submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git \
+        submodule update --init --recursive --depth 1
+    fi
   ) && return 0
 
   warn "Submodule init failed. Continuing to probe existing SDK paths."
@@ -507,7 +554,7 @@ resolve_ue4ss_sdk_dir() {
     fi
   done
 
-  fail $'UE4SS SDK not found in external/.\nTo compile the C++ mod, you need UE4SS C++ prerequisites (private UEPseudo access via Epic-linked GitHub).\nOptions:\n  1) Clone template and init submodules:\n     git clone --depth 1 https://github.com/UE4SS-RE/UE4SSCPPTemplate.git external/UE4SSCPPTemplate\n     git -C external/UE4SSCPPTemplate/RE-UE4SS submodule update --init --recursive\n  2) Place a complete SDK at: external/ue4ss-cppsdk\n  3) Set --ue4ss-sdk-dir / UE4SS_SDK_DIR to an existing SDK path.'
+  fail $'UE4SS SDK not found in external/.\nTo compile the C++ mod, you need UE4SS C++ prerequisites (private UEPseudo access via Epic-linked GitHub).\nOptions:\n  1) Clone template and init submodules:\n     git clone --depth 1 https://github.com/UE4SS-RE/UE4SSCPPTemplate.git external/UE4SSCPPTemplate\n     git -C external/UE4SSCPPTemplate/RE-UE4SS submodule update --init --recursive\n  2) Place a complete SDK at: external/ue4ss-cppsdk\n  3) Set --ue4ss-sdk-dir / UE4SS_SDK_DIR to an existing SDK path.\n  4) In CI, set UE4SS_GITHUB_TOKEN (PAT from an Epic-linked GitHub account with access to Re-UE4SS/UEPseudo).'
 }
 
 prepare_runtime_dir() {

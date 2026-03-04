@@ -49,6 +49,8 @@ jobs:
 
       - name: Stage stripped production AimMod runtime payload
         shell: pwsh
+        env:
+          UE4SS_GITHUB_TOKEN: ${{ secrets.UE4SS_GITHUB_TOKEN }}
         run: |
           ./scripts/dev-pipeline.ps1 `
             -Configuration Release `
