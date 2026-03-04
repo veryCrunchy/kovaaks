@@ -550,7 +550,7 @@ function Resolve-Ue4ssSdkDir([string]$ExplicitSdkDir, [string]$RepoRoot) {
     }
   }
 
-  Initialize-TemplateSubmodules -RepoRoot $RepoRoot
+  Initialize-TemplateSubmodules -RepoRoot $RepoRoot | Out-Host
   foreach ($c in $candidates) {
     if ((Test-Path $c -PathType Container) -and (Test-SdkHeaders $c)) {
       return (Resolve-NativePath $c)
@@ -861,7 +861,7 @@ if (-not $SkipFrontendInstall) {
 }
 
 if (-not $SkipModBuild) {
-  $Ue4ssSdkDir = Resolve-Ue4ssSdkDir -ExplicitSdkDir $Ue4ssSdkDir -RepoRoot $repoRoot
+  $Ue4ssSdkDir = ((Resolve-Ue4ssSdkDir -ExplicitSdkDir $Ue4ssSdkDir -RepoRoot $repoRoot | Select-Object -Last 1) -as [string]).Trim()
   if ($repoRoot -match '^[A-Za-z]:\\' -and $Ue4ssSdkDir.StartsWith("\\") -and $originalRepoRoot.StartsWith("\\")) {
     $Ue4ssSdkDir = Convert-ToMappedRepoPath -PathValue $Ue4ssSdkDir -OriginalRepoRoot $originalRepoRoot -MappedRepoRoot $repoRoot
   }

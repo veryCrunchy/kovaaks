@@ -546,7 +546,7 @@ resolve_ue4ss_sdk_dir() {
   done
 
   # Try to bootstrap missing template submodules, then probe again.
-  maybe_init_template_submodules
+  maybe_init_template_submodules >&2
   for c in "${candidates[@]}"; do
     if [[ -d "$c" ]] && sdk_headers_present "$c"; then
       printf '%s\n' "$(realpath "$c")"
