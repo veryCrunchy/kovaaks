@@ -76,10 +76,17 @@ interface RuntimeFlags {
   hook_process_internal: boolean;
   hook_process_local_script: boolean;
   class_probe_hooks: boolean;
+  class_probe_scalar_reads: boolean;
+  class_probe_scan_all: boolean;
   allow_unsafe_hooks: boolean;
   native_hooks: boolean;
   hook_process_event: boolean;
+  detour_callbacks: boolean;
+  direct_pull_invoke: boolean;
+  experimental_runtime: boolean;
   ui_settext_hook: boolean;
+  ui_widget_probe: boolean;
+  in_game_overlay: boolean;
 }
 
 type RuntimeFlagKey =
@@ -96,10 +103,17 @@ type RuntimeFlagKey =
   | "hook_process_internal"
   | "hook_process_local_script"
   | "class_probe_hooks"
+  | "class_probe_scalar_reads"
+  | "class_probe_scan_all"
   | "allow_unsafe_hooks"
   | "native_hooks"
   | "hook_process_event"
-  | "ui_settext_hook";
+  | "detour_callbacks"
+  | "direct_pull_invoke"
+  | "experimental_runtime"
+  | "ui_settext_hook"
+  | "ui_widget_probe"
+  | "in_game_overlay";
 
 interface BridgeEventEntry {
   ts: string;
@@ -135,7 +149,17 @@ interface MethodFlagSnapshot {
   hook_process_internal?: boolean;
   hook_process_local_script?: boolean;
   class_probe_hooks?: boolean;
+  class_probe_scalar_reads?: boolean;
+  class_probe_scan_all?: boolean;
   allow_unsafe_hooks?: boolean;
+  detour_callbacks?: boolean;
+  hook_process_event?: boolean;
+  direct_pull_invoke?: boolean;
+  experimental_runtime?: boolean;
+  native_hooks?: boolean;
+  native_hooks_requested?: boolean;
+  ui_settext_hook?: boolean;
+  ui_widget_probe?: boolean;
   rust_enabled?: boolean;
   pe_hook_registered?: boolean;
   native_hooks_registered?: boolean;
@@ -158,7 +182,17 @@ const METHOD_FLAG_FILTERS: Array<{ key: keyof MethodFlagSnapshot; label: string 
   { key: "hook_process_internal", label: "hook_process_internal" },
   { key: "hook_process_local_script", label: "hook_process_local_script" },
   { key: "class_probe_hooks", label: "class_probe_hooks" },
+  { key: "class_probe_scalar_reads", label: "class_probe_scalar_reads" },
+  { key: "class_probe_scan_all", label: "class_probe_scan_all" },
   { key: "allow_unsafe_hooks", label: "allow_unsafe_hooks" },
+  { key: "detour_callbacks", label: "detour_callbacks" },
+  { key: "hook_process_event", label: "hook_process_event" },
+  { key: "direct_pull_invoke", label: "direct_pull_invoke" },
+  { key: "experimental_runtime", label: "experimental_runtime" },
+  { key: "native_hooks", label: "native_hooks" },
+  { key: "native_hooks_requested", label: "native_hooks_requested" },
+  { key: "ui_settext_hook", label: "ui_settext_hook" },
+  { key: "ui_widget_probe", label: "ui_widget_probe" },
   { key: "rust_enabled", label: "rust_enabled" },
   { key: "pe_hook_registered", label: "pe_hook_registered" },
   { key: "native_hooks_registered", label: "native_hooks_registered" },
@@ -176,6 +210,7 @@ function makeDefaultMethodFlagFilters(): Record<keyof MethodFlagSnapshot, TriBoo
 interface MethodSample {
   idx: number;
   ts: string;
+  tsMs: number;
   ev: string;
   metric: string;
   method: string;
@@ -195,11 +230,31 @@ interface UiSetTextEvent {
   leaf: string;
   scope: "session" | "pause" | "other"; 
   root: string;
+  source: "ui_settext" | "kmod";
+  objectId: string;
+  objectLabel: string;
+  valueText: string | null;
+  raw: string;
+}
+
+interface ObjectDebugSnapshot {
+  id: string;
+  label: string;
+  className: string;
+  scope: UiSetTextEvent["scope"];
+  source: UiSetTextEvent["source"];
+  count: number;
+  lastTs: number;
+  lastLeaf: string;
+  lastPath: string;
+  lastValueText: string | null;
+  lastRaw: string;
 }
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
 const STORAGE_KEY = "mem_debug_watches_v1";
+const OBJECT_DEBUG_PINNED_KEY = "object_debug_pinned_v1";
 
 function loadWatches(): WatchEntry[] {
   try {
@@ -215,6 +270,20 @@ function saveWatches(watches: WatchEntry[]) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
 }
 
+function loadObjectDebugPinned(): string[] {
+  try {
+    const raw = JSON.parse(localStorage.getItem(OBJECT_DEBUG_PINNED_KEY) ?? "[]");
+    if (!Array.isArray(raw)) return [];
+    return raw.filter((v): v is string => typeof v === "string" && v.length > 0).slice(0, 500);
+  } catch {
+    return [];
+  }
+}
+
+function saveObjectDebugPinned(ids: string[]) {
+  localStorage.setItem(OBJECT_DEBUG_PINNED_KEY, JSON.stringify(ids.slice(0, 500)));
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function uid() {
@@ -226,39 +295,288 @@ function fmtValue(v: number, type: ValueType): string {
   return String(Math.round(v));
 }
 
-function parseUiSetTextLine(line: string): UiSetTextEvent | null {
-  const prefix = "[kmod-events] [ui_settext] ctx=";
-  if (!line.startsWith(prefix)) return null;
-  const ctx = line.slice(prefix.length).trim();
-  if (!ctx) return null;
+function extractKeyValuePairs(text: string): Array<{ key: string; value: string }> {
+  const pairs: Array<{ key: string; value: string }> = [];
+  const rx = /\b([A-Za-z_][A-Za-z0-9_]*)=("[^"]*"|[^,\s]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = rx.exec(text)) !== null) {
+    const key = match[1]?.trim();
+    const value = match[2]?.trim();
+    if (!key || !value) continue;
+    pairs.push({ key, value });
+    if (pairs.length >= 24) break;
+  }
+  return pairs;
+}
 
-  let className = "";
-  let path = ctx;
-  const space = ctx.indexOf(" ");
-  if (space > 0) {
-    className = ctx.slice(0, space).trim();
-    path = ctx.slice(space + 1).trim();
+function normalizeDebugTag(tag: string): string {
+  const lower = tag.trim().toLowerCase();
+  if (!lower) return "";
+  const hash = lower.indexOf(" #");
+  if (hash > 0) return lower.slice(0, hash);
+  return lower;
+}
+
+function extractFieldValue(text: string, key: string): string | null {
+  const marker = `${key}=`;
+  const start = text.indexOf(marker);
+  if (start < 0) return null;
+  let i = start + marker.length;
+  while (i < text.length && text[i] === " ") i += 1;
+  if (i >= text.length) return null;
+  const tail = text.slice(i);
+  const next = tail.search(/\s+[A-Za-z_][A-Za-z0-9_]*=/);
+  const raw = (next >= 0 ? tail.slice(0, next) : tail).trim();
+  if (!raw) return null;
+  return raw.replace(/^"+|"+$/g, "").trim();
+}
+
+function normalizeFnValue(v: string | null): string | null {
+  if (!v) return null;
+  let out = v.trim();
+  if (!out) return null;
+  if (out.toLowerCase().startsWith("function ")) {
+    out = out.slice("function ".length).trim();
+  }
+  return out || null;
+}
+
+function classNameFromFn(fnPath: string | null): string {
+  if (!fnPath) return "";
+  const colon = fnPath.indexOf(":");
+  const beforeColon = colon >= 0 ? fnPath.slice(0, colon) : fnPath;
+  const dot = beforeColon.lastIndexOf(".");
+  if (dot >= 0 && dot < beforeColon.length - 1) {
+    return beforeColon.slice(dot + 1).trim();
+  }
+  const slash = beforeColon.lastIndexOf("/");
+  if (slash >= 0 && slash < beforeColon.length - 1) {
+    return beforeColon.slice(slash + 1).trim();
+  }
+  return "";
+}
+
+const SYSTEM_ONLY_TAGS = new Set<string>([
+  "kovaaksbridgemod",
+  "kmod",
+  "heartbeat",
+  "hook_stats",
+  "class_resolve",
+  "direct_invoke_recover",
+  "direct_invoke_fault",
+  "pe_seen",
+  "pe_new",
+  "fallback_new",
+  "in_game_overlay",
+]);
+
+function objectIdentityFromFields(
+  source: UiSetTextEvent["source"],
+  className: string,
+  leaf: string,
+  path: string,
+  fields: Array<{ key: string; value: string }>,
+): { id: string; label: string } {
+  const base = className || leaf || "unknown";
+  const fieldMap = new Map(fields.map((kv) => [kv.key.toLowerCase(), kv.value]));
+  const preferredRef =
+    fieldMap.get("ctx")
+    ?? fieldMap.get("path")
+    ?? fieldMap.get("caller_ptr")
+    ?? fieldMap.get("caller")
+    ?? fieldMap.get("receiver_ptr")
+    ?? fieldMap.get("receiver")
+    ?? fieldMap.get("object")
+    ?? fieldMap.get("obj")
+    ?? fieldMap.get("manager")
+    ?? fieldMap.get("fn");
+
+  if (source === "ui_settext") {
+    return {
+      id: `ui:${base}|${path}`,
+      label: `${base} ${path}`.trim(),
+    };
   }
 
-  const lastDot = path.lastIndexOf(".");
-  const leaf = lastDot >= 0 ? path.slice(lastDot + 1) : path;
+  if (preferredRef) {
+    return {
+      id: `kmod:${base}|${preferredRef}`,
+      label: `${base} ${preferredRef}`.trim(),
+    };
+  }
+
+  return {
+    id: `kmod:${base}|${leaf}`,
+    label: `${base} ${leaf}`.trim(),
+  };
+}
+
+function buildObjectDebugSnapshots(rows: UiSetTextEvent[]): Record<string, ObjectDebugSnapshot> {
+  const out: Record<string, ObjectDebugSnapshot> = {};
+  for (const row of rows) {
+    const existing = out[row.objectId];
+    if (!existing) {
+      out[row.objectId] = {
+        id: row.objectId,
+        label: row.objectLabel,
+        className: row.className,
+        scope: row.scope,
+        source: row.source,
+        count: 1,
+        lastTs: row.ts,
+        lastLeaf: row.leaf,
+        lastPath: row.path,
+        lastValueText: row.valueText,
+        lastRaw: row.raw,
+      };
+      continue;
+    }
+    const isNewer = row.ts >= existing.lastTs;
+    out[row.objectId] = {
+      ...existing,
+      count: existing.count + 1,
+      lastTs: Math.max(existing.lastTs, row.ts),
+      ...(isNewer
+        ? {
+            label: row.objectLabel,
+            className: row.className,
+            scope: row.scope,
+            source: row.source,
+            lastLeaf: row.leaf,
+            lastPath: row.path,
+            lastValueText: row.valueText,
+            lastRaw: row.raw,
+          }
+        : null),
+    };
+  }
+  return out;
+}
+
+function parseUiSetTextLine(line: string): UiSetTextEvent | null {
+  const raw = line.trim();
+  if (!raw) return null;
+
+  const kmodPrefixMatch = raw.match(/^\[(kmod(?:-events|-trace)?)\]\s*/i);
+  if (!kmodPrefixMatch) return null;
+
+  const rest = raw.slice(kmodPrefixMatch[0].length).trim();
+  if (!rest) return null;
+
+  const taggedMatch = rest.match(/^\[([^\]]+)\]\s*(.*)$/);
+  const tag = (taggedMatch?.[1] ?? "").trim();
+  const normalizedTag = normalizeDebugTag(tag);
+  const payload = (taggedMatch?.[2] ?? rest).trim();
+
+  if (tag.toLowerCase() === "ui_settext" && payload.startsWith("ctx=")) {
+    const remainder = payload.slice(4).trim();
+    const textMarker = remainder.indexOf(" text=");
+    const ctx = (textMarker >= 0 ? remainder.slice(0, textMarker) : remainder).trim();
+    const textValue = (textMarker >= 0 ? remainder.slice(textMarker + 6) : "").trim();
+    if (!ctx) return null;
+
+    let className = "";
+    let path = ctx;
+    const space = ctx.indexOf(" ");
+    if (space > 0) {
+      className = ctx.slice(0, space).trim();
+      path = ctx.slice(space + 1).trim();
+    }
+
+    const lastDot = path.lastIndexOf(".");
+    const leaf = lastDot >= 0 ? path.slice(lastDot + 1) : path;
+    let scope: UiSetTextEvent["scope"] = "other";
+    if (path.includes("SessionStatistics_")) {
+      scope = "session";
+    } else if (path.includes("PauseMenu")) {
+      scope = "pause";
+    }
+
+    const rootMatch = path.match(/WidgetTree\.([A-Za-z0-9_]+)/);
+    const root = rootMatch?.[1] ?? "";
+    const identity = objectIdentityFromFields("ui_settext", className, leaf, path, []);
+
+    return {
+      ts: Date.now(),
+      className,
+      path,
+      leaf,
+      scope,
+      root,
+      source: "ui_settext",
+      objectId: identity.id,
+      objectLabel: identity.label,
+      valueText: textValue || null,
+      raw,
+    };
+  }
+
+  const text = payload || rest;
+  const keyValues = extractKeyValuePairs(text);
+
+  const parsedFn = normalizeFnValue(extractFieldValue(text, "fn"));
+  const parsedCtx = extractFieldValue(text, "ctx");
+  const parsedCaller = extractFieldValue(text, "caller");
+  const parsedFnPtr = extractFieldValue(text, "fn_ptr");
+  const parsedCtxPtr = extractFieldValue(text, "ctx_ptr") ?? extractFieldValue(text, "caller_ptr");
+
+  const enrichedFields: Array<{ key: string; value: string }> = [...keyValues];
+  if (parsedFn) enrichedFields.push({ key: "fn", value: parsedFn });
+  if (parsedCtx) enrichedFields.push({ key: "ctx", value: parsedCtx });
+  if (parsedCaller) enrichedFields.push({ key: "caller", value: parsedCaller });
+  if (parsedFnPtr) enrichedFields.push({ key: "fn_ptr", value: parsedFnPtr });
+  if (parsedCtxPtr) enrichedFields.push({ key: "ctx_ptr", value: parsedCtxPtr });
+
+  if (SYSTEM_ONLY_TAGS.has(normalizedTag)) {
+    return null;
+  }
+
+  const preferredKeys = [
+    "value",
+    "score",
+    "kills",
+    "shots",
+    "shotshit",
+    "shotsfired",
+    "seconds",
+    "spm",
+    "accuracy",
+    "damage_done",
+    "damage_possible",
+    "time_remaining",
+  ];
+  const preferred = enrichedFields.find((kv) => preferredKeys.includes(kv.key.toLowerCase()));
+  const fnMatch = text.match(/\bfn=([^\s]+)/);
+  const classMatch = text.match(/\b([A-Za-z_][A-Za-z0-9_]*)(?::|\.)[A-Za-z0-9_]+/);
+  const className = classNameFromFn(parsedFn) || fnMatch?.[1] || classMatch?.[1] || "";
+  const leaf = parsedFn
+    ? (parsedFn.includes(":") ? parsedFn.slice(parsedFn.lastIndexOf(":") + 1).trim() : parsedFn)
+    : (tag || className || "kmod");
   let scope: UiSetTextEvent["scope"] = "other";
-  if (path.includes("SessionStatistics_")) {
+  if (/session|challenge/i.test(text)) {
     scope = "session";
-  } else if (path.includes("PauseMenu")) {
+  } else if (/pause/i.test(text)) {
     scope = "pause";
   }
+  const identity = objectIdentityFromFields("kmod", className, leaf, text, enrichedFields);
 
-  const rootMatch = path.match(/WidgetTree\.([A-Za-z0-9_]+)/);
-  const root = rootMatch?.[1] ?? "";
+  // If we still cannot resolve any stable object/function context, skip as diagnostic noise.
+  if (!parsedFn && !parsedCtx && !parsedCaller && !parsedCtxPtr) {
+    return null;
+  }
 
   return {
     ts: Date.now(),
     className,
-    path,
+    path: text,
     leaf,
     scope,
-    root,
+    root: "",
+    source: "kmod",
+    objectId: identity.id,
+    objectLabel: identity.label,
+    valueText: preferred ? preferred.value : (enrichedFields[0]?.value ?? null),
+    raw,
   };
 }
 
@@ -291,7 +609,17 @@ function parseMethodFlagSnapshot(input: unknown): MethodFlagSnapshot {
     hook_process_internal: readBool("hook_process_internal"),
     hook_process_local_script: readBool("hook_process_local_script"),
     class_probe_hooks: readBool("class_probe_hooks"),
+    class_probe_scalar_reads: readBool("class_probe_scalar_reads"),
+    class_probe_scan_all: readBool("class_probe_scan_all"),
     allow_unsafe_hooks: readBool("allow_unsafe_hooks"),
+    detour_callbacks: readBool("detour_callbacks"),
+    hook_process_event: readBool("hook_process_event"),
+    direct_pull_invoke: readBool("direct_pull_invoke"),
+    experimental_runtime: readBool("experimental_runtime"),
+    native_hooks: readBool("native_hooks"),
+    native_hooks_requested: readBool("native_hooks_requested"),
+    ui_settext_hook: readBool("ui_settext_hook"),
+    ui_widget_probe: readBool("ui_widget_probe"),
     rust_enabled: readBool("rust_enabled"),
     pe_hook_registered: readBool("pe_hook_registered"),
     native_hooks_registered: readBool("native_hooks_registered"),
@@ -1621,7 +1949,7 @@ function ModulesTab() {
   );
 }
 
-// ─── UE4SS Console tab ───────────────────────────────────────────────────────
+// ─── AimMod Runtime Console tab ──────────────────────────────────────────────
 
 function Ue4ssConsoleTab() {
   const [lines, setLines] = useState<string[]>([]);
@@ -1744,20 +2072,22 @@ function Ue4ssConsoleTab() {
 
   const objectLines = useMemo(() => {
     return lines.filter((line) => {
-      if (!line.startsWith("[kmod-events]")) return false;
+      const lower = line.toLowerCase();
+      const isKmodLine =
+        line.startsWith("[kmod-events]") ||
+        line.startsWith("[kmod]") ||
+        line.startsWith("[kmod-trace]");
+
+      if (isKmodLine) {
+        return true;
+      }
+
+      if (!line.startsWith("[bridge-event]")) return false;
       return (
-        line.includes("[pe]") ||
-        line.includes("[hook_stats]") ||
-        line.includes("[hook_kind_hit]") ||
-        line.includes("[direct_pull]") ||
-        line.includes("[ui_settext]") ||
-        line.includes("[ui_field]") ||
-        line.includes("[emit]") ||
-        line.includes("[emit_i32]") ||
-        line.includes("[emit_f32]") ||
-        line.includes("[emit_non_ui") ||
-        line.includes("[emit_simple]") ||
-        line.includes("[obj]")
+        lower.includes("\"ev\":\"pull_source\"") &&
+        (lower.includes("scenariomanager") ||
+          lower.includes("performanceindicatorsstatereceiver") ||
+          lower.includes("scenario_state_receiver"))
       );
     });
   }, [lines]);
@@ -1931,7 +2261,7 @@ function Ue4ssConsoleTab() {
     { key: "disable_pe_hook", label: "Force disable PE", help: "Overrides enable when checked." },
     { key: "allow_unsafe_hooks", label: "Allow unsafe hooks", help: "Required gate for unstable hook paths (native/script/detour experiments)." },
     { key: "native_hooks", label: "Native hooks", help: "Register native UFunction post-hooks (requires 'Allow unsafe hooks')." },
-    { key: "hook_process_event", label: "Hook ProcessEvent", help: "Install UE4SS ProcessEvent detour (unsafe/experimental)." },
+    { key: "hook_process_event", label: "Hook ProcessEvent", help: "Install ProcessEvent detour (unsafe/experimental)." },
     { key: "ui_settext_hook", label: "UI SetText hook", help: "Hook TextBlock:SetText for UI-derived counters (opt-in)." },
     { key: "discovery", label: "Discovery mode", help: "Extra fallback + unknown-event logging." },
     { key: "log_all_events", label: "Log all events", help: "Write every PE call + emitted event to KovaaksBridgeMod.events.log." },
@@ -1942,7 +2272,14 @@ function Ue4ssConsoleTab() {
     { key: "hook_process_internal", label: "Hook ProcessInternal", help: "Unsafe/experimental script callback path. Off by default." },
     { key: "hook_process_local_script", label: "Hook ProcessLocalScript", help: "Unsafe/experimental script callback path. Off by default." },
     { key: "class_probe_hooks", label: "Class probe hooks", help: "Register wide diagnostic UFunction hooks. Can be unstable/heavy." },
+    { key: "class_probe_scalar_reads", label: "Class probe scalar reads", help: "Allow class probe paths to read/emit scalar numeric values." },
+    { key: "class_probe_scan_all", label: "Class probe scan-all", help: "Broad class-probe registration sweep; high overhead and instability risk." },
+    { key: "direct_pull_invoke", label: "Direct pull invoke", help: "Enable direct non-UI invocation/poll path for pull_* metrics." },
+    { key: "detour_callbacks", label: "Detour callbacks", help: "Enable ProcessEvent detour callback dispatch (same underlying gate as Hook ProcessEvent)." },
+    { key: "experimental_runtime", label: "Experimental runtime", help: "Master gate for detour/class-probe/direct-pull experimental paths." },
     { key: "safe_mode", label: "Safe mode", help: "No resolve, no PE hook (stability test)." },
+    { key: "ui_widget_probe", label: "UI widget probe", help: "Enable explicit CreateWidget/AddToViewport probe diagnostics." },
+    { key: "in_game_overlay", label: "In-game HUD", help: "Create and update the in-game AimMod HUD widget (standard path)." },
     { key: "no_rust", label: "No Rust bridge", help: "Disable rust core for isolation." },
   ];
 
@@ -2007,7 +2344,7 @@ function Ue4ssConsoleTab() {
           }}
         >
           {lines.length === 0 ? (
-            <div style={{ ...LABEL_COL }}>No UE4SS logs yet.</div>
+            <div style={{ ...LABEL_COL }}>No AimMod runtime logs yet.</div>
           ) : (
             <pre
               style={{
@@ -2235,7 +2572,7 @@ function MethodSourcesTab() {
     return false;
   };
 
-  const parseRawPayload = useCallback((raw: string, ts: string): MethodSample | null => {
+  const parseRawPayload = useCallback((raw: string, ts: string, tsMs: number): MethodSample | null => {
     if (!raw || !raw.trim().startsWith("{")) return null;
     let parsed: unknown = null;
     try {
@@ -2271,6 +2608,7 @@ function MethodSourcesTab() {
       return {
         idx: -1,
         ts,
+        tsMs,
         ev,
         metric,
         method,
@@ -2283,21 +2621,15 @@ function MethodSourcesTab() {
         raw,
       };
     } else if (ev.startsWith("pull_")) {
-      // Bridge-forwarded compact pull events often only contain {ev,value} and
-      // duplicate richer kmod-events rows. Skip those to avoid duplicate groups
-      // with unknown origin/method.
-      if (
-        method === "unknown" &&
-        origin === "unknown" &&
-        originFlag === "unknown" &&
-        Object.keys(flags).length === 0
-      ) {
-        return null;
-      }
       metric = ev;
       if (method === "unknown") {
         method = origin && origin !== "unknown" ? origin : "pull_event";
       }
+    } else if (ev === "pull_retry") {
+      const status = parseString(obj.status) || "unknown";
+      const retryMethod = parseString(obj.retry_method) || parseString(obj.pull_method) || method;
+      metric = (parseString(obj.metric) || metric || "pull_retry").trim();
+      method = `pull_retry:${retryMethod}:${status}`;
     } else if (ev !== "pull_source") {
       return null;
     }
@@ -2305,6 +2637,7 @@ function MethodSourcesTab() {
     return {
       idx: -1,
       ts,
+      tsMs,
       ev,
       metric,
       method,
@@ -2318,8 +2651,15 @@ function MethodSourcesTab() {
     };
   }, []);
 
-  const parseTextLogLine = useCallback((line: string, ts: string): MethodSample | null => {
+  const parseTextLogLine = useCallback((line: string, ts: string, tsMs: number): MethodSample | null => {
     if (!line.includes("[kmod-events]")) return null;
+
+    const parseKvField = (text: string, key: string): string => {
+      const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rx = new RegExp(`${escaped}=([\\s\\S]*?)(?=\\s+[A-Za-z_][A-Za-z0-9_]*=|$)`);
+      const m = text.match(rx);
+      return (m?.[1] ?? "").trim();
+    };
 
     // Example: [kmod-events] [emit_non_ui_f32 #249] ev=pull_score_per_minute value=634.000000
     const emitMatch = line.match(/\[kmod-events\]\s+\[(emit(?:_non_ui)?_[if]\d+(?:\s+#\d+)?)\]\s+ev=(pull_[A-Za-z0-9_]+)\s+value=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)/);
@@ -2332,6 +2672,7 @@ function MethodSourcesTab() {
       return {
         idx: -1,
         ts,
+        tsMs,
         ev: metric,
         metric,
         method: nonUi ? "direct_pull_emit_non_ui" : "emit_event",
@@ -2345,27 +2686,53 @@ function MethodSourcesTab() {
       };
     }
 
-    // Example: [kmod-events] [pull_source] metric=pull_shots_fired_total method=state_get ...
-    const sourceMatch = line.match(/\[kmod-events\]\s+\[pull_source\]\s+metric=([A-Za-z0-9_]+)\s+method=([A-Za-z0-9_]+)\s+fn=(.*?)\s+receiver=(.*?)\s+value=([-+]?\d*\.?\d+(?:[eE][-+]?\d+)?)\s+origin_flag=([A-Za-z0-9_]+)/);
-    if (sourceMatch) {
-      const metric = sourceMatch[1] ?? "pull_source";
-      const method = sourceMatch[2] ?? "unknown";
-      const fn = sourceMatch[3] ?? "";
-      const receiver = sourceMatch[4] ?? "";
-      const value = Number(sourceMatch[5]);
-      const originFlag = sourceMatch[6] ?? "unknown";
+    if (line.includes("[pull_source")) {
+      const metric = parseKvField(line, "metric") || "pull_source";
+      const method = parseKvField(line, "method") || "unknown";
+      const fn = parseKvField(line, "fn") || parseKvField(line, "source") || "";
+      const receiver = parseKvField(line, "receiver") || parseKvField(line, "source") || "";
+      const value = Number(parseKvField(line, "value"));
+      const origin = parseKvField(line, "origin") || (method.includes("ui") ? "ui_poll" : "direct_pull");
+      const originFlag = parseKvField(line, "origin_flag") || (method.includes("ui") ? "ui_counter_fallback" : "non_ui_probe");
       if (!Number.isFinite(value)) return null;
       return {
         idx: -1,
         ts,
+        tsMs,
         ev: "pull_source",
         metric,
         method,
         fn,
         receiver,
-        origin: "direct_pull",
+        origin,
         originFlag,
         value,
+        flags: {},
+        raw: line,
+      };
+    }
+
+    if (line.includes("[pull_retry")) {
+      const metric = parseKvField(line, "metric") || "pull_retry";
+      const pullMethod = parseKvField(line, "method") || "unknown";
+      const status = parseKvField(line, "status") || "unknown";
+      const attemptRaw = parseKvField(line, "attempt");
+      const attemptNum = Number((attemptRaw.split("/")[0] ?? "").trim());
+      const fn = parseKvField(line, "fn");
+      const receiver = parseKvField(line, "receiver");
+      const originFlag = parseKvField(line, "origin_flag") || "non_ui_probe";
+      return {
+        idx: -1,
+        ts,
+        tsMs,
+        ev: "pull_retry",
+        metric,
+        method: `pull_retry:${pullMethod}:${status}`,
+        fn,
+        receiver,
+        origin: "direct_pull",
+        originFlag,
+        value: Number.isFinite(attemptNum) ? attemptNum : null,
         flags: {},
         raw: line,
       };
@@ -2374,14 +2741,14 @@ function MethodSourcesTab() {
     return null;
   }, []);
 
-  const parseLinePayload = useCallback((line: string, ts: string): MethodSample | null => {
+  const parseLinePayload = useCallback((line: string, ts: string, tsMs: number): MethodSample | null => {
     const brace = line.indexOf("{");
     if (brace >= 0) {
       const raw = line.slice(brace).trim();
-      const parsed = parseRawPayload(raw, ts);
+      const parsed = parseRawPayload(raw, ts, tsMs);
       if (parsed) return parsed;
     }
-    return parseTextLogLine(line, ts);
+    return parseTextLogLine(line, ts, tsMs);
   }, [parseRawPayload, parseTextLogLine]);
 
   const pushSample = useCallback((sample: MethodSample) => {
@@ -2399,7 +2766,10 @@ function MethodSourcesTab() {
       .then((rows) => {
         if (!mounted) return;
         const parsedRows = (rows ?? [])
-          .map((line) => parseLinePayload(line, new Date().toLocaleTimeString()))
+          .map((line) => {
+            const now = Date.now();
+            return parseLinePayload(line, new Date(now).toLocaleTimeString(), now);
+          })
           .filter((x): x is MethodSample => x !== null);
         setSamples(parsedRows.map((s, i) => ({ ...s, idx: i + 1 })));
         setStatus(`loaded ${parsedRows.length} method samples`);
@@ -2411,7 +2781,8 @@ function MethodSourcesTab() {
     const unlistenLog = listen<string>("ue4ss-log-line", (event) => {
       const line = String(event.payload ?? "").trim();
       if (!line) return;
-      const parsed = parseTextLogLine(line, new Date().toLocaleTimeString());
+      const now = Date.now();
+      const parsed = parseTextLogLine(line, new Date(now).toLocaleTimeString(), now);
       if (!parsed) return;
       pushSample(parsed);
     });
@@ -2420,7 +2791,8 @@ function MethodSourcesTab() {
       const payload = event.payload;
       const raw = payload?.raw ?? "";
       if (!raw) return;
-      const parsed = parseRawPayload(raw, new Date().toLocaleTimeString());
+      const now = Date.now();
+      const parsed = parseRawPayload(raw, new Date(now).toLocaleTimeString(), now);
       if (!parsed) return;
       pushSample(parsed);
     });
@@ -2494,10 +2866,12 @@ function MethodSourcesTab() {
       zeroFlips: number;
       last: number | null;
       lastPositive: number | null;
+      lastTsMs: number;
       distinct: number;
     };
     const m = new Map<string, Group & { distinctSet: Set<string> }>();
     for (const s of filteredSamplesFinal) {
+      const sampleTsMs = Number.isFinite(s.tsMs) ? s.tsMs : 0;
       const key = `${s.metric}|${s.method}|${s.originFlag}|${s.fn}`;
       const prev = m.get(key);
       if (!prev) {
@@ -2516,6 +2890,7 @@ function MethodSourcesTab() {
           zeroFlips: 0,
           last: s.value,
           lastPositive: s.value !== null && s.value > 0.000001 ? s.value : null,
+          lastTsMs: sampleTsMs,
           distinct: distinctSet.size,
           distinctSet,
         });
@@ -2533,18 +2908,25 @@ function MethodSourcesTab() {
       if (s.value !== null && s.value > 0.000001) {
         prev.lastPositive = s.value;
       }
+      if (sampleTsMs > prev.lastTsMs) {
+        prev.lastTsMs = sampleTsMs;
+      }
       if (s.value !== null) prev.distinctSet.add(s.value.toFixed(6));
       prev.distinct = prev.distinctSet.size;
     }
 
     const classify = (g: Group): "good" | "noisy" | "dead" => {
-      if (g.nonZero === 0) return "dead";
+      const nowMs = Date.now();
+      const ageMs = g.lastTsMs > 0 ? Math.max(0, nowMs - g.lastTsMs) : Number.POSITIVE_INFINITY;
+      const staleMs = 15_000;
+      const isRecent = ageMs <= staleMs;
+      if (g.nonZero === 0) return isRecent ? "noisy" : "dead";
       if (g.samples < 4) return "noisy";
       const changeRate = g.samples > 1 ? g.changes / (g.samples - 1) : 0;
       const nonZeroRate = g.samples > 0 ? g.nonZero / g.samples : 0;
       const zeroFlipRate = g.samples > 1 ? g.zeroFlips / (g.samples - 1) : 0;
       if (changeRate >= 0.08 && nonZeroRate >= 0.25 && zeroFlipRate <= 0.55) return "good";
-      if (changeRate < 0.02 || nonZeroRate < 0.1) return "dead";
+      if (changeRate < 0.02 || nonZeroRate < 0.1) return isRecent ? "noisy" : "dead";
       return "noisy";
     };
 
@@ -2915,10 +3297,20 @@ function MethodSourcesTab() {
 
 function ObjectDebugTab() {
   const [rows, setRows] = useState<UiSetTextEvent[]>([]);
+  const [objects, setObjects] = useState<Record<string, ObjectDebugSnapshot>>({});
+  const [pinnedObjectIds, setPinnedObjectIds] = useState<string[]>(() => loadObjectDebugPinned());
   const [query, setQuery] = useState("");
   const [scope, setScope] = useState<"all" | UiSetTextEvent["scope"]>("all");
+  const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
+  const [selectedRowToken, setSelectedRowToken] = useState<string | null>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const scrollerRef = useRef<HTMLDivElement | null>(null);
+
+  const rowToken = useCallback((r: UiSetTextEvent) => `${r.ts}|${r.objectId}|${r.raw}`, []);
+
+  useEffect(() => {
+    saveObjectDebugPinned(pinnedObjectIds);
+  }, [pinnedObjectIds]);
 
   const pushRows = useCallback((incoming: UiSetTextEvent[]) => {
     if (incoming.length === 0) return;
@@ -2926,7 +3318,61 @@ function ObjectDebugTab() {
       const next = [...prev, ...incoming];
       return next.length > 3000 ? next.slice(next.length - 3000) : next;
     });
-  }, []);
+    setObjects((prev) => {
+      const next: Record<string, ObjectDebugSnapshot> = { ...prev };
+      for (const row of incoming) {
+        const existing = next[row.objectId];
+        if (!existing) {
+          next[row.objectId] = {
+            id: row.objectId,
+            label: row.objectLabel,
+            className: row.className,
+            scope: row.scope,
+            source: row.source,
+            count: 1,
+            lastTs: row.ts,
+            lastLeaf: row.leaf,
+            lastPath: row.path,
+            lastValueText: row.valueText,
+            lastRaw: row.raw,
+          };
+          continue;
+        }
+        const isNewer = row.ts >= existing.lastTs;
+        next[row.objectId] = {
+          ...existing,
+          count: existing.count + 1,
+          lastTs: Math.max(existing.lastTs, row.ts),
+          ...(isNewer
+            ? {
+                label: row.objectLabel,
+                className: row.className,
+                scope: row.scope,
+                source: row.source,
+                lastLeaf: row.leaf,
+                lastPath: row.path,
+                lastValueText: row.valueText,
+                lastRaw: row.raw,
+              }
+            : null),
+        };
+      }
+
+      const keys = Object.keys(next);
+      if (keys.length > 2400) {
+        const pinned = new Set(pinnedObjectIds);
+        const removable = keys
+          .filter((id) => !pinned.has(id))
+          .sort((a, b) => next[a].lastTs - next[b].lastTs);
+        const toRemove = Math.min(removable.length, keys.length - 2200);
+        for (let idx = 0; idx < toRemove; idx += 1) {
+          delete next[removable[idx]];
+        }
+      }
+
+      return next;
+    });
+  }, [pinnedObjectIds]);
 
   useEffect(() => {
     let mounted = true;
@@ -2936,7 +3382,9 @@ function ObjectDebugTab() {
         const parsed = (lines ?? [])
           .map(parseUiSetTextLine)
           .filter((x): x is UiSetTextEvent => x !== null);
-        setRows(parsed.slice(parsed.length - 2000));
+        const seed = parsed.slice(parsed.length - 2000);
+        setRows(seed);
+        setObjects(buildObjectDebugSnapshots(seed));
       })
       .catch(() => {
         // no-op
@@ -2955,56 +3403,120 @@ function ObjectDebugTab() {
     };
   }, [pushRows]);
 
-  const filtered = useMemo(() => {
+  const pinnedSet = useMemo(() => new Set(pinnedObjectIds), [pinnedObjectIds]);
+
+  const filteredBase = useMemo(() => {
     const q = query.trim().toLowerCase();
     return rows.filter((r) => {
       if (scope !== "all" && r.scope !== scope) return false;
       if (!q) return true;
       return (
-        r.className.toLowerCase().includes(q) ||
-        r.path.toLowerCase().includes(q) ||
-        r.leaf.toLowerCase().includes(q) ||
-        r.root.toLowerCase().includes(q)
+        r.className.toLowerCase().includes(q)
+        || r.path.toLowerCase().includes(q)
+        || r.leaf.toLowerCase().includes(q)
+        || r.root.toLowerCase().includes(q)
+        || r.objectLabel.toLowerCase().includes(q)
       );
     });
   }, [rows, query, scope]);
 
+  const objectList = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    const arr = Object.values(objects).filter((o) => {
+      if (scope !== "all" && o.scope !== scope) return false;
+      if (!q) return true;
+      return (
+        o.label.toLowerCase().includes(q)
+        || o.className.toLowerCase().includes(q)
+        || o.lastLeaf.toLowerCase().includes(q)
+        || o.lastPath.toLowerCase().includes(q)
+        || o.lastRaw.toLowerCase().includes(q)
+      );
+    });
+    arr.sort((a, b) => {
+      const pinDelta = Number(pinnedSet.has(b.id)) - Number(pinnedSet.has(a.id));
+      if (pinDelta !== 0) return pinDelta;
+      if (b.lastTs !== a.lastTs) return b.lastTs - a.lastTs;
+      if (b.count !== a.count) return b.count - a.count;
+      return a.label.localeCompare(b.label);
+    });
+    return arr;
+  }, [objects, pinnedSet, query, scope]);
+
+  useEffect(() => {
+    if (!selectedObjectId) return;
+    if (!objectList.some((o) => o.id === selectedObjectId)) {
+      setSelectedObjectId(null);
+      setSelectedRowToken(null);
+    }
+  }, [objectList, selectedObjectId]);
+
+  const filteredRows = useMemo(() => {
+    if (!selectedObjectId) return filteredBase;
+    return filteredBase.filter((r) => r.objectId === selectedObjectId);
+  }, [filteredBase, selectedObjectId]);
+
   const summary = useMemo(() => {
-    const byLeaf = new Map<string, { count: number; lastTs: number; scope: UiSetTextEvent["scope"]; className: string }>();
     let session = 0;
     let pause = 0;
     let other = 0;
-    for (const r of filtered) {
+    for (const r of filteredBase) {
       if (r.scope === "session") session++;
       else if (r.scope === "pause") pause++;
       else other++;
-      const prev = byLeaf.get(r.leaf);
-      if (!prev) {
-        byLeaf.set(r.leaf, { count: 1, lastTs: r.ts, scope: r.scope, className: r.className });
-      } else {
-        prev.count += 1;
-        prev.lastTs = Math.max(prev.lastTs, r.ts);
-      }
     }
-    const topLeaves = [...byLeaf.entries()]
-      .sort((a, b) => b[1].count - a[1].count)
-      .slice(0, 20);
     return {
-      total: filtered.length,
-      uniqueLeaves: byLeaf.size,
+      totalRows: filteredRows.length,
+      totalObjects: objectList.length,
       session,
       pause,
       other,
-      topLeaves,
+      pinned: pinnedObjectIds.length,
     };
-  }, [filtered]);
+  }, [filteredBase, filteredRows.length, objectList.length, pinnedObjectIds.length]);
+
+  const selectedSnapshot = useMemo(() => {
+    if (!selectedObjectId) return null;
+    return objects[selectedObjectId] ?? null;
+  }, [objects, selectedObjectId]);
+
+  const selectedRow = useMemo(() => {
+    if (filteredRows.length === 0) return null;
+    if (!selectedRowToken) return filteredRows[filteredRows.length - 1];
+    return filteredRows.find((r) => rowToken(r) === selectedRowToken) ?? filteredRows[filteredRows.length - 1];
+  }, [filteredRows, rowToken, selectedRowToken]);
+
+  const selectedPairs = useMemo(() => {
+    const raw = selectedRow?.raw ?? selectedSnapshot?.lastRaw ?? "";
+    if (!raw) return [];
+    return extractKeyValuePairs(raw);
+  }, [selectedRow, selectedSnapshot]);
+
+  const togglePinned = useCallback((id: string) => {
+    setPinnedObjectIds((prev) => {
+      if (prev.includes(id)) {
+        return prev.filter((v) => v !== id);
+      }
+      return [id, ...prev].slice(0, 500);
+    });
+  }, []);
+
+  const pinSelected = useCallback(() => {
+    if (!selectedObjectId) return;
+    setPinnedObjectIds((prev) => (prev.includes(selectedObjectId) ? prev : [selectedObjectId, ...prev].slice(0, 500)));
+  }, [selectedObjectId]);
+
+  const unpinSelected = useCallback(() => {
+    if (!selectedObjectId) return;
+    setPinnedObjectIds((prev) => prev.filter((id) => id !== selectedObjectId));
+  }, [selectedObjectId]);
 
   useEffect(() => {
     if (!autoScroll) return;
     const node = scrollerRef.current;
     if (!node) return;
     node.scrollTop = node.scrollHeight;
-  }, [filtered, autoScroll]);
+  }, [filteredRows, autoScroll]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -3012,8 +3524,12 @@ function ObjectDebugTab() {
         <span style={{ ...LABEL_COL, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>
           Object Debug
         </span>
-        <span style={{ ...VALUE_COL }}>rows: {summary.total}</span>
-        <span style={{ ...VALUE_COL }}>widgets: {summary.uniqueLeaves}</span>
+        <span style={{ ...VALUE_COL }}>rows: {summary.totalRows}</span>
+        <span style={{ ...VALUE_COL }}>objects: {summary.totalObjects}</span>
+        <span style={{ ...VALUE_COL, color: "rgba(255,245,170,0.95)" }}>pinned: {summary.pinned}</span>
+        <span style={{ ...VALUE_COL, color: "rgba(170,220,255,0.95)" }}>
+          selected: {selectedSnapshot?.label ?? "none"}
+        </span>
         <span style={{ ...VALUE_COL, color: "#00f5a0" }}>session: {summary.session}</span>
         <span style={{ ...VALUE_COL, color: "rgba(255,220,120,0.95)" }}>pause: {summary.pause}</span>
         <span style={{ ...VALUE_COL, color: "rgba(180,180,180,0.9)" }}>other: {summary.other}</span>
@@ -3023,7 +3539,7 @@ function ObjectDebugTab() {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="filter class/path/widget..."
+          placeholder="filter class/path/object/event..."
           style={{ ...INPUT, width: 260 }}
         />
         <select
@@ -3044,61 +3560,230 @@ function ObjectDebugTab() {
           />
           auto-scroll
         </label>
+        <button
+          onClick={() => {
+            setSelectedObjectId(null);
+            setSelectedRowToken(null);
+          }}
+          style={BTN()}
+        >
+          clear selection
+        </button>
+        <button onClick={pinSelected} style={BTN()} disabled={!selectedObjectId}>pin selected</button>
+        <button onClick={unpinSelected} style={BTN()} disabled={!selectedObjectId}>unpin selected</button>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "360px 1fr", gap: 10 }}>
         <div style={{ background: "rgba(0,0,0,0.35)", border: "1px solid rgba(255,255,255,0.08)", borderRadius: 8, padding: 10, display: "flex", flexDirection: "column", gap: 8, minHeight: 420 }}>
-          <div style={{ ...LABEL_COL, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>Top Widgets</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 50px 70px", gap: 6, ...LABEL_COL, fontSize: 10 }}>
-            <span>Widget</span><span>Count</span><span>Scope</span>
+          <div style={{ ...LABEL_COL, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>Objects</div>
+          <div style={{ display: "grid", gridTemplateColumns: "24px 1fr 50px 70px", gap: 6, ...LABEL_COL, fontSize: 10 }}>
+            <span>★</span><span>Object</span><span>Count</span><span>Scope</span>
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 4, overflowY: "auto", maxHeight: 360 }}>
-            {summary.topLeaves.length === 0 ? (
-              <div style={{ ...LABEL_COL }}>No ui_settext rows yet.</div>
+            {objectList.length === 0 ? (
+              <div style={{ ...LABEL_COL }}>No object debug rows yet.</div>
             ) : (
-              summary.topLeaves.map(([leaf, info]) => (
-                <div key={leaf} style={{ display: "grid", gridTemplateColumns: "1fr 50px 70px", gap: 6, alignItems: "center", fontFamily: "monospace", fontSize: 11 }}>
-                  <span style={{ color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{leaf}</span>
-                  <span style={{ color: "rgba(255,255,255,0.85)" }}>{info.count}</span>
-                  <span style={{ color: info.scope === "session" ? "#00f5a0" : info.scope === "pause" ? "rgba(255,220,120,0.95)" : "rgba(200,200,200,0.9)" }}>
-                    {info.scope}
-                  </span>
-                </div>
-              ))
+              objectList.slice(0, 200).map((obj) => {
+                const isSelected = selectedObjectId === obj.id;
+                const isPinned = pinnedSet.has(obj.id);
+                return (
+                  <div
+                    key={obj.id}
+                    style={{
+                    display: "grid",
+                      gridTemplateColumns: "24px 1fr 50px 70px",
+                    gap: 6,
+                    alignItems: "center",
+                      border: isSelected ? "1px solid rgba(0,245,160,0.4)" : "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 6,
+                      background: isSelected ? "rgba(0,245,160,0.09)" : "rgba(255,255,255,0.02)",
+                      padding: "4px 6px",
+                  }}
+                >
+                    <button
+                      onClick={() => togglePinned(obj.id)}
+                      style={{
+                        ...BTN(),
+                        padding: 0,
+                        width: 20,
+                        height: 20,
+                        lineHeight: "20px",
+                        textAlign: "center",
+                        color: isPinned ? "rgba(255,245,120,0.95)" : "rgba(255,255,255,0.45)",
+                        borderColor: isPinned ? "rgba(255,245,120,0.45)" : "rgba(255,255,255,0.12)",
+                      }}
+                      title={isPinned ? "Unpin object" : "Pin object"}
+                    >
+                      {isPinned ? "★" : "☆"}
+                    </button>
+                    <button
+                      onClick={() => {
+                        setSelectedObjectId((prev) => (prev === obj.id ? null : obj.id));
+                        setSelectedRowToken(null);
+                      }}
+                      style={{
+                        background: "none",
+                        border: "none",
+                        color: "#fff",
+                        textAlign: "left",
+                        padding: 0,
+                        cursor: "pointer",
+                        fontFamily: "monospace",
+                        fontSize: 11,
+                        overflow: "hidden",
+                        textOverflow: "ellipsis",
+                        whiteSpace: "nowrap",
+                      }}
+                      title={obj.label}
+                    >
+                      {obj.label}
+                    </button>
+                    <span style={{ color: "rgba(255,255,255,0.85)", fontFamily: "monospace", fontSize: 11 }}>{obj.count}</span>
+                    <span style={{ color: obj.scope === "session" ? "#00f5a0" : obj.scope === "pause" ? "rgba(255,220,120,0.95)" : "rgba(200,200,200,0.9)", fontFamily: "monospace", fontSize: 11 }}>
+                      {obj.scope}
+                    </span>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
 
-        <div
-          ref={scrollerRef}
-          style={{
+        <div style={{ display: "grid", gridTemplateRows: "128px 1fr", gap: 8, minHeight: 420 }}>
+          <div style={{
             background: "rgba(0,0,0,0.35)",
             border: "1px solid rgba(255,255,255,0.08)",
             borderRadius: 8,
             padding: 10,
-            minHeight: 420,
-            maxHeight: 420,
-            overflowY: "auto",
-          }}
-        >
-          {filtered.length === 0 ? (
-            <div style={{ ...LABEL_COL }}>No structured object rows yet.</div>
-          ) : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              {filtered.map((r, idx) => (
-                <div key={`${r.ts}-${idx}`} style={{ display: "grid", gridTemplateColumns: "88px 120px 90px 1fr", gap: 8, fontFamily: "monospace", fontSize: 11 }}>
+            display: "flex",
+            flexDirection: "column",
+            gap: 6,
+          }}>
+            <div style={{ ...LABEL_COL, fontSize: 10, textTransform: "uppercase", letterSpacing: 1 }}>Selected Item</div>
+            {!selectedSnapshot && !selectedRow ? (
+              <div style={{ ...LABEL_COL }}>Select an entry on the left or click a row to inspect values.</div>
+            ) : (
+              <>
+                <div style={{ display: "grid", gridTemplateColumns: "88px 120px 80px 1fr", gap: 8, fontFamily: "monospace", fontSize: 11 }}>
                   <span style={{ color: "rgba(255,255,255,0.4)" }}>
-                    {new Date(r.ts).toLocaleTimeString()}
+                    {new Date((selectedRow?.ts ?? selectedSnapshot?.lastTs ?? Date.now())).toLocaleTimeString()}
                   </span>
-                  <span style={{ color: "rgba(170,220,255,0.95)" }}>{r.className || "?"}</span>
-                  <span style={{ color: r.scope === "session" ? "#00f5a0" : r.scope === "pause" ? "rgba(255,220,120,0.95)" : "rgba(200,200,200,0.9)" }}>
-                    {r.leaf}
+                  <span
+                    style={{ color: "rgba(170,220,255,0.95)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={(selectedRow?.className ?? selectedSnapshot?.className ?? "?")}
+                  >
+                    {selectedRow?.className ?? selectedSnapshot?.className ?? "?"}
                   </span>
-                  <span style={{ color: "rgba(230,255,240,0.92)", wordBreak: "break-word" }}>{r.path}</span>
+                  <span
+                    style={{
+                      color:
+                        (selectedRow?.scope ?? selectedSnapshot?.scope) === "session"
+                          ? "#00f5a0"
+                          : (selectedRow?.scope ?? selectedSnapshot?.scope) === "pause"
+                            ? "rgba(255,220,120,0.95)"
+                            : "rgba(200,200,200,0.9)",
+                    }}
+                  >
+                    {selectedRow?.source ?? selectedSnapshot?.source ?? "?"}
+                  </span>
+                  <span
+                    style={{ color: "rgba(230,255,240,0.92)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                    title={selectedRow?.valueText ?? selectedSnapshot?.lastValueText ?? selectedRow?.path ?? selectedSnapshot?.lastPath ?? ""}
+                  >
+                    {selectedRow?.valueText ?? selectedSnapshot?.lastValueText ?? selectedRow?.path ?? selectedSnapshot?.lastPath ?? "—"}
+                  </span>
                 </div>
-              ))}
-            </div>
-          )}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {selectedPairs.length === 0 ? (
+                    <span style={{ ...LABEL_COL }}>No parsed key/value fields on this row.</span>
+                  ) : (
+                    selectedPairs.slice(0, 8).map((kv, idx) => (
+                      <span
+                        key={`${kv.key}-${idx}`}
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: 11,
+                          color: "rgba(210,245,255,0.95)",
+                          border: "1px solid rgba(120,180,255,0.25)",
+                          borderRadius: 4,
+                          padding: "2px 6px",
+                        }}
+                      >
+                        {kv.key}={kv.value}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+
+          <div
+            ref={scrollerRef}
+            style={{
+              background: "rgba(0,0,0,0.35)",
+              border: "1px solid rgba(255,255,255,0.08)",
+              borderRadius: 8,
+              padding: 10,
+              minHeight: 284,
+              maxHeight: 284,
+              overflowY: "auto",
+            }}
+          >
+            {filteredRows.length === 0 ? (
+              <div style={{ ...LABEL_COL }}>
+                {selectedObjectId
+                  ? "No recent rows for selected object (snapshot retained)."
+                  : "No structured object rows yet."}
+              </div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {filteredRows.map((r, idx) => {
+                  const token = rowToken(r);
+                  const isSelected = selectedRowToken ? token === selectedRowToken : idx === (filteredRows.length - 1);
+                  return (
+                    <button
+                      key={`${token}-${idx}`}
+                      onClick={() => {
+                        setSelectedObjectId(r.objectId);
+                        setSelectedRowToken(token);
+                      }}
+                      style={{
+                        display: "grid",
+                        gridTemplateColumns: "88px 180px 100px 110px 1fr",
+                        gap: 8,
+                        fontFamily: "monospace",
+                        fontSize: 11,
+                        textAlign: "left",
+                        border: isSelected ? "1px solid rgba(0,245,160,0.35)" : "1px solid rgba(255,255,255,0.06)",
+                        borderRadius: 6,
+                        background: isSelected ? "rgba(0,245,160,0.08)" : "rgba(255,255,255,0.01)",
+                        padding: "4px 6px",
+                        cursor: "pointer",
+                      }}
+                    >
+                      <span style={{ color: "rgba(255,255,255,0.4)" }}>
+                        {new Date(r.ts).toLocaleTimeString()}
+                      </span>
+                      <span
+                        style={{ color: "rgba(170,220,255,0.95)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                        title={r.objectLabel}
+                      >
+                        {r.objectLabel}
+                      </span>
+                      <span style={{ color: r.scope === "session" ? "#00f5a0" : r.scope === "pause" ? "rgba(255,220,120,0.95)" : "rgba(200,200,200,0.9)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.leaf}>
+                        {r.leaf}
+                      </span>
+                      <span style={{ color: "rgba(180,205,255,0.92)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.valueText ?? ""}>
+                        {r.valueText ?? "—"}
+                      </span>
+                      <span style={{ color: "rgba(230,255,240,0.92)", wordBreak: "break-word" }} title={r.path}>{r.path}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     </div>
@@ -3134,7 +3819,7 @@ export function DebugTab() {
     { id: "chain",     label: "Chain" },
     { id: "autochain", label: "Auto Chain" },
     { id: "modules",   label: "Modules" },
-    { id: "ue4ss",     label: "UE4SS" },
+    { id: "ue4ss",     label: "AimMod Runtime" },
     { id: "methodsrc", label: "Method Sources" },
     { id: "objdebug",  label: "Object Debug" },
   ];

@@ -6,7 +6,7 @@ const EVENT = "stats-panel-update";
 
 /**
  * Subscribes to the `stats-panel-update` Tauri event and returns the most
- * recent reading from the in-game stats panel OCR pipeline.
+ * recent reading from the in-game stats panel pipeline.
  *
  * Returns `null` until the first event arrives (i.e. no active session).
  */

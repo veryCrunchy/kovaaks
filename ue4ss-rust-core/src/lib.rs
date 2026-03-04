@@ -1,0 +1,146 @@
+#![allow(clippy::missing_safety_doc)]
+
+mod pipe;
+
+use std::ffi::CStr;
+use std::os::raw::c_char;
+
+fn sanitize_event_name(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ':' || ch == '-' {
+            out.push(ch);
+        }
+    }
+    if out.is_empty() {
+        "unknown".to_string()
+    } else {
+        out
+    }
+}
+
+fn cstr_opt<'a>(ptr: *const c_char) -> Option<&'a CStr> {
+    if ptr.is_null() {
+        return None;
+    }
+    Some(unsafe { CStr::from_ptr(ptr) })
+}
+
+fn emit_json(json: &str) -> bool {
+    if !pipe::is_connected() && pipe::connect().is_err() {
+        return false;
+    }
+    pipe::write_event(json)
+}
+
+fn emit_i32(ev: &str, v: i32) -> bool {
+    let ev = sanitize_event_name(ev);
+    emit_json(&format!(r#"{{"ev":"{ev}","v":{v}}}"#))
+}
+
+fn emit_f32(ev: &str, v: f32) -> bool {
+    if !v.is_finite() {
+        return false;
+    }
+    let ev = sanitize_event_name(ev);
+    emit_json(&format!(r#"{{"ev":"{ev}","v":{v:.4}}}"#))
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_init() -> bool {
+    pipe::connect().is_ok()
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_shutdown() {
+    pipe::close();
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_is_connected() -> bool {
+    pipe::is_connected()
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_last_error() -> u32 {
+    pipe::last_error()
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_i32(ev: *const c_char, v: i32) -> bool {
+    let Some(ev) = cstr_opt(ev) else {
+        return false;
+    };
+    let Ok(ev) = ev.to_str() else {
+        return false;
+    };
+    emit_i32(ev, v)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_f32(ev: *const c_char, v: f32) -> bool {
+    let Some(ev) = cstr_opt(ev) else {
+        return false;
+    };
+    let Ok(ev) = ev.to_str() else {
+        return false;
+    };
+    emit_f32(ev, v)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_json(json: *const c_char) -> bool {
+    let Some(json) = cstr_opt(json) else {
+        return false;
+    };
+    let Ok(json) = json.to_str() else {
+        return false;
+    };
+    emit_json(json)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_shot_hit(dmg: f32) -> bool {
+    if !dmg.is_finite() {
+        return false;
+    }
+    emit_json(&format!(r#"{{"ev":"shot_hit","dmg":{dmg:.4}}}"#))
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_shot_fired(possible: f32) -> bool {
+    if !possible.is_finite() {
+        return false;
+    }
+    emit_json(&format!(r#"{{"ev":"shot_fired","possible":{possible:.4}}}"#))
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_shot_miss() -> bool {
+    emit_json(r#"{"ev":"shot_miss"}"#)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_kill() -> bool {
+    emit_json(r#"{"ev":"kill"}"#)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_challenge_start() -> bool {
+    emit_json(r#"{"ev":"challenge_start"}"#)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_challenge_queued() -> bool {
+    emit_json(r#"{"ev":"challenge_queued"}"#)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_challenge_complete() -> bool {
+    emit_json(r#"{"ev":"challenge_complete"}"#)
+}
+
+#[no_mangle]
+pub extern "C" fn bridge_emit_challenge_canceled() -> bool {
+    emit_json(r#"{"ev":"challenge_canceled"}"#)
+}

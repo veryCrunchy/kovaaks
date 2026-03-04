@@ -1,3 +1,5 @@
+#[cfg(target_os = "windows")]
+use once_cell::sync::Lazy;
 /// Windows TTS via SAPI / OneCore voices.
 ///
 /// Voice listing reads both the classic SAPI5 registry hive
@@ -13,14 +15,11 @@
 
 #[cfg(target_os = "windows")]
 use std::sync::Mutex;
-#[cfg(target_os = "windows")]
-use once_cell::sync::Lazy;
 
 /// The currently-running speech process (if any).  Stored so we can kill
 /// it before starting new speech, mirroring `speechSynthesis.cancel()`.
 #[cfg(target_os = "windows")]
-static CURRENT_SPEECH: Lazy<Mutex<Option<std::process::Child>>> =
-    Lazy::new(|| Mutex::new(None));
+static CURRENT_SPEECH: Lazy<Mutex<Option<std::process::Child>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Voice listing ─────────────────────────────────────────────────────────────
 
@@ -78,8 +77,10 @@ $voices | Sort-Object
             .args([
                 "-NoProfile",
                 "-NonInteractive",
-                "-WindowStyle", "Hidden",
-                "-Command", script,
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                script,
             ])
             .output();
 
@@ -109,10 +110,10 @@ pub fn speak(text: &str, voice_name: Option<&str>) {
 
     #[cfg(target_os = "windows")]
     {
-        let text_safe  = text.replace('\'', "''");
+        let text_safe = text.replace('\'', "''");
         let voice_part = match voice_name {
             Some(name) => format!("$s.SelectVoice('{}'); ", name.replace('\'', "''")),
-            None       => String::new(),
+            None => String::new(),
         };
 
         // rate = 0 (default) feels natural; volume = 100
@@ -130,8 +131,10 @@ pub fn speak(text: &str, voice_name: Option<&str>) {
             .args([
                 "-NoProfile",
                 "-NonInteractive",
-                "-WindowStyle", "Hidden",
-                "-Command", &script,
+                "-WindowStyle",
+                "Hidden",
+                "-Command",
+                &script,
             ])
             .spawn();
 

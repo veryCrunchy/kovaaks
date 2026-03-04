@@ -9,31 +9,16 @@ export interface RegionRect {
   height: number;
 }
 
-export interface StatsFieldRegions {
-  kills: RegionRect | null;
-  kps: RegionRect | null;
-  accuracy: RegionRect | null;
-  damage: RegionRect | null;
-  spm: RegionRect | null;
-  ttk: RegionRect | null;
-}
-
 // ─── App settings ──────────────────────────────────────────────────────────────
 
 export interface AppSettings {
   stats_dir: string;
-  /** @deprecated Use stats_field_regions.spm — kept for migration deserialization only. */
-  region: RegionRect | null;
-  ocr_poll_ms: number;
   overlay_visible: boolean;
   username: string;
   monitor_index: number;
   friends: FriendProfile[];
-  scenario_region: RegionRect | null;
   selected_friend: string | null;
   mouse_dpi: number;
-  /** Per-field OCR regions for the stats panel — one small region per stat. */
-  stats_field_regions: StatsFieldRegions;
   /** Whether live coaching notifications are shown during sessions. */
   live_feedback_enabled: boolean;
   /** Verbosity: 0=minimal, 1=standard, 2=verbose. */

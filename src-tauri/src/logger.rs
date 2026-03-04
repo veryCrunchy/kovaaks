@@ -20,8 +20,8 @@ pub const EVENT_LOG_ENTRY: &str = "log-entry";
 // ─── Payload sent to the frontend ─────────────────────────────────────────────
 #[derive(Serialize, Clone, Debug)]
 pub struct LogEntry {
-    pub ts: u64,        // ms since UNIX epoch
-    pub level: String,  // "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE"
+    pub ts: u64,       // ms since UNIX epoch
+    pub level: String, // "ERROR" | "WARN" | "INFO" | "DEBUG" | "TRACE"
     pub target: String,
     pub message: String,
 }
@@ -48,10 +48,10 @@ static LOG_FILE: Lazy<Mutex<Option<std::fs::File>>> = Lazy::new(|| Mutex::new(No
 pub fn log_file_path() -> std::path::PathBuf {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            return dir.join("kovaaks-overlay.log");
+            return dir.join("aimmod.log");
         }
     }
-    std::env::temp_dir().join("kovaaks-overlay.log")
+    std::env::temp_dir().join("aimmod.log")
 }
 
 // ─── Logger implementation ─────────────────────────────────────────────────────
@@ -139,7 +139,12 @@ impl Log for TauriLogger {
 pub fn init() -> Result<(), log::SetLoggerError> {
     // Open log file (truncate previous run so it stays small)
     let path = log_file_path();
-    match std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&path) {
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&path)
+    {
         Ok(f) => {
             *LOG_FILE.lock() = Some(f);
             eprintln!("Logging to file: {}", path.display());

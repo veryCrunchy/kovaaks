@@ -88,7 +88,7 @@ export function LogViewer() {
     const a = document.createElement("a");
     const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     a.href = url;
-    a.download = `kovaaks-overlay-logs-${stamp}.txt`;
+    a.download = `aimmod-logs-${stamp}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);

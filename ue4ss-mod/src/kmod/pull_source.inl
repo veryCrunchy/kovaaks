@@ -1,5 +1,7 @@
     static inline std::unordered_map<std::string, std::string> s_ui_pull_source_sig{};
+    static inline std::unordered_map<std::string, double> s_ui_pull_source_last_value{};
     static inline std::unordered_map<std::string, std::string> s_state_pull_source_sig{};
+    static inline std::unordered_map<std::string, double> s_state_pull_source_last_value{};
 
     static auto emit_ui_pull_source_once(
         const char* metric,
@@ -10,17 +12,23 @@
         if (!(s_non_ui_probe_enabled || s_log_all_events)) {
             return;
         }
-        if (!std::isfinite(value) || value < 0.0) {
+        if (!std::isfinite(value) || value <= 0.0) {
             return;
         }
 
         const std::string metric_key = metric ? metric : "unknown";
         const std::string sig = std::string("ui_poll|") + field + "|" + source_path;
-        const auto it = s_ui_pull_source_sig.find(metric_key);
-        if (it != s_ui_pull_source_sig.end() && it->second == sig) {
+        const std::string key = metric_key + "|" + sig;
+        const auto it = s_ui_pull_source_sig.find(key);
+        const auto vit = s_ui_pull_source_last_value.find(key);
+        const bool same_sig = (it != s_ui_pull_source_sig.end() && it->second == sig);
+        const bool changed_value = (vit == s_ui_pull_source_last_value.end())
+            || (std::fabs(vit->second - value) > 0.0001);
+        if (same_sig && !changed_value) {
             return;
         }
-        s_ui_pull_source_sig[metric_key] = sig;
+        s_ui_pull_source_sig[key] = sig;
+        s_ui_pull_source_last_value[key] = value;
 
         const auto src_esc = escape_json(source_path);
         const auto origin_flag = s_ui_counter_fallback_enabled ? "ui_counter_fallback" : "ui_poll";
@@ -66,7 +74,7 @@
         if (!(s_non_ui_probe_enabled || s_log_all_events)) {
             return;
         }
-        if (!std::isfinite(value) || value < 0.0) {
+        if (!std::isfinite(value)) {
             return;
         }
 
@@ -75,11 +83,22 @@
         const std::string fn_utf8 = fn ? utf8_from_wide(fn->GetFullName()) : std::string("null");
         const std::string caller_utf8 = caller ? utf8_from_wide(caller->GetFullName()) : std::string("null");
         const std::string sig = method_key + "|" + fn_utf8 + "|" + caller_utf8;
-        const auto it = s_state_pull_source_sig.find(metric_key);
-        if (it != s_state_pull_source_sig.end() && it->second == sig) {
+        const std::string key = metric_key + "|" + sig;
+        const auto it = s_state_pull_source_sig.find(key);
+        const auto vit = s_state_pull_source_last_value.find(key);
+        const bool same_sig = (it != s_state_pull_source_sig.end() && it->second == sig);
+        const bool has_signal = value > 0.0;
+        const bool allow_zero_discovery = s_log_all_events && !has_signal && (it == s_state_pull_source_sig.end());
+        if (!has_signal && !allow_zero_discovery) {
             return;
         }
-        s_state_pull_source_sig[metric_key] = sig;
+        const bool changed_value = (vit == s_state_pull_source_last_value.end())
+            || (std::fabs(vit->second - value) > 0.0001);
+        if (same_sig && !changed_value) {
+            return;
+        }
+        s_state_pull_source_sig[key] = sig;
+        s_state_pull_source_last_value[key] = value;
 
         const auto fn_esc = escape_json(fn_utf8);
         const auto caller_esc = escape_json(caller_utf8);

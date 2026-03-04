@@ -11,6 +11,7 @@ if(NOT WIN32)
 endif()
 
 option(KOVAAKS_BUILD_STRIPPED_PRODUCTION "Build stripped production bridge source" OFF)
+
 if(NOT DEFINED UE4SS_SDK_DIR)
   message(FATAL_ERROR "Set UE4SS_SDK_DIR to your UE4SS C++ SDK path.")
 endif()
@@ -18,9 +19,9 @@ endif()
 set(KOVAAKS_BRIDGE_SOURCE src/KovaaksBridgeMod.cpp)
 if(KOVAAKS_BUILD_STRIPPED_PRODUCTION)
   set(KOVAAKS_BRIDGE_SOURCE src/KovaaksBridgeMod.production.cpp)
-  message(STATUS "KovaaksBridgeMod: using stripped production source")
+  message(STATUS "KovaaksBridgeMod: stripped production mode enabled")
 else()
-  message(STATUS "KovaaksBridgeMod: using full debug-heavy source")
+  message(STATUS "KovaaksBridgeMod: full bridge mode enabled")
 endif()
 
 add_library(main SHARED
@@ -96,7 +97,12 @@ else()
   )
   FetchContent_GetProperties(zydis_headers)
   if(NOT zydis_headers_POPULATED)
+    cmake_policy(PUSH)
+    if(POLICY CMP0169)
+      cmake_policy(SET CMP0169 OLD)
+    endif()
     FetchContent_Populate(zydis_headers)
+    cmake_policy(POP)
   endif()
   if(EXISTS ${zydis_headers_SOURCE_DIR}/include/Zydis/Zydis.h)
     set(ZYDIS_INCLUDE_DIR ${zydis_headers_SOURCE_DIR}/include)
@@ -110,7 +116,12 @@ else()
     )
     FetchContent_GetProperties(zycore_headers)
     if(NOT zycore_headers_POPULATED)
+      cmake_policy(PUSH)
+      if(POLICY CMP0169)
+        cmake_policy(SET CMP0169 OLD)
+      endif()
       FetchContent_Populate(zycore_headers)
+      cmake_policy(POP)
     endif()
     if(EXISTS ${zycore_headers_SOURCE_DIR}/include/Zycore/Zycore.h)
       set(ZYCORE_INCLUDE_DIR ${zycore_headers_SOURCE_DIR}/include)
@@ -184,6 +195,13 @@ set_target_properties(main PROPERTIES
 
 if(MSVC)
   target_compile_options(main PRIVATE /utf-8 /EHsc)
+  # UE4SS runtime in-game is release-built; forcing /MD + non-debug STL ABI
+  # avoids Debug STL object layout/allocator mismatch across DLL boundaries.
+  set_property(TARGET main PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
+  target_compile_definitions(main PRIVATE
+    _HAS_ITERATOR_DEBUGGING=0
+    $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+  )
 endif()
 
 if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/third_party/UE4SS.lib)

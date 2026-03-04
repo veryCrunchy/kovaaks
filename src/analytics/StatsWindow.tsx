@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
+import { LiveTab } from "./LiveTab";
+import { DebugTab } from "./DebugTab";
 import { MousePathViewer } from "./MousePathViewer";
 import type { RawPositionPoint, MetricPoint, ScreenFrame } from "../types/mouse";
 import {
@@ -69,6 +71,14 @@ interface ReplayData {
   positions: RawPositionPoint[];
   metrics: MetricPoint[];
   frames?: ScreenFrame[];
+}
+
+interface BridgeParsedEvent {
+  ev: string;
+  value?: number | null;
+  delta?: number | null;
+  total?: number | null;
+  raw?: string;
 }
 
 type Tab = "overview" | "movement" | "performance" | "coaching" | "replay" | "leaderboard";
@@ -1297,7 +1307,7 @@ function PerformanceTab({
       <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
         No in-game stats data recorded for this scenario.
         <br />
-        Configure the stats panel OCR region in Settings to capture kill count,
+        Run a scenario with AimMod active to capture kill count,
         accuracy, and TTK.
       </div>
     );
@@ -2794,7 +2804,7 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-type RootMode = "sessions" | "leaderboards";
+type RootMode = "sessions" | "leaderboards" | "live" | "debug";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
@@ -2803,6 +2813,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [loading, setLoading] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
   const [rootMode, setRootMode] = useState<RootMode>("sessions");
+  const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
+  const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
 
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
@@ -2832,9 +2844,71 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
 
   useEffect(() => {
     loadHistory(false);
-    const unlisten = listen("session-complete", () => loadHistory(true));
+    let lastBridgeRefresh = 0;
+    const maybeRefreshHistory = (force = false) => {
+      const now = Date.now();
+      if (!force && now - lastBridgeRefresh < 1500) return;
+      lastBridgeRefresh = now;
+      loadHistory(true);
+    };
+
+    // Refresh when a session is finalized and persisted.
+    const unlistenComplete = listen("session-complete", () => {
+      maybeRefreshHistory(true);
+    });
+
+    // Fallback when bridge signals completion but file-watcher timing varies.
+    const unlistenBridgeParsed = listen<BridgeParsedEvent>("bridge-parsed-event", (event) => {
+      const ev = String(event.payload?.ev ?? "");
+      if (
+        ev === "challenge_complete" ||
+        ev === "post_challenge_complete" ||
+        ev === "challenge_quit" ||
+        ev === "challenge_canceled"
+      ) {
+        maybeRefreshHistory(true);
+      }
+    });
+
+    // Keep a tiny live snapshot so Session Stats isn't empty while no run is persisted yet.
+    const unlistenBridgeMetric = listen<BridgeParsedEvent>("bridge-metric", (event) => {
+      const ev = String(event.payload?.ev ?? "");
+      const value = event.payload?.value;
+      const delta = event.payload?.delta;
+      if (!ev) return;
+
+      if (ev.startsWith("pull_") && typeof value === "number" && Number.isFinite(value)) {
+        setLiveBridgeStats((prev) => {
+          if (prev[ev] === value) return prev;
+          return { ...prev, [ev]: value };
+        });
+      }
+
+      if (
+        ev === "shot_fired" ||
+        ev === "shot_hit" ||
+        ev === "kill" ||
+        ev === "challenge_queued" ||
+        ev === "challenge_start" ||
+        ev === "challenge_end" ||
+        ev === "challenge_complete" ||
+        ev === "challenge_completed" ||
+        ev === "challenge_canceled" ||
+        ev === "scenario_start" ||
+        ev === "scenario_end"
+      ) {
+        const inc =
+          typeof delta === "number" && Number.isFinite(delta)
+            ? Math.max(1, Math.round(delta))
+            : 1;
+        setLiveBridgeEventCounts((prev) => ({ ...prev, [ev]: (prev[ev] ?? 0) + inc }));
+      }
+    });
+
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenComplete.then((fn) => fn());
+      unlistenBridgeParsed.then((fn) => fn());
+      unlistenBridgeMetric.then((fn) => fn());
     };
   }, []);
 
@@ -2904,7 +2978,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           flexShrink: 0,
         }}
       >
-        {(["sessions", "leaderboards"] as RootMode[]).map((m) => (
+        {(["sessions", "leaderboards", "live", "debug"] as RootMode[]).map((m) => (
           <button
             key={m}
             onClick={() => setRootMode(m)}
@@ -2921,7 +2995,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               fontWeight: rootMode === m ? 700 : 400,
             }}
           >
-            {m === "sessions" ? "Session Stats" : "Leaderboards"}
+            {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : m === "live" ? "Live" : "Debug"}
           </button>
         ))}
       </div>
@@ -3092,14 +3166,79 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             style={{
               height: "100%",
               display: "flex",
+              flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
               color: "rgba(255,255,255,0.2)",
+              gap: 12,
             }}
           >
-            {records.length === 0
-              ? "Play a session to start recording stats."
-              : "Select a scenario from the sidebar."}
+            <div>
+              {records.length === 0
+                ? "Play a session to start recording stats."
+                : "Select a scenario from the sidebar."}
+            </div>
+            {records.length === 0 &&
+              (Object.keys(liveBridgeStats).length > 0 || Object.keys(liveBridgeEventCounts).length > 0) && (
+              <div
+                style={{
+                  marginTop: 4,
+                  border: "1px solid rgba(0,245,160,0.22)",
+                  background: "rgba(0,245,160,0.06)",
+                  borderRadius: 8,
+                  padding: "10px 12px",
+                  minWidth: 320,
+                  color: "rgba(255,255,255,0.82)",
+                }}
+              >
+                <div style={{ fontSize: 12, marginBottom: 6, color: "#00f5a0" }}>
+                  Live AimMod metrics (not persisted yet)
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 10px", fontSize: 11 }}>
+                  {[
+                    "pull_shots_fired_total",
+                    "pull_shots_hit_total",
+                    "pull_kills_total",
+                    "pull_score_per_minute",
+                    "pull_score_total_derived",
+                    "pull_score_total",
+                    "pull_damage_done",
+                    "pull_damage_possible",
+                    "pull_damage_efficiency",
+                    "pull_kills_per_second",
+                    "pull_seconds_total",
+                  ].map((k) => (
+                    <div key={k} style={{ display: "contents" }}>
+                      <span style={{ color: "rgba(255,255,255,0.6)" }}>{k}</span>
+                      <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                        {liveBridgeStats[k] !== undefined ? String(liveBridgeStats[k]) : "-"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {Object.keys(liveBridgeEventCounts).length > 0 && (
+                  <div style={{ marginTop: 8, display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 10px", fontSize: 11 }}>
+                    {[
+                      "challenge_queued",
+                      "challenge_start",
+                      "scenario_start",
+                      "shot_fired",
+                      "shot_hit",
+                      "kill",
+                      "challenge_complete",
+                      "challenge_canceled",
+                    ].map((k) => (
+                      <div key={k} style={{ display: "contents" }}>
+                        <span style={{ color: "rgba(255,255,255,0.6)" }}>{k}</span>
+                        <span style={{ fontFamily: "'JetBrains Mono', monospace" }}>
+                          {liveBridgeEventCounts[k] !== undefined ? String(liveBridgeEventCounts[k]) : "-"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -3110,6 +3249,20 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       {rootMode === "leaderboards" && (
         <div style={{ flex: 1, overflow: "hidden" }}>
           <LeaderboardBrowser />
+        </div>
+      )}
+
+      {/* ── Live mem content ── */}
+      {rootMode === "live" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          <LiveTab />
+        </div>
+      )}
+
+      {/* ── Memory debug ── */}
+      {rootMode === "debug" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          <DebugTab />
         </div>
       )}
     </div>

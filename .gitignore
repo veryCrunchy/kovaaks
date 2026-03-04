@@ -5,6 +5,15 @@ dist/
 
 # Rust / Cargo
 src-tauri/target/
+ue4ss-rust-core/target/
+kovaaks-bridge/target/
+
+# Local build caches
+.cache/
+ue4ss-mod/build/
+ue4ss-mod/build-w64/
+ue4ss-mod/third_party/UE4SS.def
+ue4ss-mod/third_party/UE4SS.lib
 
 # Tauri
 src-tauri/gen/schemas/
@@ -23,3 +32,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+ue4ss-mod/CXXHeaderDump
+ue4ss-mod/UHTHeaderDump

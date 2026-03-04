@@ -47,6 +47,55 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Stage stripped production AimMod runtime payload
+        shell: pwsh
+        run: |
+          ./scripts/dev-pipeline.ps1 `
+            -Configuration Release `
+            -ModConfiguration Release `
+            -RuntimeProfile minimal `
+            -SettingsProfile production `
+            -StrippedModBuild $true `
+            -SkipFrontendInstall `
+            -SkipOverlayBuild
+
+      - name: Verify staged AimMod runtime payload
+        shell: pwsh
+        run: |
+          $requiredFiles = @(
+            "src-tauri/ue4ss/kovaaks_rust_core.dll",
+            "src-tauri/ue4ss/Mods/KovaaksBridgeMod/mod.json",
+            "src-tauri/ue4ss/Mods/KovaaksBridgeMod/dlls/main.dll"
+          )
+
+          foreach ($path in $requiredFiles) {
+            if (-not (Test-Path $path -PathType Leaf)) {
+              throw "Missing staged release payload file: $path"
+            }
+          }
+
+          $runtimeDll = Get-ChildItem "src-tauri/ue4ss" -File -Filter "*.dll" |
+            Where-Object { $_.Name -ne "kovaaks_rust_core.dll" } |
+            Select-Object -First 1
+          if (-not $runtimeDll) {
+            throw "Missing staged runtime DLL in src-tauri/ue4ss"
+          }
+
+          $runtimeIni = Get-ChildItem "src-tauri/ue4ss" -File -Filter "*settings.ini" | Select-Object -First 1
+          if (-not $runtimeIni) {
+            throw "Missing staged runtime settings file in src-tauri/ue4ss"
+          }
+
+          $runtimeProfile = (Get-Content "src-tauri/ue4ss/.kovaaks_overlay_profile" -Raw).Trim()
+          if ($runtimeProfile -ne "minimal") {
+            throw "Expected runtime profile 'minimal' but found '$runtimeProfile'."
+          }
+
+          $settingsProfile = (Get-Content "src-tauri/ue4ss/.kovaaks_overlay_settings_profile" -Raw).Trim()
+          if ($settingsProfile -ne "production") {
+            throw "Expected settings profile 'production' but found '$settingsProfile'."
+          }
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -55,7 +104,7 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: ${{ inputs.tag_name || github.ref_name }}
-          releaseName: "KovaaK's Overlay ${{ inputs.tag_name || github.ref_name }}"
+          releaseName: "AimMod ${{ inputs.tag_name || github.ref_name }}"
           # release-please already created the release with a changelog;
           # tauri-action will find it by tag and upload the build artifacts.
           releaseDraft: false

@@ -17,6 +17,18 @@ pub const BRIDGE_PARSED_EVENT: &str = "bridge-parsed-event";
 #[cfg(target_os = "windows")]
 pub const BRIDGE_METRIC_EVENT: &str = "bridge-metric";
 pub const UE4SS_LOG_EVENT: &str = "ue4ss-log-line";
+#[cfg(target_os = "windows")]
+const EVENT_LIVE_SCORE: &str = "live-score";
+#[cfg(target_os = "windows")]
+const EVENT_STATS_PANEL_UPDATE: &str = "stats-panel-update";
+#[cfg(target_os = "windows")]
+const EVENT_SESSION_START: &str = "session-start";
+#[cfg(target_os = "windows")]
+const EVENT_SESSION_END: &str = "session-end";
+#[cfg(target_os = "windows")]
+const EVENT_CHALLENGE_START: &str = "challenge-start";
+#[cfg(target_os = "windows")]
+const EVENT_CHALLENGE_END: &str = "challenge-end";
 
 #[cfg(target_os = "windows")]
 #[derive(Clone, Debug, serde::Serialize)]
@@ -27,25 +39,90 @@ pub struct BridgeParsedEvent {
     pub delta: Option<f64>,
     pub field: Option<String>,
     pub source: Option<String>,
+    pub method: Option<String>,
+    pub origin: Option<String>,
+    pub origin_flag: Option<String>,
+    pub fn_name: Option<String>,
+    pub receiver: Option<String>,
     pub raw: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+struct BridgeLiveScoreEvent {
+    kind: String,
+    score: f64,
+    raw_text: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, serde::Serialize, PartialEq)]
+struct BridgeStatsPanelEvent {
+    session_time_secs: Option<f64>,
+    kills: Option<u32>,
+    kps: Option<f64>,
+    accuracy_hits: Option<u32>,
+    accuracy_shots: Option<u32>,
+    accuracy_pct: Option<f64>,
+    damage_dealt: Option<f64>,
+    damage_total: Option<f64>,
+    spm: Option<f64>,
+    ttk_secs: Option<f64>,
+    challenge_seconds_total: Option<f64>,
+    challenge_time_length: Option<f64>,
+    challenge_tick_count_total: Option<u32>,
+    challenge_average_fps: Option<f64>,
+    random_sens_scale: Option<f64>,
+    time_remaining: Option<f64>,
+    queue_time_remaining: Option<f64>,
+    is_in_challenge: Option<bool>,
+    is_in_scenario: Option<bool>,
+    is_in_scenario_editor: Option<bool>,
+    is_in_trainer: Option<bool>,
+    scenario_is_paused: Option<bool>,
+    scenario_is_enabled: Option<bool>,
+    scenario_play_type: Option<i32>,
+    game_state: String,
+    scenario_name: Option<String>,
+    scenario_type: String,
 }
 
 #[cfg(target_os = "windows")]
 fn parse_bridge_payload(raw: &str) -> Option<BridgeParsedEvent> {
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
     let obj = parsed.as_object()?;
-    let ev = obj.get("ev")?.as_str()?.trim();
+    let raw_ev = obj.get("ev")?.as_str()?.trim();
+    let mut ev = raw_ev.to_string();
     if ev.is_empty() {
         return None;
     }
+    // Treat pull_source as the underlying pull metric so downstream consumers
+    // can use the non-null working paths directly.
+    if raw_ev == "pull_source" {
+        if let Some(metric) = parse_payload_string(obj, "metric") {
+            let m = metric.trim();
+            if m.starts_with("pull_") {
+                ev = m.to_string();
+            }
+        }
+    }
+    let source = parse_payload_string(obj, "source")
+        .or_else(|| parse_payload_string(obj, "src"))
+        .or_else(|| parse_payload_string(obj, "fn"))
+        .or_else(|| parse_payload_string(obj, "receiver"));
     Some(BridgeParsedEvent {
-        ev: ev.to_string(),
+        ev,
         // Support both legacy and compact payload keys emitted by the mod.
         value: parse_payload_number(obj, "value").or_else(|| parse_payload_number(obj, "v")),
         total: parse_payload_number(obj, "total").or_else(|| parse_payload_number(obj, "t")),
         delta: parse_payload_number(obj, "delta").or_else(|| parse_payload_number(obj, "d")),
         field: parse_payload_string(obj, "field"),
-        source: parse_payload_string(obj, "source").or_else(|| parse_payload_string(obj, "src")),
+        source,
+        method: parse_payload_string(obj, "method"),
+        origin: parse_payload_string(obj, "origin"),
+        origin_flag: parse_payload_string(obj, "origin_flag"),
+        fn_name: parse_payload_string(obj, "fn"),
+        receiver: parse_payload_string(obj, "receiver"),
         raw: raw.to_string(),
     })
 }
@@ -92,10 +169,17 @@ pub struct RuntimeFlagState {
     pub hook_process_internal: bool,
     pub hook_process_local_script: bool,
     pub class_probe_hooks: bool,
+    pub class_probe_scalar_reads: bool,
+    pub class_probe_scan_all: bool,
     pub allow_unsafe_hooks: bool,
     pub native_hooks: bool,
     pub hook_process_event: bool,
+    pub detour_callbacks: bool,
+    pub direct_pull_invoke: bool,
+    pub experimental_runtime: bool,
     pub ui_settext_hook: bool,
+    pub ui_widget_probe: bool,
+    pub in_game_overlay: bool,
 }
 
 // ─── Windows implementation ───────────────────────────────────────────────────
@@ -103,6 +187,7 @@ pub struct RuntimeFlagState {
 #[cfg(target_os = "windows")]
 #[allow(unsafe_op_in_unsafe_fn)]
 mod imp {
+    use super::BridgeStatsPanelEvent;
     use std::collections::{HashSet, VecDeque};
     use std::ffi::OsStr;
     use std::io::{Read, Seek, SeekFrom};
@@ -110,7 +195,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Mutex, OnceLock};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use tauri::{AppHandle, Emitter};
 
@@ -153,6 +238,942 @@ mod imp {
     const LOG_RING_CAPACITY: usize = 1200;
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
+
+    #[derive(Clone, Debug)]
+    struct BridgeCompatState {
+        stats: super::BridgeStatsPanelEvent,
+        last_nonzero_spm: Option<Instant>,
+        last_nonzero_damage_done: Option<Instant>,
+        last_nonzero_damage_total: Option<Instant>,
+        last_nonzero_seconds: Option<Instant>,
+        last_nonzero_score_total: Option<Instant>,
+        live_score_total: Option<f64>,
+        last_emitted_live_score: Option<f64>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct BridgeSessionState {
+        session_active: bool,
+        challenge_active: bool,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct ChallengeHookState {
+        stable: Option<bool>,
+        candidate: Option<bool>,
+        candidate_count: u8,
+    }
+
+    #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+    enum ChallengeTransition {
+        None,
+        Entered,
+        Exited,
+    }
+
+    fn bridge_compat_state() -> &'static Mutex<BridgeCompatState> {
+        static STATE: OnceLock<Mutex<BridgeCompatState>> = OnceLock::new();
+        STATE.get_or_init(|| {
+            Mutex::new(BridgeCompatState {
+                stats: BridgeStatsPanelEvent {
+                    session_time_secs: None,
+                    kills: None,
+                    kps: None,
+                    accuracy_hits: None,
+                    accuracy_shots: None,
+                    accuracy_pct: None,
+                    damage_dealt: None,
+                    damage_total: None,
+                    spm: None,
+                    ttk_secs: None,
+                    challenge_seconds_total: None,
+                    challenge_time_length: None,
+                    challenge_tick_count_total: None,
+                    challenge_average_fps: None,
+                    random_sens_scale: None,
+                    time_remaining: None,
+                    queue_time_remaining: None,
+                    is_in_challenge: None,
+                    is_in_scenario: None,
+                    is_in_scenario_editor: None,
+                    is_in_trainer: None,
+                    scenario_is_paused: None,
+                    scenario_is_enabled: None,
+                    scenario_play_type: None,
+                    game_state: "menu".to_string(),
+                    scenario_name: None,
+                    scenario_type: "Unknown".to_string(),
+                },
+                last_nonzero_spm: None,
+                last_nonzero_damage_done: None,
+                last_nonzero_damage_total: None,
+                last_nonzero_seconds: None,
+                last_nonzero_score_total: None,
+                live_score_total: None,
+                last_emitted_live_score: None,
+            })
+        })
+    }
+
+    fn bridge_session_state() -> &'static Mutex<BridgeSessionState> {
+        static STATE: OnceLock<Mutex<BridgeSessionState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(BridgeSessionState::default()))
+    }
+
+    fn challenge_hook_state() -> &'static Mutex<ChallengeHookState> {
+        static STATE: OnceLock<Mutex<ChallengeHookState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(ChallengeHookState::default()))
+    }
+
+    fn reset_bridge_stats_snapshot() {
+        if let Ok(mut state) = bridge_compat_state().lock() {
+            state.stats = BridgeStatsPanelEvent {
+                session_time_secs: None,
+                kills: None,
+                kps: None,
+                accuracy_hits: None,
+                accuracy_shots: None,
+                accuracy_pct: None,
+                damage_dealt: None,
+                damage_total: None,
+                spm: None,
+                ttk_secs: None,
+                challenge_seconds_total: None,
+                challenge_time_length: None,
+                challenge_tick_count_total: None,
+                challenge_average_fps: None,
+                random_sens_scale: None,
+                time_remaining: None,
+                queue_time_remaining: None,
+                is_in_challenge: None,
+                is_in_scenario: None,
+                is_in_scenario_editor: None,
+                is_in_trainer: None,
+                scenario_is_paused: None,
+                scenario_is_enabled: None,
+                scenario_play_type: None,
+                game_state: "menu".to_string(),
+                scenario_name: None,
+                scenario_type: "Unknown".to_string(),
+            };
+            state.last_nonzero_spm = None;
+            state.last_nonzero_damage_done = None;
+            state.last_nonzero_damage_total = None;
+            state.last_nonzero_seconds = None;
+            state.last_nonzero_score_total = None;
+            state.live_score_total = None;
+            state.last_emitted_live_score = None;
+        }
+    }
+
+    fn begin_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let (emit_session, emit_challenge) = {
+            let mut state = bridge_session_state().lock().unwrap();
+            let mut emit_session = false;
+            let mut emit_challenge = false;
+            if challenge_active && !state.challenge_active {
+                state.challenge_active = true;
+                emit_challenge = true;
+            }
+            if !state.session_active {
+                state.session_active = true;
+                emit_session = true;
+            }
+            (emit_session, emit_challenge)
+        };
+
+        if emit_challenge {
+            let _ = app.emit(super::EVENT_CHALLENGE_START, ());
+        }
+        if emit_session {
+            reset_bridge_stats_snapshot();
+            let _ = app.emit(super::EVENT_SESSION_START, ());
+            let session_start = crate::mouse_hook::start_session_tracking();
+            crate::screen_recorder::start(session_start);
+            log::info!("bridge: session tracking started ({reason})");
+        }
+    }
+
+    fn end_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let (emit_session, emit_challenge) = {
+            let mut state = bridge_session_state().lock().unwrap();
+            let mut emit_challenge = false;
+            if challenge_active && state.challenge_active {
+                emit_challenge = true;
+            }
+            state.challenge_active = false;
+            let emit_session = state.session_active;
+            state.session_active = false;
+            (emit_session, emit_challenge)
+        };
+
+        if emit_challenge {
+            let _ = app.emit(super::EVENT_CHALLENGE_END, ());
+        }
+        if emit_session {
+            let _ = app.emit(super::EVENT_SESSION_END, ());
+            crate::mouse_hook::stop_session_tracking();
+            crate::screen_recorder::stop();
+            log::info!("bridge: session tracking stopped ({reason})");
+        }
+    }
+
+    fn parse_class_hook_from_raw(raw: &str) -> Option<(String, Option<u64>, Option<i64>, Option<f64>)> {
+        let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = parsed.as_object()?;
+        if obj.get("ev")?.as_str()?.trim() != "class_hook_probe" {
+            return None;
+        }
+        if obj
+            .get("has_ret")
+            .and_then(|v| v.as_u64())
+            .map_or(false, |v| v == 0)
+        {
+            return None;
+        }
+        let fn_name = obj.get("fn")?.as_str()?.to_string();
+        let ret_u32 = obj.get("ret_u32").and_then(|v| v.as_u64());
+        let ret_i32 = obj.get("ret_i32").and_then(|v| v.as_i64());
+        let ret_f32 = obj.get("ret_f32").and_then(|v| v.as_f64());
+        Some((fn_name, ret_u32, ret_i32, ret_f32))
+    }
+
+    fn update_challenge_transition(sample: bool) -> ChallengeTransition {
+        let mut state = challenge_hook_state().lock().unwrap();
+        let prev = state.stable;
+        match state.stable {
+            None => {
+                state.stable = Some(sample);
+                state.candidate = None;
+                state.candidate_count = 0;
+                if sample {
+                    ChallengeTransition::Entered
+                } else {
+                    ChallengeTransition::None
+                }
+            }
+            Some(stable) if stable == sample => {
+                state.candidate = None;
+                state.candidate_count = 0;
+                ChallengeTransition::None
+            }
+            Some(_) => {
+                if state.candidate == Some(sample) {
+                    state.candidate_count = state.candidate_count.saturating_add(1);
+                } else {
+                    state.candidate = Some(sample);
+                    state.candidate_count = 1;
+                }
+                if state.candidate_count < 3 {
+                    return ChallengeTransition::None;
+                }
+                state.stable = Some(sample);
+                state.candidate = None;
+                state.candidate_count = 0;
+                if sample && prev != Some(true) {
+                    ChallengeTransition::Entered
+                } else if !sample && prev == Some(true) {
+                    ChallengeTransition::Exited
+                } else {
+                    ChallengeTransition::None
+                }
+            }
+        }
+    }
+
+    fn infer_scenario_type(stats: &BridgeStatsPanelEvent) -> &'static str {
+        let kills = stats.kills.unwrap_or(0);
+        let shots = stats.accuracy_shots.unwrap_or(0);
+        let dmg_total = stats.damage_total.unwrap_or(0.0);
+        if kills > 0 && dmg_total > 0.0 {
+            return "MultiHitClicking";
+        }
+        if kills > 0 {
+            return "OneShotClicking";
+        }
+        if shots > 0 && kills == 0 {
+            return "AccuracyDrill";
+        }
+        "Unknown"
+    }
+
+    fn derive_game_state(stats: &BridgeStatsPanelEvent) -> &'static str {
+        if stats.is_in_scenario_editor == Some(true) {
+            return "editor";
+        }
+        if stats.scenario_is_paused == Some(true) {
+            return "paused";
+        }
+        if stats.is_in_challenge == Some(true) {
+            return "challenge";
+        }
+        if stats.is_in_scenario == Some(true) {
+            if stats.queue_time_remaining.map_or(false, |v| v > 0.0001) {
+                return "queued";
+            }
+            return "scenario";
+        }
+        if stats.queue_time_remaining.map_or(false, |v| v > 0.0001) {
+            return "queued";
+        }
+        if stats.time_remaining.map_or(false, |v| v > 0.0001) {
+            return "challenge";
+        }
+        "menu"
+    }
+
+    fn normalize_scenario_name(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.len() < 3 || trimmed.len() > 160 {
+            return None;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower == "scenario" || lower == "scenariotitle" || lower == "none" {
+            return None;
+        }
+        if !trimmed.chars().any(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(trimmed.to_string())
+    }
+
+    fn derive_scenario_name_from_id(raw: &str) -> Option<String> {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        let leaf = trimmed.rsplit('/').next().unwrap_or(trimmed);
+        let base = leaf.split('.').next().unwrap_or(leaf).trim();
+        if base.is_empty() {
+            return None;
+        }
+        normalize_scenario_name(base)
+    }
+
+    fn parse_state_manager_scenario_name_from_metadata(raw: &str) -> Option<String> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+
+        if let Some(name) = obj
+            .get("scenario_name")
+            .and_then(|v| v.as_str())
+            .and_then(normalize_scenario_name)
+        {
+            return Some(name);
+        }
+
+        obj.get("scenario_id")
+            .and_then(|v| v.as_str())
+            .and_then(derive_scenario_name_from_id)
+    }
+
+    fn apply_scenario_name_update(app: &AppHandle, name: String, source: &str, raw: &str) {
+        let mut changed = false;
+        if let Ok(mut state) = bridge_compat_state().lock() {
+            if state.stats.scenario_name.as_deref() != Some(name.as_str()) {
+                state.stats.scenario_name = Some(name.clone());
+                changed = true;
+                let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+            }
+        }
+        if changed {
+            log::info!("bridge: scenario_name resolved source={} name={}", source, name);
+            let synthetic = super::BridgeParsedEvent {
+                ev: "scenario_name".to_string(),
+                value: None,
+                total: None,
+                delta: None,
+                field: Some(name),
+                source: Some(source.to_string()),
+                method: Some("state_manager_metadata".to_string()),
+                origin: Some("scenario_metadata".to_string()),
+                origin_flag: Some("state_manager".to_string()),
+                fn_name: None,
+                receiver: None,
+                raw: raw.to_string(),
+            };
+            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+        }
+    }
+
+    fn accept_float_with_zero_suppress(
+        prev: Option<f64>,
+        incoming: f64,
+        now: Instant,
+        last_nonzero: Option<Instant>,
+        suppress_zeros_for: Duration,
+        suppress_low_confidence_zero: bool,
+    ) -> Option<Option<Instant>> {
+        if !incoming.is_finite() || incoming < 0.0 {
+            return None;
+        }
+        let mut next_last_nonzero = last_nonzero;
+        if incoming > 0.0 {
+            next_last_nonzero = Some(now);
+        } else if suppress_low_confidence_zero && prev.map_or(false, |prev_val| prev_val > 0.0) {
+            return None;
+        } else if let (Some(prev_val), Some(last_nz)) = (prev, last_nonzero) {
+            if prev_val > 0.0 && now.duration_since(last_nz) < suppress_zeros_for {
+                return None;
+            }
+        }
+        if prev.map_or(false, |prev_val| (prev_val - incoming).abs() <= 0.0001) {
+            return None;
+        }
+        Some(next_last_nonzero)
+    }
+
+    fn emit_bridge_compat_events(app: &AppHandle, parsed: &super::BridgeParsedEvent) {
+        if let Some((fn_name, ret_u32, ret_i32, ret_f32)) = parse_class_hook_from_raw(&parsed.raw) {
+            let bool_sample = ret_u32
+                .map(|v| (v & 1) == 1)
+                .or_else(|| ret_i32.map(|v| (v & 1) != 0));
+            let emit_class_bool_metric = |event_name: &str, sample: bool| {
+                let synthetic = super::BridgeParsedEvent {
+                    ev: event_name.to_string(),
+                    value: Some(if sample { 1.0 } else { 0.0 }),
+                    total: None,
+                    delta: None,
+                    field: None,
+                    source: Some(fn_name.clone()),
+                    method: Some("class_hook_ret_bool".to_string()),
+                    origin: Some("class_hook_probe".to_string()),
+                    origin_flag: Some("class_probe_hooks".to_string()),
+                    fn_name: Some(fn_name.clone()),
+                    receiver: None,
+                    raw: parsed.raw.clone(),
+                };
+                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+            };
+
+            if fn_name.ends_with(":IsInChallenge") {
+                if let Some(in_challenge) = bool_sample {
+                    match update_challenge_transition(in_challenge) {
+                        ChallengeTransition::Entered => {
+                            begin_session_tracking(app, "class_hook:IsInChallenge", true);
+                        }
+                        ChallengeTransition::Exited => {
+                            end_session_tracking(app, "class_hook:IsInChallenge", true);
+                        }
+                        ChallengeTransition::None => {}
+                    }
+                    emit_class_bool_metric("pull_is_in_challenge", in_challenge);
+                }
+            } else if fn_name.ends_with(":IsInScenario") {
+                if let Some(in_scenario) = bool_sample {
+                    emit_class_bool_metric("pull_is_in_scenario", in_scenario);
+                }
+            } else if fn_name.ends_with(":IsInScenarioEditor") {
+                if let Some(in_editor) = bool_sample {
+                    emit_class_bool_metric("pull_is_in_scenario_editor", in_editor);
+                }
+            }
+
+            if fn_name.ends_with(":GetChallengeTimeRemaining") {
+                if let Some(value) = ret_f32 {
+                    if value.is_finite() && value >= 0.0 {
+                        let synthetic = super::BridgeParsedEvent {
+                            ev: "pull_time_remaining".to_string(),
+                            value: Some(value),
+                            total: None,
+                            delta: None,
+                            field: None,
+                            source: Some(fn_name.clone()),
+                            method: Some("class_hook_ret_f32".to_string()),
+                            origin: Some("class_hook_probe".to_string()),
+                            origin_flag: Some("class_probe_hooks".to_string()),
+                            fn_name: Some(fn_name),
+                            receiver: None,
+                            raw: parsed.raw.clone(),
+                        };
+                        let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+                    }
+                }
+            } else if fn_name.ends_with(":GetChallengeQueueTimeRemaining") {
+                if let Some(value) = ret_f32 {
+                    if value.is_finite() && value >= 0.0 {
+                        let synthetic = super::BridgeParsedEvent {
+                            ev: "pull_queue_time_remaining".to_string(),
+                            value: Some(value),
+                            total: None,
+                            delta: None,
+                            field: None,
+                            source: Some(fn_name.clone()),
+                            method: Some("class_hook_ret_f32".to_string()),
+                            origin: Some("class_hook_probe".to_string()),
+                            origin_flag: Some("class_probe_hooks".to_string()),
+                            fn_name: Some(fn_name),
+                            receiver: None,
+                            raw: parsed.raw.clone(),
+                        };
+                        let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+                    }
+                }
+            }
+        }
+
+        match parsed.ev.as_str() {
+            "session_start" => {
+                begin_session_tracking(app, "bridge:session_start", false);
+            }
+            "session_end" => {
+                end_session_tracking(app, "bridge:session_end", false);
+            }
+            "challenge_start" | "scenario_start" => {
+                begin_session_tracking(app, "bridge:challenge_start", true);
+            }
+            "challenge_end" | "scenario_end" => {
+                end_session_tracking(app, "bridge:challenge_end", true);
+            }
+            "challenge_complete" | "challenge_completed" | "post_challenge_complete" => {
+                end_session_tracking(app, "bridge:challenge_complete", true);
+            }
+            "challenge_canceled" | "challenge_quit" => {
+                end_session_tracking(app, "bridge:challenge_canceled", true);
+            }
+            _ => {}
+        }
+
+        if parsed.ev == "scenario_metadata" {
+            if let Some(name) = parse_state_manager_scenario_name_from_metadata(&parsed.raw) {
+                apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
+            }
+            return;
+        }
+
+        if parsed.ev == "ui_scenario_name" {
+            let source = parsed.source.as_deref().unwrap_or_default();
+            let is_state_manager_source = source == "state_manager";
+            if !is_state_manager_source {
+                return;
+            }
+            if let Some(name) = parsed
+                .field
+                .as_deref()
+                .and_then(normalize_scenario_name)
+            {
+                apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
+            }
+            return;
+        }
+
+        if !parsed.ev.starts_with("pull_") {
+            return;
+        }
+
+        let has_none_marker = |s: &str| s.contains("None.None") || s.starts_with("Function None.");
+        let stale_runtime_source = parsed
+            .fn_name
+            .as_deref()
+            .map_or(false, has_none_marker)
+            || parsed
+                .receiver
+                .as_deref()
+                .map_or(false, has_none_marker)
+            || parsed
+                .source
+                .as_deref()
+                .map_or(false, has_none_marker);
+        if stale_runtime_source {
+            return;
+        }
+
+        // Production path must be non-UI: ignore UI poll/counter-fallback metrics.
+        let is_ui_origin = parsed.origin.as_deref() == Some("ui_poll")
+            || parsed.origin_flag.as_deref() == Some("ui_counter_fallback")
+            || parsed.method.as_deref() == Some("ui_poll");
+        if is_ui_origin {
+            return;
+        }
+
+        let Some(value) = parsed.value else {
+            return;
+        };
+        if !value.is_finite() || value < 0.0 {
+            return;
+        }
+
+        let low_confidence_zero = value.abs() <= 0.000001
+            && parsed.origin.as_deref() == Some("direct_pull")
+            && parsed.origin_flag.as_deref() == Some("non_ui_probe")
+            && parsed.method.as_deref().map_or(true, |m| m == "unknown");
+
+        let now = Instant::now();
+        let mut should_emit_stats = false;
+        let mut fallback_session_start_reason: Option<&'static str> = None;
+        if let Ok(mut state) = bridge_compat_state().lock() {
+            const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
+            match parsed.ev.as_str() {
+                "pull_is_in_scenario" => {
+                    let next = value >= 0.5;
+                    if state.stats.is_in_scenario != Some(next) {
+                        state.stats.is_in_scenario = Some(next);
+                        should_emit_stats = true;
+                    }
+                    if value >= 0.5 {
+                        fallback_session_start_reason = Some("bridge:pull_is_in_scenario");
+                    }
+                }
+                "pull_is_in_challenge" => {
+                    let next = value >= 0.5;
+                    if state.stats.is_in_challenge != Some(next) {
+                        state.stats.is_in_challenge = Some(next);
+                        should_emit_stats = true;
+                    }
+                    if next {
+                        fallback_session_start_reason = Some("bridge:pull_is_in_challenge");
+                    }
+                }
+                "pull_is_in_scenario_editor" => {
+                    let next = value >= 0.5;
+                    if state.stats.is_in_scenario_editor != Some(next) {
+                        state.stats.is_in_scenario_editor = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_is_in_trainer" => {
+                    let next = value >= 0.5;
+                    if state.stats.is_in_trainer != Some(next) {
+                        state.stats.is_in_trainer = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_scenario_is_paused" => {
+                    let next = value >= 0.5;
+                    if state.stats.scenario_is_paused != Some(next) {
+                        state.stats.scenario_is_paused = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_scenario_is_enabled" => {
+                    let next = value >= 0.5;
+                    if state.stats.scenario_is_enabled != Some(next) {
+                        state.stats.scenario_is_enabled = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_scenario_play_type" => {
+                    let next = value.round() as i32;
+                    if state.stats.scenario_play_type != Some(next) {
+                        state.stats.scenario_play_type = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_shots_hit_total" => {
+                    let next = value.max(0.0).round() as u32;
+                    let suppress = low_confidence_zero
+                        && next == 0
+                        && state.stats.accuracy_hits.map_or(false, |prev| prev > 0);
+                    if !suppress && state.stats.accuracy_hits != Some(next) {
+                        state.stats.accuracy_hits = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_shots_fired_total" => {
+                    let next = value.max(0.0).round() as u32;
+                    let suppress = low_confidence_zero
+                        && next == 0
+                        && state.stats.accuracy_shots.map_or(false, |prev| prev > 0);
+                    if !suppress && state.stats.accuracy_shots != Some(next) {
+                        state.stats.accuracy_shots = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_kills_total" => {
+                    let next = value.max(0.0).round() as u32;
+                    let prev = state.stats.kills.unwrap_or(0);
+                    let suppress = low_confidence_zero
+                        && next == 0
+                        && state.stats.kills.map_or(false, |prev| prev > 0);
+                    if !suppress && state.stats.kills != Some(next) {
+                        state.stats.kills = Some(next);
+                        should_emit_stats = true;
+                        if next > prev && next > 0 {
+                            fallback_session_start_reason = Some("bridge:pull_kills_total");
+                        }
+                    }
+                }
+                "pull_kills_per_second" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state.stats.kps.map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state.stats.kps.map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.kps = Some(value);
+                        should_emit_stats = true;
+                    }
+                    if value > 0.000001 {
+                        let ttk_secs = 1.0 / value;
+                        if ttk_secs.is_finite()
+                            && ttk_secs > 0.0
+                            && ttk_secs < 120.0
+                            && !state
+                                .stats
+                                .ttk_secs
+                                .map_or(false, |prev| (prev - ttk_secs).abs() <= 0.0001)
+                        {
+                            state.stats.ttk_secs = Some(ttk_secs);
+                            should_emit_stats = true;
+                        }
+                    }
+                }
+                "pull_score_per_minute" => {
+                    if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
+                        state.stats.spm,
+                        value,
+                        now,
+                        state.last_nonzero_spm,
+                        ZERO_SUPPRESS,
+                        low_confidence_zero,
+                    ) {
+                        state.last_nonzero_spm = next_last_nonzero;
+                        state.stats.spm = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_damage_done" => {
+                    if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
+                        state.stats.damage_dealt,
+                        value,
+                        now,
+                        state.last_nonzero_damage_done,
+                        ZERO_SUPPRESS,
+                        low_confidence_zero,
+                    ) {
+                        state.last_nonzero_damage_done = next_last_nonzero;
+                        state.stats.damage_dealt = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_damage_possible" => {
+                    if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
+                        state.stats.damage_total,
+                        value,
+                        now,
+                        state.last_nonzero_damage_total,
+                        ZERO_SUPPRESS,
+                        low_confidence_zero,
+                    ) {
+                        state.last_nonzero_damage_total = next_last_nonzero;
+                        state.stats.damage_total = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_seconds_total" => {
+                    if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
+                        state.stats.session_time_secs,
+                        value,
+                        now,
+                        state.last_nonzero_seconds,
+                        ZERO_SUPPRESS,
+                        low_confidence_zero,
+                    ) {
+                        state.last_nonzero_seconds = next_last_nonzero;
+                        state.stats.session_time_secs = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_challenge_seconds_total" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state
+                            .stats
+                            .challenge_seconds_total
+                            .map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .challenge_seconds_total
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.challenge_seconds_total = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_challenge_time_length" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state
+                            .stats
+                            .challenge_time_length
+                            .map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .challenge_time_length
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.challenge_time_length = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_challenge_average_fps" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state
+                            .stats
+                            .challenge_average_fps
+                            .map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .challenge_average_fps
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.challenge_average_fps = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_challenge_tick_count_total" => {
+                    let next = value.max(0.0).round() as u32;
+                    let suppress = low_confidence_zero
+                        && next == 0
+                        && state
+                            .stats
+                            .challenge_tick_count_total
+                            .map_or(false, |prev| prev > 0);
+                    if !suppress && state.stats.challenge_tick_count_total != Some(next) {
+                        state.stats.challenge_tick_count_total = Some(next);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_random_sens_scale" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state
+                            .stats
+                            .random_sens_scale
+                            .map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .random_sens_scale
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.random_sens_scale = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_time_remaining" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state.stats.time_remaining.map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .time_remaining
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.time_remaining = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_queue_time_remaining" => {
+                    let suppress = low_confidence_zero
+                        && value <= 0.000001
+                        && state
+                            .stats
+                            .queue_time_remaining
+                            .map_or(false, |prev| prev > 0.0);
+                    if !suppress
+                        && !state
+                            .stats
+                            .queue_time_remaining
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                    {
+                        state.stats.queue_time_remaining = Some(value);
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_score_total" | "pull_score_total_derived" => {
+                    let prev_score = state.live_score_total;
+                    if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
+                        state.live_score_total,
+                        value,
+                        now,
+                        state.last_nonzero_score_total,
+                        ZERO_SUPPRESS,
+                        low_confidence_zero,
+                    ) {
+                        state.last_nonzero_score_total = next_last_nonzero;
+                        state.live_score_total = Some(value);
+                        if value > 0.0001
+                            && prev_score.map_or(true, |prev| value > prev + 0.0001)
+                        {
+                            fallback_session_start_reason = Some("bridge:pull_score_total");
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if let (Some(hits), Some(shots)) = (state.stats.accuracy_hits, state.stats.accuracy_shots) {
+                let next_pct = if shots > 0 {
+                    Some((hits as f64 / shots as f64) * 100.0)
+                } else {
+                    Some(0.0)
+                };
+                if state
+                    .stats
+                    .accuracy_pct
+                    .map_or(true, |prev| next_pct.map_or(true, |n| (prev - n).abs() > 0.0001))
+                {
+                    state.stats.accuracy_pct = next_pct;
+                    should_emit_stats = true;
+                }
+            }
+
+            let inferred = infer_scenario_type(&state.stats).to_string();
+            if state.stats.scenario_type != inferred {
+                state.stats.scenario_type = inferred;
+                should_emit_stats = true;
+            }
+
+            let next_game_state = derive_game_state(&state.stats).to_string();
+            if state.stats.game_state != next_game_state {
+                state.stats.game_state = next_game_state;
+                should_emit_stats = true;
+            }
+
+            if should_emit_stats {
+                let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+            }
+
+            // Authoritative score must come from the mod side (`pull_score_total`
+            // or `pull_score_total_derived`). Do not recompute it in Tauri.
+            let mut live_score = state.live_score_total;
+            if let Some(score) = live_score {
+                if !score.is_finite() || score < 0.0 {
+                    live_score = None;
+                }
+            }
+            if let Some(mut score) = live_score {
+                if let Some(prev) = state.last_emitted_live_score {
+                    // Guard against transient regressions from mixed direct/UI pulls.
+                    if score + 0.0001 < prev {
+                        score = prev;
+                    }
+                }
+                if !state
+                    .last_emitted_live_score
+                    .map_or(false, |prev| (prev - score).abs() <= 0.0001)
+                {
+                    state.last_emitted_live_score = Some(score);
+                    let payload = super::BridgeLiveScoreEvent {
+                        kind: "score_total".to_string(),
+                        score,
+                        raw_text: parsed.raw.clone(),
+                    };
+                    let _ = app.emit(super::EVENT_LIVE_SCORE, &payload);
+                }
+            }
+        }
+
+        if let Some(reason) = fallback_session_start_reason {
+            begin_session_tracking(app, reason, false);
+        }
+    }
 
     fn log_ring() -> &'static Mutex<VecDeque<String>> {
         static RING: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
@@ -254,8 +1275,9 @@ mod imp {
     fn read_events(pipe: HANDLE, app: &AppHandle) {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut tmp = [0u8; 512];
+        let mut nread: u32 = 0;
         loop {
-            let mut nread = 0u32;
+            nread = 0;
             match unsafe { ReadFile(pipe, Some(&mut tmp), Some(&mut nread), None) } {
                 Ok(_) if nread > 0 => {
                     buf.extend_from_slice(&tmp[..nread as usize]);
@@ -263,14 +1285,35 @@ mod imp {
                     while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                         let chunk: Vec<u8> = buf.drain(..=nl).collect();
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
-                            log::info!("bridge event: {s}");
-                            emit_ue4ss_log(app, format!("[bridge] {s}"));
-                            let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
-                            if let Some(parsed) = super::parse_bridge_payload(s) {
+                            let parsed_event = super::parse_bridge_payload(s);
+                            let is_noisy_bridge_event = |ev: &str| {
+                                matches!(
+                                    ev,
+                                    "process_event_activity"
+                                        | "hook_probe"
+                                        | "hook_focus_probe"
+                                        | "hook_focus_probe_typed"
+                                        | "class_hook_probe"
+                                        | "script_hook_probe"
+                                )
+                            };
+                            let suppress_bridge_log_event = parsed_event
+                                .as_ref()
+                                .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
+                            if !suppress_bridge_log_event {
+                                log::info!("bridge event: {s}");
+                                emit_ue4ss_log(app, format!("[bridge] {s}"));
+                                let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
+                            }
+                            if let Some(parsed) = parsed_event {
+                                if is_noisy_bridge_event(&parsed.ev) {
+                                    continue;
+                                }
                                 let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
                                 if super::is_metric_event_name(&parsed.ev) {
                                     let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
                                 }
+                                emit_bridge_compat_events(app, &parsed);
                             }
                         }
                     }
@@ -375,13 +1418,13 @@ mod imp {
         let managed_rust_core = game_bin_dir.join("kovaaks_rust_core.dll");
         if !managed_mod_dll.is_file() {
             return Err(format!(
-                "Managed mod DLL missing after sync: {}",
+                "Runtime DLL missing after sync: {}",
                 managed_mod_dll.display()
             ));
         }
         if !managed_mod_enabled.is_file() {
             return Err(format!(
-                "Managed mod enabled marker missing after sync: {}",
+                "Runtime enabled marker missing after sync: {}",
                 managed_mod_enabled.display()
             ));
         }
@@ -392,7 +1435,7 @@ mod imp {
             ));
         }
         emit_bridge_log_line(format!(
-            "[bridge] managed mod payload present: main.dll={} enabled.txt={} rust_core={}",
+            "[bridge] runtime payload present: main.dll={} enabled.txt={} rust_core={}",
             managed_mod_dll.display(),
             managed_mod_enabled.display(),
             managed_rust_core.display()
@@ -405,19 +1448,19 @@ mod imp {
         let payload_rust_core = payload_root.join("kovaaks_rust_core.dll");
         if payload_mod_dll.is_file() {
             match files_identical(&payload_mod_dll, &managed_mod_dll) {
-                Ok(true) => emit_bridge_log_line("[bridge] managed mod dll is up to date"),
+                Ok(true) => emit_bridge_log_line("[bridge] runtime DLL is up to date"),
                 Ok(false) => {
                     log::warn!(
-                        "bridge: managed mod DLL differs from staged payload (likely locked while running): {}",
+                        "bridge: runtime DLL differs from staged payload (likely locked while running): {}",
                         managed_mod_dll.display()
                     );
                     emit_bridge_log_line(format!(
-                        "[bridge] warning: managed mod dll differs from staged payload; restart game to apply: {}",
+                        "[bridge] warning: runtime DLL differs from staged payload; restart game to apply: {}",
                         managed_mod_dll.display()
                     ));
                 }
                 Err(e) => {
-                    log::warn!("bridge: could not compare managed mod DLLs: {e}");
+                    log::warn!("bridge: could not compare runtime DLLs: {e}");
                 }
             }
         }
@@ -729,7 +1772,7 @@ mod imp {
         }
 
         if find_loaded_module(pid, UE4SS_DLL).is_none() {
-            return Err("UE4SS.dll is not loaded; inject bridge first".to_string());
+            return Err("AimMod runtime is not loaded; launch AimMod first".to_string());
         }
 
         if find_process(GAME_EXE).is_none() {
@@ -796,6 +1839,14 @@ mod imp {
         Ok(())
     }
 
+    pub fn current_game_pid() -> Option<u32> {
+        find_process(GAME_EXE)
+    }
+
+    pub fn is_ue4ss_loaded_for_pid(pid: u32) -> bool {
+        find_loaded_module(pid, UE4SS_DLL).is_some()
+    }
+
     pub fn get_runtime_flags(stats_dir: &str) -> Result<super::RuntimeFlagState, String> {
         let game_bin_dir = resolve_game_bin_dir(stats_dir)?;
         let state = read_runtime_flags_for_dir(&game_bin_dir);
@@ -838,6 +1889,10 @@ mod imp {
         let profile = std::fs::read_to_string(game_bin_dir.join(PAYLOAD_PROFILE_FILE))
             .map(|s| s.trim().to_ascii_lowercase())
             .unwrap_or_else(|_| "unknown".to_string());
+        let detour_callbacks = game_bin_dir
+            .join("kovaaks_enable_detour_callbacks.flag")
+            .is_file();
+        let hook_process_event_legacy = game_bin_dir.join("kovaaks_hook_process_event.flag").is_file();
         super::RuntimeFlagState {
             profile,
             enable_pe_hook: game_bin_dir.join("kovaaks_enable_pe_hook.flag").is_file(),
@@ -855,60 +1910,85 @@ mod imp {
                 .join("kovaaks_hook_process_local_script.flag")
                 .is_file(),
             class_probe_hooks: game_bin_dir.join("kovaaks_class_probe_hooks.flag").is_file(),
+            class_probe_scalar_reads: game_bin_dir
+                .join("kovaaks_class_probe_scalar_reads.flag")
+                .is_file(),
+            class_probe_scan_all: game_bin_dir.join("kovaaks_class_probe_scan_all.flag").is_file(),
             allow_unsafe_hooks: game_bin_dir.join("kovaaks_allow_unsafe_hooks.flag").is_file(),
             native_hooks: game_bin_dir.join("kovaaks_native_hooks.flag").is_file(),
-            hook_process_event: game_bin_dir.join("kovaaks_hook_process_event.flag").is_file(),
+            hook_process_event: detour_callbacks || hook_process_event_legacy,
+            detour_callbacks,
+            direct_pull_invoke: game_bin_dir
+                .join("kovaaks_enable_direct_pull_invoke.flag")
+                .is_file(),
+            experimental_runtime: game_bin_dir
+                .join("kovaaks_enable_experimental_runtime.flag")
+                .is_file(),
             ui_settext_hook: game_bin_dir.join("kovaaks_ui_settext_hook.flag").is_file(),
+            ui_widget_probe: game_bin_dir.join("kovaaks_ui_widget_probe.flag").is_file(),
+            in_game_overlay: game_bin_dir.join("kovaaks_in_game_overlay.flag").is_file(),
         }
     }
 
     pub fn set_runtime_flag(stats_dir: &str, key: &str, enabled: bool) -> Result<(), String> {
         let game_bin_dir = resolve_game_bin_dir(stats_dir)?;
-        let file = match key {
-            "enable_pe_hook" => "kovaaks_enable_pe_hook.flag",
-            "disable_pe_hook" => "kovaaks_disable_pe_hook.flag",
-            "discovery" => "kovaaks_discovery.flag",
-            "safe_mode" => "kovaaks_safe_mode.flag",
-            "no_rust" => "kovaaks_no_rust.flag",
-            "log_all_events" => "kovaaks_log_all_events.flag",
-            "object_debug" => "kovaaks_object_debug.flag",
-            "non_ui_probe" => "kovaaks_non_ui_probe.flag",
-            "ui_counter_fallback" => "kovaaks_ui_counter_fallback.flag",
-            "score_ui_fallback" => "kovaaks_score_ui_fallback.flag",
-            "hook_process_internal" => "kovaaks_hook_process_internal.flag",
-            "hook_process_local_script" => "kovaaks_hook_process_local_script.flag",
-            "class_probe_hooks" => "kovaaks_class_probe_hooks.flag",
-            "allow_unsafe_hooks" => "kovaaks_allow_unsafe_hooks.flag",
-            "native_hooks" => "kovaaks_native_hooks.flag",
-            "hook_process_event" => "kovaaks_hook_process_event.flag",
-            "ui_settext_hook" => "kovaaks_ui_settext_hook.flag",
+        let files: Vec<&str> = match key {
+            "enable_pe_hook" => vec!["kovaaks_enable_pe_hook.flag"],
+            "disable_pe_hook" => vec!["kovaaks_disable_pe_hook.flag"],
+            "discovery" => vec!["kovaaks_discovery.flag"],
+            "safe_mode" => vec!["kovaaks_safe_mode.flag"],
+            "no_rust" => vec!["kovaaks_no_rust.flag"],
+            "log_all_events" => vec!["kovaaks_log_all_events.flag"],
+            "object_debug" => vec!["kovaaks_object_debug.flag"],
+            "non_ui_probe" => vec!["kovaaks_non_ui_probe.flag"],
+            "ui_counter_fallback" => vec!["kovaaks_ui_counter_fallback.flag"],
+            "score_ui_fallback" => vec!["kovaaks_score_ui_fallback.flag"],
+            "hook_process_internal" => vec!["kovaaks_hook_process_internal.flag"],
+            "hook_process_local_script" => vec!["kovaaks_hook_process_local_script.flag"],
+            "class_probe_hooks" => vec!["kovaaks_class_probe_hooks.flag"],
+            "class_probe_scalar_reads" => vec!["kovaaks_class_probe_scalar_reads.flag"],
+            "class_probe_scan_all" => vec!["kovaaks_class_probe_scan_all.flag"],
+            "allow_unsafe_hooks" => vec!["kovaaks_allow_unsafe_hooks.flag"],
+            "native_hooks" => vec!["kovaaks_native_hooks.flag"],
+            "hook_process_event" | "detour_callbacks" => vec![
+                "kovaaks_enable_detour_callbacks.flag",
+                "kovaaks_hook_process_event.flag",
+            ],
+            "direct_pull_invoke" => vec!["kovaaks_enable_direct_pull_invoke.flag"],
+            "experimental_runtime" => vec!["kovaaks_enable_experimental_runtime.flag"],
+            "ui_settext_hook" => vec!["kovaaks_ui_settext_hook.flag"],
+            "ui_widget_probe" => vec!["kovaaks_ui_widget_probe.flag"],
+            "in_game_overlay" => vec!["kovaaks_in_game_overlay.flag"],
             _ => return Err(format!("Unknown UE4SS runtime flag key: {key}")),
         };
-        let path = game_bin_dir.join(file);
-        if enabled {
-            std::fs::write(&path, b"1")
-                .map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
-            log::info!("bridge: set runtime flag {}=1 ({})", key, path.display());
+
+        let mut touched_any = false;
+        for file in files {
+            let path = game_bin_dir.join(file);
+            if enabled {
+                std::fs::write(&path, b"1")
+                    .map_err(|e| format!("Failed to create {}: {}", path.display(), e))?;
+                touched_any = true;
+            } else if path.exists() {
+                std::fs::remove_file(&path)
+                    .map_err(|e| format!("Failed to remove {}: {}", path.display(), e))?;
+                touched_any = true;
+            }
+        }
+
+        if touched_any {
+            log::info!("bridge: set runtime flag {}={} (updated)", key, if enabled { 1 } else { 0 });
             emit_bridge_log_line(format!(
-                "[bridge] runtime flag set {}=1 ({})",
+                "[bridge] runtime flag set {}={} (updated)",
                 key,
-                path.display()
-            ));
-        } else if path.exists() {
-            std::fs::remove_file(&path)
-                .map_err(|e| format!("Failed to remove {}: {}", path.display(), e))?;
-            log::info!("bridge: set runtime flag {}=0 ({})", key, path.display());
-            emit_bridge_log_line(format!(
-                "[bridge] runtime flag set {}=0 ({})",
-                key,
-                path.display()
+                if enabled { 1 } else { 0 }
             ));
         } else {
-            log::info!("bridge: runtime flag {} already 0 ({})", key, path.display());
+            log::info!("bridge: runtime flag {} already {}", key, if enabled { 1 } else { 0 });
             emit_bridge_log_line(format!(
-                "[bridge] runtime flag already {}=0 ({})",
+                "[bridge] runtime flag already {}={}",
                 key,
-                path.display()
+                if enabled { 1 } else { 0 }
             ));
         }
         Ok(())
@@ -1164,13 +2244,13 @@ mod imp {
             if let Err(e) = std::fs::remove_dir_all(&dst_mod_dir) {
                 if tolerate_locked_files && is_permission_denied(&e) {
                     log::warn!(
-                        "bridge: could not replace managed mod directory (in use): {} ({})",
+                        "bridge: could not replace runtime directory (in use): {} ({})",
                         dst_mod_dir.display(),
                         e
                     );
                 } else {
                     return Err(format!(
-                        "Failed to replace managed mod directory {}: {}",
+                        "Failed to replace runtime directory {}: {}",
                         dst_mod_dir.display(),
                         e
                     ));
@@ -1306,7 +2386,7 @@ mod imp {
         for name in legacy_mods {
             let _ = remove_path_if_exists(&mods_root.join(name), tolerate_locked_files)?;
         }
-        // Remove duplicate copies of our managed mod left behind under alternate
+        // Remove duplicate copies of the runtime package left behind under alternate
         // folder names by older experiments.
         if let Ok(entries) = std::fs::read_dir(&mods_root) {
             for entry in entries.flatten() {
@@ -1328,7 +2408,7 @@ mod imp {
                 if content.contains("\"mod_name\"") && content.contains("KovaaksBridgeMod") {
                     let _ = remove_path_if_exists(&path, tolerate_locked_files)?;
                     log::warn!(
-                        "bridge: removed duplicate managed mod directory {}",
+                        "bridge: removed duplicate runtime directory {}",
                         path.display()
                     );
                 }
@@ -1708,7 +2788,7 @@ mod imp {
             return true;
         }
 
-        // Managed mod + mods manifest only.
+        // Runtime package + manifest only.
         if rel == "Mods" && is_dir {
             return true;
         }
@@ -1784,6 +2864,26 @@ pub fn trigger_hot_reload() -> Result<(), String> {
 }
 
 #[cfg(target_os = "windows")]
+pub fn current_game_pid() -> Option<u32> {
+    imp::current_game_pid()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_game_pid() -> Option<u32> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_ue4ss_loaded_for_pid(pid: u32) -> bool {
+    imp::is_ue4ss_loaded_for_pid(pid)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_ue4ss_loaded_for_pid(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
 pub fn get_runtime_flags(stats_dir: &str) -> Result<RuntimeFlagState, String> {
     imp::get_runtime_flags(stats_dir)
 }
@@ -1805,10 +2905,17 @@ pub fn get_runtime_flags(_stats_dir: &str) -> Result<RuntimeFlagState, String> {
         hook_process_internal: false,
         hook_process_local_script: false,
         class_probe_hooks: false,
+        class_probe_scalar_reads: false,
+        class_probe_scan_all: false,
         allow_unsafe_hooks: false,
         native_hooks: false,
         hook_process_event: false,
+        detour_callbacks: false,
+        direct_pull_invoke: false,
+        experimental_runtime: false,
         ui_settext_hook: false,
+        ui_widget_probe: false,
+        in_game_overlay: false,
     })
 }
 

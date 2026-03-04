@@ -5,12 +5,11 @@
 ///   https://steamcommunity.com/id/<vanityurl>/?xml=1
 ///
 /// Accepts Steam 64-bit IDs, vanity URL slugs, or full steamcommunity.com URLs.
-
 use once_cell::sync::Lazy;
 
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .user_agent("kovaaks-overlay/0.1")
+        .user_agent("aimmod/1.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client")
@@ -38,7 +37,11 @@ pub async fn resolve_steam_user(input: &str) -> anyhow::Result<SteamProfile> {
 
     // Strip full steamcommunity.com URLs to their last path segment.
     let slug = if input.contains("steamcommunity.com") {
-        input.trim_end_matches('/').rsplit('/').next().unwrap_or(input)
+        input
+            .trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .unwrap_or(input)
     } else {
         input
     };
@@ -63,7 +66,12 @@ pub async fn resolve_steam_user(input: &str) -> anyhow::Result<SteamProfile> {
     let avatar_url = extract_cdata(&body, "avatarFull").unwrap_or_default();
     let custom_url = extract_cdata(&body, "customURL").unwrap_or_default();
 
-    Ok(SteamProfile { steam_id, display_name, avatar_url, custom_url })
+    Ok(SteamProfile {
+        steam_id,
+        display_name,
+        avatar_url,
+        custom_url,
+    })
 }
 
 /// Returns `true` if `s` is a Steam 64-bit ID (17 digits, starts with 7656119).

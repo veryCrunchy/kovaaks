@@ -2,8 +2,10 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+
 import { useLiveScore } from "../hooks/useLiveScore";
 import type { FriendProfile } from "../types/friends";
+import { logError } from "../log";
 
 interface VSModeProps {
   currentScenario: string | null;
@@ -44,7 +46,9 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
           if (match) setSelectedFriend(match);
         }
       })
-      .catch(console.error);
+      .catch((err) => {
+        logError("VSMode", `Failed to load friends/settings: ${err && err.message ? err.message : err}`);
+      });
   }, []);
 
   // Live-update selected friend when changed from Settings panel
@@ -63,7 +67,9 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
             setSelectedFriend(null);
           }
         })
-        .catch(console.error);
+        .catch((err) => {
+          logError("VSMode", `Failed to update selected friend: ${err && err.message ? err.message : err}`);
+        });
     });
     return () => { unlisten.then((fn) => fn()); };
   }, []);
@@ -88,7 +94,13 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
       scenarioName: currentScenario,
     })
       .then((score) => setFriendScore(score))
-      .catch(() => setFriendScore(null))
+      .catch((err) => {
+        setFriendScore(null);
+        logError(
+          "VSMode",
+          `Failed to fetch friend score for ${selectedFriend.username} / ${currentScenario}: ${err && err.message ? err.message : err}`
+        );
+      })
       .finally(() => setFetchingFriend(false));
   }, [selectedFriend?.username, currentScenario]);
 
@@ -101,7 +113,12 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
         scenarioName: currentScenario,
       })
         .then((score) => setFriendScore(score))
-        .catch(() => {});
+        .catch((err) => {
+          logError(
+            "VSMode",
+            `Periodic fetch_friend_score failed for ${selectedFriend.username} / ${currentScenario}: ${err && err.message ? err.message : err}`
+          );
+        });
     }, 30_000);
     return () => clearInterval(id);
   }, [isSessionActive, selectedFriend?.username, currentScenario]);

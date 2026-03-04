@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "KovaaKs Overlay",
-  "version": "0.8.1",
+  "productName": "AimMod",
+  "version": "1.0.0",
   "identifier": "com.verycrunchy.kovaaks",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "overlay",
-        "title": "KovaaK's Overlay",
+        "title": "AimMod",
         "url": "index.html",
         "transparent": true,
         "decorations": false,
@@ -25,7 +25,7 @@
       },
       {
         "label": "logs",
-        "title": "KovaaK's Overlay — Logs",
+        "title": "AimMod — Logs",
         "url": "logs.html",
         "decorations": true,
         "alwaysOnTop": false,
@@ -36,7 +36,7 @@
       },
       {
         "label": "stats",
-        "title": "KovaaK's Overlay — Session Stats",
+        "title": "AimMod — Session Stats",
         "url": "stats.html",
         "decorations": true,
         "alwaysOnTop": false,
@@ -58,6 +58,9 @@
     "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
+    ],
+    "resources": [
+      "ue4ss"
     ],
     "icon": [
       "icons/32x32.png",

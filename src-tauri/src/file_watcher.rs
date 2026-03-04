@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+use tauri::Manager;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use once_cell::sync::Lazy;
@@ -35,8 +36,7 @@ static WATCHER: Lazy<Mutex<Option<RecommendedWatcher>>> = Lazy::new(|| Mutex::ne
 /// Tracks the last time each stats CSV path was fully processed so duplicate
 /// fs-events (Create then Modify for the same file) are silently ignored.
 /// The same file must not be reprocessed within 10 seconds.
-static PROCESSED: Lazy<Mutex<HashMap<PathBuf, Instant>>> =
-    Lazy::new(|| Mutex::new(HashMap::new()));
+static PROCESSED: Lazy<Mutex<HashMap<PathBuf, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 const DEDUP_WINDOW: Duration = Duration::from_secs(10);
 // ─── Public API ────────────────────────────────────────────────────────────────
@@ -117,20 +117,22 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                     std::thread::sleep(Duration::from_millis(500));
                     match parse_csv(path) {
                         Ok(result) => {
-                            log::info!("Session complete: {} score={}", result.scenario, result.score);
+                            log::info!(
+                                "Session complete: {} score={}",
+                                result.scenario,
+                                result.score
+                            );
                             // Capture smoothness summary BEFORE draining buffers
                             let smoothness = crate::mouse_hook::session_summary();
-                            // Capture stats-panel snapshot before deactivating
-                            let stats_panel = crate::stats_ocr::get_snapshot();
+                            // OCR-based stats snapshot is disabled; rely on direct bridge/memory data.
+                            let stats_panel = None;
                             // Drain path + metric + video buffers for replay persistence
                             let raw_positions = crate::mouse_hook::drain_raw_positions();
                             let metric_points = crate::mouse_hook::drain_session_buffer();
                             let screen_frames = crate::screen_recorder::drain_frames_for_replay();
-                            // Stop smoothness tracking, screen recording, and OCR session state
+                            // Stop smoothness tracking and screen recording session state
                             crate::mouse_hook::stop_session_tracking();
                             crate::screen_recorder::stop();
-                            crate::stats_ocr::set_active(false);
-                            crate::ocr::reset_session();
                             // Build session id and save replay file
                             let session_id = format!(
                                 "{}-{}",
@@ -164,6 +166,12 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             };
                             crate::session_store::add_session(app, record);
                             let _ = app.emit(EVENT_SESSION_COMPLETE, &result);
+                            // Bring the stats window to the foreground so the
+                            // user sees results immediately without manual action.
+                            if let Some(win) = app.get_webview_window("stats") {
+                                let _ = win.show();
+                                let _ = win.set_focus();
+                            }
                         }
                         Err(e) => {
                             log::warn!("Failed to parse stats CSV {}: {e}", path.display());
@@ -337,11 +345,7 @@ fn parse_filename(stem: &str) -> (String, String) {
 /// Remove trailing KovaaK's file-variant suffixes from a parsed scenario name.
 /// Order matters: longer/more-specific first.
 pub fn strip_challenge_suffix(name: &str) -> String {
-    const SUFFIXES: &[&str] = &[
-        " - Challenge Start",
-        " - Challenge End",
-        " - Challenge",
-    ];
+    const SUFFIXES: &[&str] = &[" - Challenge Start", " - Challenge End", " - Challenge"];
     for suffix in SUFFIXES {
         if let Some(base) = name.strip_suffix(suffix) {
             return base.to_string();
@@ -391,9 +395,8 @@ mod tests {
     #[test]
     fn parse_filename_challenge_stats_suffix() {
         // Variant emitted by newer KovaaK's builds
-        let (scenario, ts) = parse_filename(
-            "VT Aether Novice S5 - Challenge - 2026.02.25-12.10.59 Stats",
-        );
+        let (scenario, ts) =
+            parse_filename("VT Aether Novice S5 - Challenge - 2026.02.25-12.10.59 Stats");
         assert_eq!(scenario, "VT Aether Novice S5");
         assert_eq!(ts, "2026.02.25-12.10.59");
     }

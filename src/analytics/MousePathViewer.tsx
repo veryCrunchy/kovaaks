@@ -54,30 +54,38 @@ function speedColor(t: number, alpha = 1): string {
 function detectOvershoots(pts: RawPositionPoint[]): OvershootMarker[] {
   if (pts.length < 4) return [];
   const markers: OvershootMarker[] = [];
+  const n = pts.length;
 
-  for (let i = 1; i < pts.length - 2; i++) {
-    const prev = pts[i - 1];
-    const cur  = pts[i];
-    const next = pts[i + 1];
+  // Pre-compute per-segment velocities so we only do the arithmetic once.
+  const vx: number[] = new Array(n - 1);
+  const vy: number[] = new Array(n - 1);
+  const spd: number[] = new Array(n - 1);
+  let speedSum = 0;
+  for (let i = 0; i < n - 1; i++) {
+    const dt = Math.max((pts[i + 1].timestamp_ms - pts[i].timestamp_ms) / 1000, 0.001);
+    vx[i] = (pts[i + 1].x - pts[i].x) / dt;
+    vy[i] = (pts[i + 1].y - pts[i].y) / dt;
+    spd[i] = Math.hypot(vx[i], vy[i]);
+    speedSum += spd[i];
+  }
+  const meanSpeed = speedSum / Math.max(n - 1, 1);
 
-    const dt1 = Math.max((cur.timestamp_ms  - prev.timestamp_ms) / 1000, 0.001);
-    const dt2 = Math.max((next.timestamp_ms - cur.timestamp_ms)  / 1000, 0.001);
+  // Adaptive speed gate: must be at least 30 % of mean session speed.
+  // The old absolute 30 px/s passed even micro-corrections at 30 fps sampling
+  // (1 px/frame = ~900 px/s), making nearly every sample qualify.
+  const spdThreshold = Math.max(meanSpeed * 0.30, 100);
 
-    const vx1 = (cur.x  - prev.x) / dt1;
-    const vy1 = (cur.y  - prev.y) / dt1;
-    const vx2 = (next.x - cur.x)  / dt2;
-    const vy2 = (next.y - cur.y)  / dt2;
+  for (let i = 0; i < n - 2; i++) {
+    if (spd[i] < spdThreshold || spd[i + 1] < spdThreshold) continue;
 
-    const spd1 = Math.hypot(vx1, vy1);
-    const spd2 = Math.hypot(vx2, vy2);
+    // A click at or adjacent to the reversal point means the cursor just
+    // acquired a target and is heading to the next one — not an overshoot.
+    if (pts[i].is_click || pts[i + 1].is_click || pts[i + 2].is_click) continue;
 
-    // Require both segments to be moving meaningfully
-    if (spd1 < 30 || spd2 < 30) continue;
-
-    const dot = (vx1 * vx2 + vy1 * vy2) / (spd1 * spd2);
-    // Dot product < -0.5 ≈ angle > 120° = sharp reversal → overshoot
+    const dot = (vx[i] * vx[i + 1] + vy[i] * vy[i + 1]) / (spd[i] * spd[i + 1]);
+    // Angle > 120° = sharp reversal → overshoot
     if (dot < -0.5) {
-      markers.push({ x: cur.x, y: cur.y, timestamp_ms: cur.timestamp_ms });
+      markers.push({ x: pts[i + 1].x, y: pts[i + 1].y, timestamp_ms: pts[i + 1].timestamp_ms });
       i += 2; // skip ahead to avoid duplicate markers in the same reversal
     }
   }

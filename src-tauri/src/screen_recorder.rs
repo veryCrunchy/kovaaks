@@ -1,3 +1,4 @@
+use std::sync::Mutex;
 /// Screen recorder: captures a low-resolution JPEG snapshot of the game's centre
 /// region at 5 fps during active sessions, for post-session mouse-path underlay.
 ///
@@ -12,7 +13,6 @@
 /// Capture region: 50% of the game monitor's width and height centred on the
 /// screen.  This keeps targets in frame without capturing large static borders.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
@@ -46,14 +46,14 @@ const JPEG_QUALITY: u8 = 65;
 
 // ─── State ─────────────────────────────────────────────────────────────────────
 
-static RECORDING:      AtomicBool                      = AtomicBool::new(false);
+static RECORDING: AtomicBool = AtomicBool::new(false);
 /// Incremented on every `start()` call.  Each spawned thread captures its own
 /// generation ID and exits as soon as it sees a newer generation — guaranteeing
 /// that only one recording thread is ever active at a time.
-static GENERATION:     AtomicU64                       = AtomicU64::new(0);
-static CAPTURE_RECT:   Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
-static FRAMES:         Lazy<Mutex<Vec<ScreenFrame>>>   = Lazy::new(|| Mutex::new(Vec::new()));
-static SESSION_START:  Lazy<Mutex<Option<Instant>>>    = Lazy::new(|| Mutex::new(None));
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+static CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
+static FRAMES: Lazy<Mutex<Vec<ScreenFrame>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static SESSION_START: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
@@ -63,14 +63,22 @@ static SESSION_START:  Lazy<Mutex<Option<Instant>>>    = Lazy::new(|| Mutex::new
 /// enough to show where targets are appearing while avoiding static UI chrome at
 /// the edges.  Call this whenever the user changes monitor in Settings.
 pub fn update_monitor_rect(monitor: &RegionRect) {
-    let cap_w = (monitor.width  / 2).max(320);
+    let cap_w = (monitor.width / 2).max(320);
     let cap_h = (monitor.height / 2).max(180);
-    let cap_x = monitor.x + (monitor.width  as i32 - cap_w as i32) / 2;
+    let cap_x = monitor.x + (monitor.width as i32 - cap_w as i32) / 2;
     let cap_y = monitor.y + (monitor.height as i32 - cap_h as i32) / 2;
-    let rect  = RegionRect { x: cap_x, y: cap_y, width: cap_w, height: cap_h };
+    let rect = RegionRect {
+        x: cap_x,
+        y: cap_y,
+        width: cap_w,
+        height: cap_h,
+    };
     log::info!(
         "screen_recorder: capture rect ({},{}) {}×{}",
-        rect.x, rect.y, rect.width, rect.height,
+        rect.x,
+        rect.y,
+        rect.width,
+        rect.height,
     );
     *CAPTURE_RECT.lock().unwrap() = Some(rect);
 }
@@ -151,7 +159,10 @@ fn reencode_frame(frame: ScreenFrame, out_w: u32, quality: u8) -> ScreenFrame {
         let mut buf = Vec::new();
         JpegEncoder::new_with_quality(&mut buf, quality)
             .encode_image(&image::DynamicImage::ImageRgb8(resized))?;
-        Ok(ScreenFrame { timestamp_ms: frame.timestamp_ms, jpeg_b64: base64_encode(&buf) })
+        Ok(ScreenFrame {
+            timestamp_ms: frame.timestamp_ms,
+            jpeg_b64: base64_encode(&buf),
+        })
     };
     try_it().unwrap_or(frame)
 }
@@ -205,9 +216,7 @@ fn record_loop(my_gen: u64) {
     let interval = Duration::from_millis(1000 / FPS);
     // Exit if recording was stopped *or* a newer generation has been started
     // (i.e. a new session/scenario started while we were still running).
-    while RECORDING.load(Ordering::Relaxed)
-        && GENERATION.load(Ordering::Relaxed) == my_gen
-    {
+    while RECORDING.load(Ordering::Relaxed) && GENERATION.load(Ordering::Relaxed) == my_gen {
         let t0 = Instant::now();
 
         #[cfg(all(target_os = "windows", feature = "ocr"))]
@@ -232,16 +241,20 @@ fn capture_one_frame() {
     }
     let rect = match *CAPTURE_RECT.lock().unwrap() {
         Some(r) => r,
-        None    => return,
+        None => return,
     };
     match capture_and_encode(&rect) {
         Ok(jpeg_b64) => {
             let ts_ms = SESSION_START
-                .lock().unwrap()
+                .lock()
+                .unwrap()
                 .map_or(0, |t| t.elapsed().as_millis() as u64);
             let mut frames = FRAMES.lock().unwrap();
             if frames.len() < MAX_FRAMES {
-                frames.push(ScreenFrame { timestamp_ms: ts_ms, jpeg_b64 });
+                frames.push(ScreenFrame {
+                    timestamp_ms: ts_ms,
+                    jpeg_b64,
+                });
             }
         }
         Err(e) => log::trace!("screen_recorder: capture error: {e}"),
@@ -304,9 +317,9 @@ fn capture_game_window_region(
 ) -> anyhow::Result<(Vec<u8>, u32, u32)> {
     use windows::Win32::Foundation::{POINT, RECT};
     use windows::Win32::Graphics::Gdi::{
-        BitBlt, ClientToScreen, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC,
-        DeleteObject, GetDC, GetDIBits, HDC, ReleaseDC,
-        SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ, SRCCOPY,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, BitBlt, ClientToScreen, CreateCompatibleBitmap,
+        CreateCompatibleDC, DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, HGDIOBJ,
+        ReleaseDC, SRCCOPY, SelectObject,
     };
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
 
@@ -321,8 +334,7 @@ fn capture_game_window_region(
 
     unsafe {
         let mut client_rect = RECT::default();
-        GetClientRect(hwnd, &mut client_rect)
-            .map_err(|e| anyhow::anyhow!("GetClientRect: {e}"))?;
+        GetClientRect(hwnd, &mut client_rect).map_err(|e| anyhow::anyhow!("GetClientRect: {e}"))?;
         let cw = client_rect.right - client_rect.left;
         let ch = client_rect.bottom - client_rect.top;
         anyhow::ensure!(cw > 0 && ch > 0, "game window has zero client area");
@@ -337,39 +349,57 @@ fn capture_game_window_region(
         let crop_y = (screen_rect.y - origin.y).clamp(0, ch - 1);
         let crop_w = (screen_rect.width as i32).min(cw - crop_x);
         let crop_h = (screen_rect.height as i32).min(ch - crop_y);
-        anyhow::ensure!(crop_w > 0 && crop_h > 0, "crop region is outside game window");
+        anyhow::ensure!(
+            crop_w > 0 && crop_h > 0,
+            "crop region is outside game window"
+        );
 
         // Render the full game client area into a memory DC via PrintWindow,
         // then BitBlt the desired subregion into a second DC for pixel readback.
         let screen_dc = GetDC(None);
         anyhow::ensure!(!screen_dc.is_invalid(), "GetDC(NULL) failed");
-        let mem_dc   = CreateCompatibleDC(Some(screen_dc));
+        let mem_dc = CreateCompatibleDC(Some(screen_dc));
         let full_bmp = CreateCompatibleBitmap(screen_dc, cw, ch);
         let old_full = SelectObject(mem_dc, HGDIOBJ(full_bmp.0));
         let _ = PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT);
 
-        let crop_dc  = CreateCompatibleDC(Some(screen_dc));
+        let crop_dc = CreateCompatibleDC(Some(screen_dc));
         let crop_bmp = CreateCompatibleBitmap(screen_dc, crop_w, crop_h);
         let old_crop = SelectObject(crop_dc, HGDIOBJ(crop_bmp.0));
-        let _ = BitBlt(crop_dc, 0, 0, crop_w, crop_h, Some(mem_dc), crop_x, crop_y, SRCCOPY);
+        let _ = BitBlt(
+            crop_dc,
+            0,
+            0,
+            crop_w,
+            crop_h,
+            Some(mem_dc),
+            crop_x,
+            crop_y,
+            SRCCOPY,
+        );
 
         let mut bmi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
-                biSize:        std::mem::size_of::<BITMAPINFOHEADER>() as u32,
-                biWidth:       crop_w,
-                biHeight:      -crop_h, // negative = top-down scan order
-                biPlanes:      1,
-                biBitCount:    32,
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: crop_w,
+                biHeight: -crop_h, // negative = top-down scan order
+                biPlanes: 1,
+                biBitCount: 32,
                 biCompression: BI_RGB.0,
-                biSizeImage:   (crop_w * crop_h * 4) as u32,
+                biSizeImage: (crop_w * crop_h * 4) as u32,
                 ..Default::default()
             },
             ..Default::default()
         };
         let mut pixels = vec![0u8; (crop_w * crop_h * 4) as usize];
         let lines = GetDIBits(
-            crop_dc, crop_bmp, 0, crop_h as u32,
-            Some(pixels.as_mut_ptr() as *mut _), &mut bmi, DIB_RGB_COLORS,
+            crop_dc,
+            crop_bmp,
+            0,
+            crop_h as u32,
+            Some(pixels.as_mut_ptr() as *mut _),
+            &mut bmi,
+            DIB_RGB_COLORS,
         );
 
         let _ = SelectObject(crop_dc, old_crop);
@@ -387,18 +417,25 @@ fn capture_game_window_region(
 
 /// RFC 4648 standard base64 encoder — avoids adding a dependency.
 fn base64_encode(data: &[u8]) -> String {
-    const T: &[u8] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
     for chunk in data.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
         let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n  = (b0 << 16) | (b1 << 8) | b2;
+        let n = (b0 << 16) | (b1 << 8) | b2;
         out.push(T[((n >> 18) & 63) as usize] as char);
         out.push(T[((n >> 12) & 63) as usize] as char);
-        out.push(if chunk.len() > 1 { T[((n >> 6) & 63) as usize] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[( n       & 63) as usize] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[((n >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     out
 }

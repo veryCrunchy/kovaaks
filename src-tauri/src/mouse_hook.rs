@@ -6,15 +6,14 @@
 ///
 /// Hotkeys (F8+ are free; below F8 used by KovaaK's):
 ///   F8  → toggle-settings        (open/close settings panel)
-///   F9  → open-region-picker     (jump straight to region selection)
 ///   F10 → toggle-layout-huds     (enter/exit HUD drag-to-reposition mode)
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
-use rdev::{listen, Event, EventType, Key};
+use rdev::{Event, EventType, Key, listen};
 use tauri::{AppHandle, Emitter};
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
@@ -302,12 +301,12 @@ pub fn session_summary() -> Option<crate::session_store::SmoothnessSnapshot> {
         s.session_metrics.iter().map(|p| f(p)).sum::<f32>() / n
     };
     Some(crate::session_store::SmoothnessSnapshot {
-        composite:       avg(|p| p.metrics.smoothness),
-        jitter:          avg(|p| p.metrics.jitter),
-        overshoot_rate:  avg(|p| p.metrics.overshoot_rate),
-        velocity_std:    avg(|p| p.metrics.velocity_std),
+        composite: avg(|p| p.metrics.smoothness),
+        jitter: avg(|p| p.metrics.jitter),
+        overshoot_rate: avg(|p| p.metrics.overshoot_rate),
+        velocity_std: avg(|p| p.metrics.velocity_std),
         path_efficiency: avg(|p| p.metrics.path_efficiency),
-        avg_speed:       avg(|p| p.metrics.avg_speed),
+        avg_speed: avg(|p| p.metrics.avg_speed),
         click_timing_cv: avg(|p| p.metrics.click_timing_cv),
         correction_ratio: avg(|p| p.metrics.correction_ratio),
         directional_bias: avg(|p| p.metrics.directional_bias),
@@ -354,14 +353,14 @@ fn start_raw_input_thread() {
 
 #[cfg(all(target_os = "windows", feature = "ocr"))]
 fn raw_input_loop() {
-    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DispatchMessageW, GetMessageW, RegisterClassW, TranslateMessage,
-        HWND_MESSAGE, MSG, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASS_STYLES, WNDCLASSW,
-    };
-    use windows::Win32::UI::Input::{RegisterRawInputDevices, RAWINPUTDEVICE, RIDEV_INPUTSINK};
-    use windows::core::PCWSTR;
     use std::mem::size_of;
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_INPUTSINK, RegisterRawInputDevices};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW,
+        TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASS_STYLES, WNDCLASSW,
+    };
+    use windows::core::PCWSTR;
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
@@ -369,16 +368,16 @@ fn raw_input_loop() {
         let class_name: Vec<u16> = "KovaaksRawMouse\0".encode_utf16().collect();
 
         let wc = WNDCLASSW {
-            style:          WNDCLASS_STYLES(0),
-            lpfnWndProc:    Some(raw_input_wnd_proc),
-            cbClsExtra:     0,
-            cbWndExtra:     0,
-            hInstance:      windows::Win32::Foundation::HINSTANCE(hinstance.0),
-            hIcon:          Default::default(),
-            hCursor:        Default::default(),
-            hbrBackground:  Default::default(),
-            lpszMenuName:   PCWSTR::null(),
-            lpszClassName:  PCWSTR(class_name.as_ptr()),
+            style: WNDCLASS_STYLES(0),
+            lpfnWndProc: Some(raw_input_wnd_proc),
+            cbClsExtra: 0,
+            cbWndExtra: 0,
+            hInstance: windows::Win32::Foundation::HINSTANCE(hinstance.0),
+            hIcon: Default::default(),
+            hCursor: Default::default(),
+            hbrBackground: Default::default(),
+            lpszMenuName: PCWSTR::null(),
+            lpszClassName: PCWSTR(class_name.as_ptr()),
         };
         RegisterClassW(&wc);
 
@@ -387,22 +386,31 @@ fn raw_input_loop() {
             PCWSTR(class_name.as_ptr()),
             PCWSTR::null(),
             WINDOW_STYLE(0),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             Some(HWND_MESSAGE),
-            None, Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)), None,
+            None,
+            Some(windows::Win32::Foundation::HINSTANCE(hinstance.0)),
+            None,
         ) {
-            Ok(h)  => h,
-            Err(e) => { log::error!("raw input: CreateWindowExW: {e}"); return; }
+            Ok(h) => h,
+            Err(e) => {
+                log::error!("raw input: CreateWindowExW: {e}");
+                return;
+            }
         };
 
         let dev = RAWINPUTDEVICE {
             usUsagePage: 0x01, // HID_USAGE_PAGE_GENERIC
-            usUsage:     0x02, // HID_USAGE_GENERIC_MOUSE
-            dwFlags:     RIDEV_INPUTSINK,
-            hwndTarget:  hwnd,
+            usUsage: 0x02,     // HID_USAGE_GENERIC_MOUSE
+            dwFlags: RIDEV_INPUTSINK,
+            hwndTarget: hwnd,
         };
         if let Err(e) = RegisterRawInputDevices(&[dev], size_of::<RAWINPUTDEVICE>() as u32) {
-            log::error!("raw input: RegisterRawInputDevices: {e}"); return;
+            log::error!("raw input: RegisterRawInputDevices: {e}");
+            return;
         }
 
         log::info!("Raw input mouse listener started");
@@ -416,18 +424,20 @@ fn raw_input_loop() {
 
 #[cfg(all(target_os = "windows", feature = "ocr"))]
 unsafe extern "system" fn raw_input_wnd_proc(
-    hwnd:   windows::Win32::Foundation::HWND,
-    msg:    u32,
+    hwnd: windows::Win32::Foundation::HWND,
+    msg: u32,
     wparam: windows::Win32::Foundation::WPARAM,
     lparam: windows::Win32::Foundation::LPARAM,
 ) -> windows::Win32::Foundation::LRESULT {
-    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
-    use windows::Win32::UI::Input::{GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT};
     use std::mem::size_of;
+    use windows::Win32::UI::Input::{
+        GetRawInputData, HRAWINPUT, RAWINPUT, RAWINPUTHEADER, RID_INPUT,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
 
     const WM_INPUT: u32 = 0x00FF;
     const RIM_TYPEMOUSE: u32 = 0;
-    const MOUSE_MOVE_ABSOLUTE: u16 = 0x01;          // usFlags bit — clear = relative
+    const MOUSE_MOVE_ABSOLUTE: u16 = 0x01; // usFlags bit — clear = relative
 
     if msg == WM_INPUT {
         let handle = HRAWINPUT(lparam.0 as *mut std::ffi::c_void);
@@ -438,11 +448,15 @@ unsafe extern "system" fn raw_input_wnd_proc(
         if needed > 0 && (needed as usize) <= size_of::<RAWINPUT>() {
             // Stack-allocate: RAWINPUT for mouse is ~40 bytes — well within limits.
             let mut raw = std::mem::MaybeUninit::<RAWINPUT>::zeroed();
-            let written = unsafe { GetRawInputData(
-                handle, RID_INPUT,
-                Some(raw.as_mut_ptr() as *mut _),
-                &mut needed, header_sz,
-            ) };
+            let written = unsafe {
+                GetRawInputData(
+                    handle,
+                    RID_INPUT,
+                    Some(raw.as_mut_ptr() as *mut _),
+                    &mut needed,
+                    header_sz,
+                )
+            };
             if written == needed {
                 let raw = unsafe { raw.assume_init() };
                 if raw.header.dwType == RIM_TYPEMOUSE {
@@ -459,19 +473,28 @@ unsafe extern "system" fn raw_input_wnd_proc(
                                 // Feed the metrics engine with delta-space coords so jitter/
                                 // velocity/overshoot calculations are immune to edge clamping.
                                 let (evx, evy) = (s.cursor_x, s.cursor_y);
-                                s.events.push(RawMouseEvent { x: evx, y: evy, time: now });
-                                if s.events.len() > 50_000 { s.events.drain(..10_000); }
+                                s.events.push(RawMouseEvent {
+                                    x: evx,
+                                    y: evy,
+                                    time: now,
+                                });
+                                if s.events.len() > 50_000 {
+                                    s.events.drain(..10_000);
+                                }
                                 let sample = match s.last_raw_sample {
-                                    None       => true,
-                                    Some(last) => now.duration_since(last) >= Duration::from_millis(16),
+                                    None => true,
+                                    Some(last) => {
+                                        now.duration_since(last) >= Duration::from_millis(16)
+                                    }
                                 };
                                 if sample {
-                                    let ts_ms = now
-                                        .saturating_duration_since(s.session_start)
-                                        .as_millis() as u64;
+                                    let ts_ms =
+                                        now.saturating_duration_since(s.session_start).as_millis()
+                                            as u64;
                                     let (cx, cy) = (s.cursor_x, s.cursor_y);
                                     s.raw_positions.push(RawPositionPoint {
-                                        x: cx, y: cy,
+                                        x: cx,
+                                        y: cy,
                                         timestamp_ms: ts_ms,
                                         is_click: false,
                                     });
@@ -507,7 +530,9 @@ fn mouse_event_callback(event: Event) {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
                     s.events.push(RawMouseEvent { x, y, time: now });
-                    if s.events.len() > 50_000 { s.events.drain(..10_000); }
+                    if s.events.len() > 50_000 {
+                        s.events.drain(..10_000);
+                    }
                     let dx = x - s.last_x;
                     let dy = y - s.last_y;
                     if s.last_x != 0.0 || s.last_y != 0.0 {
@@ -521,9 +546,8 @@ fn mouse_event_callback(event: Event) {
                         Some(last) => now.duration_since(last) >= Duration::from_millis(16),
                     };
                     if sample {
-                        let ts_ms = now
-                            .saturating_duration_since(s.session_start)
-                            .as_millis() as u64;
+                        let ts_ms =
+                            now.saturating_duration_since(s.session_start).as_millis() as u64;
                         let cx = s.cursor_x;
                         let cy = s.cursor_y;
                         s.raw_positions.push(RawPositionPoint {
@@ -547,12 +571,12 @@ fn mouse_event_callback(event: Event) {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
                     s.click_times.push_back(now);
-                    if s.click_times.len() > 500 { s.click_times.pop_front(); }
+                    if s.click_times.len() > 500 {
+                        s.click_times.pop_front();
+                    }
                     s.lmb_down_at = Some(now);
                     // Record click position in the raw-positions buffer
-                    let ts_ms = now
-                        .saturating_duration_since(s.session_start)
-                        .as_millis() as u64;
+                    let ts_ms = now.saturating_duration_since(s.session_start).as_millis() as u64;
                     let click_x = s.cursor_x;
                     let click_y = s.cursor_y;
                     s.raw_positions.push(RawPositionPoint {
@@ -570,7 +594,9 @@ fn mouse_event_callback(event: Event) {
                     if let Some(down) = s.lmb_down_at.take() {
                         let hold_ms = down.elapsed().as_secs_f32() * 1000.0;
                         s.hold_durations.push_back(hold_ms);
-                        if s.hold_durations.len() > 500 { s.hold_durations.pop_front(); }
+                        if s.hold_durations.len() > 500 {
+                            s.hold_durations.pop_front();
+                        }
                     }
                 }
             }
@@ -579,14 +605,6 @@ fn mouse_event_callback(event: Event) {
             if let Ok(guard) = APP_HANDLE.lock() {
                 if let Some(app) = guard.as_ref() {
                     let _ = app.emit("toggle-settings", ());
-                }
-            }
-        }
-        EventType::KeyPress(Key::F9) => {
-            // Open region picker directly — no need to open settings first
-            if let Ok(guard) = APP_HANDLE.lock() {
-                if let Some(app) = guard.as_ref() {
-                    let _ = app.emit("open-region-picker", ());
                 }
             }
         }
@@ -640,12 +658,14 @@ fn metric_emitter_loop(app: AppHandle) {
 
             let (recent_owned, click_times_snap, hold_durations_snap, ts) = {
                 let s = STATE.lock().unwrap(); // ← held for clone only (~μs)
-                let recent_owned: Vec<RawMouseEvent> = s.events
+                let recent_owned: Vec<RawMouseEvent> = s
+                    .events
                     .iter()
                     .filter(|e| e.time >= cutoff)
                     .cloned()
                     .collect();
-                let click_times_snap: Vec<Instant> = s.click_times
+                let click_times_snap: Vec<Instant> = s
+                    .click_times
                     .iter()
                     .filter(|&&t| t >= cutoff)
                     .copied()
@@ -668,9 +688,6 @@ fn metric_emitter_loop(app: AppHandle) {
 
             let dpi = MOUSE_DPI.load(Ordering::Relaxed);
 
-            #[cfg(feature = "ocr")]
-            let scenario = crate::stats_ocr::get_scenario_type();
-            #[cfg(not(feature = "ocr"))]
             let scenario = "Unknown".to_string();
 
             let recent_refs: Vec<&RawMouseEvent> = recent_owned.iter().collect();
@@ -679,7 +696,10 @@ fn metric_emitter_loop(app: AppHandle) {
             (m, ts, scenario)
         };
 
-        let point = MetricPoint { timestamp_ms, metrics: metrics.clone() };
+        let point = MetricPoint {
+            timestamp_ms,
+            metrics: metrics.clone(),
+        };
 
         {
             let mut s = STATE.lock().unwrap();
@@ -691,7 +711,14 @@ fn metric_emitter_loop(app: AppHandle) {
         // ── Live feedback ─────────────────────────────────────────────────────
         if FEEDBACK_ENABLED.load(Ordering::Relaxed) {
             let verbosity = FEEDBACK_VERBOSITY.load(Ordering::Relaxed);
-            maybe_emit_feedback(&app, &metrics, &scenario, verbosity, &mut streaks, &mut cooldowns);
+            maybe_emit_feedback(
+                &app,
+                &metrics,
+                &scenario,
+                verbosity,
+                &mut streaks,
+                &mut cooldowns,
+            );
         }
     }
 }
@@ -702,7 +729,11 @@ fn metric_emitter_loop(app: AppHandle) {
 #[inline]
 fn streak_tick(streaks: &mut HashMap<&'static str, u32>, key: &'static str, cond: bool) -> u32 {
     let v = streaks.entry(key).or_insert(0);
-    if cond { *v += 1 } else { *v = 0 }
+    if cond {
+        *v += 1
+    } else {
+        *v = 0
+    }
     *v
 }
 
@@ -718,11 +749,14 @@ fn maybe_emit(
     if *cooldowns.get(key).unwrap_or(&0) > 0 {
         return;
     }
-    let _ = app.emit(EVENT_LIVE_FEEDBACK, LiveFeedback {
-        message: msg.to_string(),
-        kind: kind.to_string(),
-        metric: key.to_string(),
-    });
+    let _ = app.emit(
+        EVENT_LIVE_FEEDBACK,
+        LiveFeedback {
+            message: msg.to_string(),
+            kind: kind.to_string(),
+            metric: key.to_string(),
+        },
+    );
     cooldowns.insert(key, 12); // 12-second cooldown
 }
 
@@ -741,10 +775,11 @@ fn maybe_emit_feedback(
     streaks: &mut HashMap<&'static str, u32>,
     cooldowns: &mut HashMap<&'static str, u32>,
 ) {
-    let is_clicking = matches!(scenario,
-        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking");
-    let is_tracking = matches!(scenario,
-        "Tracking" | "PureTracking");
+    let is_clicking = matches!(
+        scenario,
+        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking"
+    );
+    let is_tracking = matches!(scenario, "Tracking" | "PureTracking");
     let is_accuracy = scenario == "AccuracyDrill";
 
     // ── Always active (level 0+) ─────────────────────────────────────────────
@@ -779,15 +814,24 @@ fn maybe_emit_feedback(
         streaks.insert("smooth_streak", 0);
     }
 
-    if verbosity < 1 { return; }
+    if verbosity < 1 {
+        return;
+    }
 
     // ── Standard level (1+) ──────────────────────────────────────────────────
 
     // Inconsistent click timing: only meaningful for clicking scenarios
-    if is_clicking && m.click_timing_cv > 0.0
+    if is_clicking
+        && m.click_timing_cv > 0.0
         && streak_tick(streaks, "click_timing", m.click_timing_cv > 0.65) >= 2
     {
-        maybe_emit(app, "click_timing", "Click timing is uneven — try to find a steady rhythm between shots", "tip", cooldowns);
+        maybe_emit(
+            app,
+            "click_timing",
+            "Click timing is uneven — try to find a steady rhythm between shots",
+            "tip",
+            cooldowns,
+        );
         streaks.insert("click_timing", 0);
     } else if !is_clicking {
         streaks.insert("click_timing", 0);
@@ -808,14 +852,22 @@ fn maybe_emit_feedback(
 
     // Speed inconsistency: only tracked for tracking — clicking is naturally stop-and-go
     if is_tracking && streak_tick(streaks, "velocity_std", m.velocity_std > 0.65) >= 3 {
-        maybe_emit(app, "velocity_std", "Speed is too choppy — try to match the target's pace and keep a steady flow", "warning", cooldowns);
+        maybe_emit(
+            app,
+            "velocity_std",
+            "Speed is too choppy — try to match the target's pace and keep a steady flow",
+            "warning",
+            cooldowns,
+        );
         streaks.insert("velocity_std", 0);
     } else if is_clicking {
         streaks.insert("velocity_std", 0);
     }
 
     // Path efficiency: direct flicks matter for accuracy drills and clicking
-    if (is_accuracy || is_clicking) && streak_tick(streaks, "path_eff", m.path_efficiency < 0.72) >= 3 {
+    if (is_accuracy || is_clicking)
+        && streak_tick(streaks, "path_eff", m.path_efficiency < 0.72) >= 3
+    {
         let msg = if is_clicking {
             "Curved flick paths — go straight to the target, don't curve in"
         } else {
@@ -827,7 +879,9 @@ fn maybe_emit_feedback(
         streaks.insert("path_eff", 0);
     }
 
-    if verbosity < 2 { return; }
+    if verbosity < 2 {
+        return;
+    }
 
     // ── Verbose level (2) ────────────────────────────────────────────────────
 
@@ -843,8 +897,16 @@ fn maybe_emit_feedback(
     }
 
     // Jitter: only meaningful while actively tracking or unknown
-    if (is_tracking || scenario == "Unknown") && streak_tick(streaks, "jitter", m.jitter > 0.25) >= 3 {
-        maybe_emit(app, "jitter", "Too much wobble — relax your grip and let your arm do the work instead of your wrist", "tip", cooldowns);
+    if (is_tracking || scenario == "Unknown")
+        && streak_tick(streaks, "jitter", m.jitter > 0.25) >= 3
+    {
+        maybe_emit(
+            app,
+            "jitter",
+            "Too much wobble — relax your grip and let your arm do the work instead of your wrist",
+            "tip",
+            cooldowns,
+        );
         streaks.insert("jitter", 0);
     } else if is_clicking {
         streaks.insert("jitter", 0);
@@ -852,7 +914,13 @@ fn maybe_emit_feedback(
 
     // Low path efficiency in tracking: wandering while following target
     if is_tracking && streak_tick(streaks, "path_eff_track", m.path_efficiency < 0.60) >= 3 {
-        maybe_emit(app, "path_eff_track", "Drifting off target — keep your cursor glued to it rather than chasing it", "tip", cooldowns);
+        maybe_emit(
+            app,
+            "path_eff_track",
+            "Drifting off target — keep your cursor glued to it rather than chasing it",
+            "tip",
+            cooldowns,
+        );
         streaks.insert("path_eff_track", 0);
     }
 }
@@ -871,9 +939,21 @@ fn primary_axis(velocities: &[(f64, f64)]) -> (f64, f64) {
     let n = velocities.len() as f64;
     let mx = velocities.iter().map(|(vx, _)| vx).sum::<f64>() / n;
     let my = velocities.iter().map(|(_, vy)| vy).sum::<f64>() / n;
-    let cxx = velocities.iter().map(|(vx, _)| (vx - mx).powi(2)).sum::<f64>() / n;
-    let cyy = velocities.iter().map(|(_, vy)| (vy - my).powi(2)).sum::<f64>() / n;
-    let cxy = velocities.iter().map(|(vx, vy)| (vx - mx) * (vy - my)).sum::<f64>() / n;
+    let cxx = velocities
+        .iter()
+        .map(|(vx, _)| (vx - mx).powi(2))
+        .sum::<f64>()
+        / n;
+    let cyy = velocities
+        .iter()
+        .map(|(_, vy)| (vy - my).powi(2))
+        .sum::<f64>()
+        / n;
+    let cxy = velocities
+        .iter()
+        .map(|(vx, vy)| (vx - mx) * (vy - my))
+        .sum::<f64>()
+        / n;
 
     // Eigenvector for the larger eigenvalue of [[cxx, cxy], [cxy, cyy]].
     // The closed-form solution for a 2×2 symmetric matrix:
@@ -884,7 +964,11 @@ fn primary_axis(velocities: &[(f64, f64)]) -> (f64, f64) {
     let ex = diff + disc;
     let ey = 2.0 * cxy;
     let mag = (ex * ex + ey * ey).sqrt();
-    if mag < 1e-9 { (1.0, 0.0) } else { (ex / mag, ey / mag) }
+    if mag < 1e-9 {
+        (1.0, 0.0)
+    } else {
+        (ex / mag, ey / mag)
+    }
 }
 
 /// Compute smoothness metrics from a set of recent raw mouse events.
@@ -893,7 +977,12 @@ fn primary_axis(velocities: &[(f64, f64)]) -> (f64, f64) {
 /// used for click_timing_cv.  Pass an empty slice when no click data is available.
 /// `scenario` is the string from `stats_ocr::get_scenario_type()` and controls
 /// the composite-score weight profile (see inline comments).
-fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f64], scenario: &str) -> MouseMetrics {
+fn compute_metrics(
+    events: &[&RawMouseEvent],
+    dpi: u32,
+    click_intervals_ms: &[f64],
+    scenario: &str,
+) -> MouseMetrics {
     let blank = MouseMetrics {
         smoothness: 100.0,
         jitter: 0.0,
@@ -960,12 +1049,19 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
             let chunk = &velocities[chunk_start..chunk_start + JITTER_WIN];
             let (cax, cay) = primary_axis(chunk);
             let (clx, cly) = (-cay, cax);
-            let lat_rms_sq = chunk.iter()
-                .map(|(vx, vy)| { let l = vx * clx + vy * cly; l * l })
-                .sum::<f64>() / chunk.len() as f64;
-            let chunk_mean = chunk.iter()
+            let lat_rms_sq = chunk
+                .iter()
+                .map(|(vx, vy)| {
+                    let l = vx * clx + vy * cly;
+                    l * l
+                })
+                .sum::<f64>()
+                / chunk.len() as f64;
+            let chunk_mean = chunk
+                .iter()
                 .map(|(vx, vy)| (vx * vx + vy * vy).sqrt())
-                .sum::<f64>() / chunk.len() as f64;
+                .sum::<f64>()
+                / chunk.len() as f64;
             local_jitter_sum += lat_rms_sq.sqrt() / chunk_mean.max(1.0);
             local_jitter_count += 1;
             chunk_start += JITTER_STEP;
@@ -985,8 +1081,12 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
     } else {
         // Fewer samples than one window — fall back to global PCA.
         let lat_rms = {
-            let sum_sq: f64 = velocities.iter()
-                .map(|(vx, vy)| { let l = vx * glx + vy * gly; l * l })
+            let sum_sq: f64 = velocities
+                .iter()
+                .map(|(vx, vy)| {
+                    let l = vx * glx + vy * gly;
+                    l * l
+                })
                 .sum();
             (sum_sq / velocities.len() as f64).sqrt()
         };
@@ -1002,15 +1102,11 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
     // penalising once CV exceeds a natural-movement baseline of 0.4 so that
     // normal acceleration/deceleration arcs are not downgraded.
     const CV_NATURAL_BASELINE: f64 = 0.4;
-    let speed_variance = speeds
-        .iter()
-        .map(|s| (s - mean_speed).powi(2))
-        .sum::<f64>()
-        / speeds.len() as f64;
+    let speed_variance =
+        speeds.iter().map(|s| (s - mean_speed).powi(2)).sum::<f64>() / speeds.len() as f64;
     let raw_cv = speed_variance.sqrt() / mean_speed.max(1.0);
-    let velocity_cv = ((raw_cv - CV_NATURAL_BASELINE).max(0.0)
-        / (1.0 - CV_NATURAL_BASELINE))
-        .min(1.0) as f32;
+    let velocity_cv =
+        ((raw_cv - CV_NATURAL_BASELINE).max(0.0) / (1.0 - CV_NATURAL_BASELINE)).min(1.0) as f32;
 
     // ── Overshoot: sharp velocity reversals via direct angle test ────────────
     // The previous global-PCA approach projected all velocities onto one
@@ -1039,7 +1135,8 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
             qualified_segments += 1;
             if spd1 > speed_threshold {
                 let dot = (vx0 * vx1 + vy0 * vy1) / (spd0 * spd1);
-                if dot < -0.5 { // angle > 120°
+                if dot < -0.5 {
+                    // angle > 120°
                     sharp_reversals += 1;
                 }
             }
@@ -1073,11 +1170,14 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
         let mut ev_start = 0usize;
         while ev_start + PATH_WIN <= n_ev {
             let win = &events[ev_start..ev_start + PATH_WIN];
-            let path_len: f64 = win.windows(2).map(|w| {
-                let dx = w[1].x - w[0].x;
-                let dy = w[1].y - w[0].y;
-                (dx * dx + dy * dy).sqrt()
-            }).sum();
+            let path_len: f64 = win
+                .windows(2)
+                .map(|w| {
+                    let dx = w[1].x - w[0].x;
+                    let dy = w[1].y - w[0].y;
+                    (dx * dx + dy * dy).sqrt()
+                })
+                .sum();
             if path_len >= min_path {
                 let dx = win.last().unwrap().x - win[0].x;
                 let dy = win.last().unwrap().y - win[0].y;
@@ -1100,7 +1200,11 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
     let click_timing_cv = if click_intervals_ms.len() >= 3 {
         let n = click_intervals_ms.len() as f64;
         let mean = click_intervals_ms.iter().sum::<f64>() / n;
-        let variance = click_intervals_ms.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n;
+        let variance = click_intervals_ms
+            .iter()
+            .map(|x| (x - mean).powi(2))
+            .sum::<f64>()
+            / n;
         (variance.sqrt() / mean.max(1.0)) as f32
     } else {
         0.0f32
@@ -1149,21 +1253,21 @@ fn compute_metrics(events: &[&RawMouseEvent], dpi: u32, click_intervals_ms: &[f6
     //
     //  Unknown   — balanced baseline (original formula).
     let (w_jitter, w_path, w_consistency, w_overshoot): (f64, f64, f64, f64) = match scenario {
-        "Tracking" | "PureTracking" =>
-            (35.0, 25.0, 30.0, 10.0),
-        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" =>
-            ( 5.0, 25.0, 10.0, 60.0),
-        "AccuracyDrill" =>
-            (10.0, 40.0, 10.0, 40.0),
-        _ => // Unknown / default
-            (30.0, 15.0, 25.0, 30.0),
+        "Tracking" | "PureTracking" => (35.0, 25.0, 30.0, 10.0),
+        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" => (5.0, 25.0, 10.0, 60.0),
+        "AccuracyDrill" => (10.0, 40.0, 10.0, 40.0),
+        _ =>
+        // Unknown / default
+        {
+            (30.0, 15.0, 25.0, 30.0)
+        }
     };
-    let jitter_score      = (1.0 - (jitter as f64).min(1.0)) * w_jitter;
-    let path_score        = path_efficiency as f64 * w_path;
+    let jitter_score = (1.0 - (jitter as f64).min(1.0)) * w_jitter;
+    let path_score = path_efficiency as f64 * w_path;
     let consistency_score = (1.0 - (velocity_cv as f64).min(1.0)) * w_consistency;
-    let overshoot_score   = (1.0 - overshoot_rate as f64) * w_overshoot;
-    let smoothness = (jitter_score + path_score + consistency_score + overshoot_score)
-        .clamp(0.0, 100.0) as f32;
+    let overshoot_score = (1.0 - overshoot_rate as f64) * w_overshoot;
+    let smoothness =
+        (jitter_score + path_score + consistency_score + overshoot_score).clamp(0.0, 100.0) as f32;
 
     MouseMetrics {
         smoothness,
@@ -1197,9 +1301,21 @@ mod tests {
             .collect();
         let refs: Vec<&RawMouseEvent> = events.iter().collect();
         let m = compute_metrics(&refs, 800, &[], "Unknown");
-        assert!(m.smoothness > 90.0, "expected high smoothness, got {}", m.smoothness);
-        assert!(m.jitter < 0.05, "expected near-zero jitter, got {}", m.jitter);
-        assert!(m.overshoot_rate < 0.05, "expected near-zero overshoot, got {}", m.overshoot_rate);
+        assert!(
+            m.smoothness > 90.0,
+            "expected high smoothness, got {}",
+            m.smoothness
+        );
+        assert!(
+            m.jitter < 0.05,
+            "expected near-zero jitter, got {}",
+            m.jitter
+        );
+        assert!(
+            m.overshoot_rate < 0.05,
+            "expected near-zero overshoot, got {}",
+            m.overshoot_rate
+        );
     }
 
     /// Horizontal tracking that gradually reverses — smooth left-right continuous
@@ -1228,7 +1344,11 @@ mod tests {
             "smooth tracking should score high, got {}",
             m.smoothness
         );
-        assert!(m.jitter < 0.1, "no lateral wobble expected, got {}", m.jitter);
+        assert!(
+            m.jitter < 0.1,
+            "no lateral wobble expected, got {}",
+            m.jitter
+        );
     }
 
     /// Continuous left-right tracking at various DPI settings should yield the
@@ -1295,6 +1415,10 @@ mod tests {
             m.overshoot_rate
         );
         // Overall score should be dragged down
-        assert!(m.smoothness < 85.0, "erratic movement should not score high, got {}", m.smoothness);
+        assert!(
+            m.smoothness < 85.0,
+            "erratic movement should not score high, got {}",
+            m.smoothness
+        );
     }
 }

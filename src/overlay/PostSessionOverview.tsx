@@ -34,6 +34,12 @@ function smoothLabel(score: number): { text: string; color: string } {
   return { text: "CHOPPY", color: "#ff4d4d" };
 }
 
+function tipColor(level: "good" | "tip" | "warning"): string {
+  if (level === "good") return "#00f5a0";
+  if (level === "warning") return "#ff6b6b";
+  return "#ffd166";
+}
+
 // ── Sub-components ─────────────────────────────────────────────────────────────
 
 interface StatRowProps {
@@ -118,7 +124,7 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
 
   if (!summary && !preview) return null;
 
-  const { session, metrics, statsPanel } = summary ?? {
+  const { session, metrics, statsPanel, runSnapshot } = summary ?? {
     session: {
       scenario: "Scenario Name",
       score: 0,
@@ -131,6 +137,7 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
     },
     metrics: null,
     statsPanel: null,
+    runSnapshot: null,
   };
 
   const scenarioType = statsPanel?.scenario_type ?? "Unknown";
@@ -286,6 +293,55 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
                 />
               </div>
 
+              {/* ── Scenario snapshot (bridge-driven) ──────────────────────── */}
+              {runSnapshot && (
+                <div
+                  style={{
+                    background: "rgba(255,255,255,0.03)",
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    marginBottom: 10,
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 5,
+                  }}
+                >
+                  <StatRow
+                    label="RUN SCORE (DERIVED)"
+                    value={runSnapshot.scoreTotalDerived != null ? fmtNum(runSnapshot.scoreTotalDerived, 0) : "--"}
+                    accent={accent}
+                  />
+                  <StatRow
+                    label="RUN SPM / PEAK"
+                    value={
+                      `${runSnapshot.scorePerMinute != null ? fmtNum(runSnapshot.scorePerMinute, 0) : "--"} / ${
+                        runSnapshot.peakScorePerMinute != null ? fmtNum(runSnapshot.peakScorePerMinute, 0) : "--"
+                      }`
+                    }
+                    accent={accent}
+                  />
+                  <StatRow
+                    label="SHOTS / HITS"
+                    value={`${runSnapshot.shotsFired ?? "--"} / ${runSnapshot.shotsHit ?? "--"}`}
+                    accent={accent}
+                  />
+                  <StatRow
+                    label="KPS / PEAK"
+                    value={
+                      `${runSnapshot.killsPerSecond != null ? fmtNum(runSnapshot.killsPerSecond, 2) : "--"} / ${
+                        runSnapshot.peakKillsPerSecond != null ? fmtNum(runSnapshot.peakKillsPerSecond, 2) : "--"
+                      }`
+                    }
+                    accent={accent}
+                  />
+                  <StatRow
+                    label="DMG EFF"
+                    value={runSnapshot.damageEfficiency != null ? `${fmtNum(runSnapshot.damageEfficiency, 1)}%` : "--"}
+                    accent={accent}
+                  />
+                </div>
+              )}
+
               {/* ── Smoothness section ────────────────────────────────────────── */}
               {metrics && (
                 <div
@@ -345,6 +401,34 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
                       accent={smoothInfo?.color ?? accent}
                     />
                   )}
+                </div>
+              )}
+
+              {/* ── Run coaching tips ───────────────────────────────────────── */}
+              {runSnapshot && runSnapshot.tips.length > 0 && (
+                <div
+                  style={{
+                    background: "rgba(255,255,255,0.03)",
+                    borderRadius: 8,
+                    padding: "8px 10px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: 6,
+                  }}
+                >
+                  <div style={{ fontSize: 9, color: "rgba(255,255,255,0.42)", letterSpacing: "0.1em", fontWeight: 700 }}>
+                    RUN COACHING
+                  </div>
+                  {runSnapshot.tips.map((tip) => (
+                    <div key={tip.id} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                      <div style={{ fontSize: 10, fontWeight: 700, color: tipColor(tip.level) }}>
+                        {tip.title}
+                      </div>
+                      <div style={{ fontSize: 9, lineHeight: 1.35, color: "rgba(255,255,255,0.7)" }}>
+                        {tip.detail}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
 

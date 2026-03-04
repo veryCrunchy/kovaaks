@@ -19,10 +19,19 @@
         if (!out || out_size == 0) {
             return;
         }
+        const bool class_probe_scan_all =
+            env_flag_enabled("KOVAAKS_CLASS_PROBE_SCAN_ALL")
+            || class_probe_scan_all_flag_enabled();
+        const bool ui_settext_hook =
+            env_flag_enabled("KOVAAKS_UI_SETTEXT_HOOK")
+            || ui_settext_hook_flag_enabled();
+        const bool ui_widget_probe =
+            env_flag_enabled("KOVAAKS_UI_WIDGET_PROBE")
+            || ui_widget_probe_flag_enabled();
         std::snprintf(
             out,
             out_size,
-            "\"flags\":{\"pe_enabled\":%u,\"profile_full\":%u,\"discovery\":%u,\"safe_mode\":%u,\"pe_enable_flag\":%u,\"pe_disable_flag\":%u,\"log_all\":%u,\"object_debug\":%u,\"non_ui_probe\":%u,\"ui_counter_fallback\":%u,\"score_ui_fallback\":%u,\"hook_process_internal\":%u,\"hook_process_local_script\":%u,\"class_probe_hooks\":%u,\"allow_unsafe_hooks\":%u,\"rust_enabled\":%u,\"pe_hook_registered\":%u,\"native_hooks_registered\":%u,\"process_internal_callbacks_registered\":%u,\"process_local_script_callbacks_registered\":%u}",
+            "\"flags\":{\"pe_enabled\":%u,\"profile_full\":%u,\"discovery\":%u,\"safe_mode\":%u,\"pe_enable_flag\":%u,\"pe_disable_flag\":%u,\"log_all\":%u,\"object_debug\":%u,\"non_ui_probe\":%u,\"ui_counter_fallback\":%u,\"score_ui_fallback\":%u,\"hook_process_internal\":%u,\"hook_process_local_script\":%u,\"class_probe_hooks\":%u,\"class_probe_scalar_reads\":%u,\"class_probe_scan_all\":%u,\"allow_unsafe_hooks\":%u,\"detour_callbacks\":%u,\"hook_process_event\":%u,\"direct_pull_invoke\":%u,\"experimental_runtime\":%u,\"native_hooks\":%u,\"native_hooks_requested\":%u,\"ui_settext_hook\":%u,\"ui_widget_probe\":%u,\"rust_enabled\":%u,\"pe_hook_registered\":%u,\"native_hooks_registered\":%u,\"process_internal_callbacks_registered\":%u,\"process_local_script_callbacks_registered\":%u}",
             s_pe_events_enabled ? 1u : 0u,
             s_profile_full ? 1u : 0u,
             s_discovery_enabled ? 1u : 0u,
@@ -37,7 +46,17 @@
             s_enable_process_internal_script_hook ? 1u : 0u,
             s_enable_process_local_script_hook ? 1u : 0u,
             s_class_probe_hooks_enabled ? 1u : 0u,
+            s_class_probe_scalar_reads_enabled ? 1u : 0u,
+            class_probe_scan_all ? 1u : 0u,
             s_allow_unsafe_hooks ? 1u : 0u,
+            s_enable_detour_callbacks ? 1u : 0u,
+            s_enable_detour_callbacks ? 1u : 0u,
+            s_enable_direct_pull_invoke ? 1u : 0u,
+            s_experimental_runtime_enabled ? 1u : 0u,
+            s_native_hooks_requested ? 1u : 0u,
+            s_native_hooks_requested ? 1u : 0u,
+            ui_settext_hook ? 1u : 0u,
+            ui_widget_probe ? 1u : 0u,
             s_rust_enabled ? 1u : 0u,
             s_hook_registered.load(std::memory_order_acquire) ? 1u : 0u,
             s_native_hooks_registered.load(std::memory_order_acquire) ? 1u : 0u,

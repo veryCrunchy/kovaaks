@@ -4,44 +4,13 @@ use tauri::AppHandle;
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
 
-/// A rectangle defining the screen region for OCR.
+/// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct RegionRect {
     pub x: i32,
     pub y: i32,
     pub width: u32,
     pub height: u32,
-}
-
-/// Per-field OCR regions for the KovaaK's stats panel.
-/// Each field captures a small screen area containing exactly one value.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
-pub struct StatsFieldRegions {
-    /// Region covering the Kill Count value only.
-    #[serde(default)]
-    pub kills: Option<RegionRect>,
-    /// Region covering the KPS (kills-per-second) value only.
-    #[serde(default)]
-    pub kps: Option<RegionRect>,
-    /// Region covering the Accuracy hit/shot fraction and percentage.
-    #[serde(default)]
-    pub accuracy: Option<RegionRect>,
-    /// Region covering the Damage Dealt value only.
-    #[serde(default)]
-    pub damage: Option<RegionRect>,
-    /// Region covering the SPM (score-per-minute) value only.
-    #[serde(default)]
-    pub spm: Option<RegionRect>,
-    /// Region covering the Avg TTK value only.
-    #[serde(default)]
-    pub ttk: Option<RegionRect>,
-}
-
-impl StatsFieldRegions {
-    pub fn has_any(&self) -> bool {
-        self.kills.is_some() || self.kps.is_some() || self.accuracy.is_some()
-            || self.damage.is_some() || self.spm.is_some() || self.ttk.is_some()
-    }
 }
 
 /// Rich friend profile persisted in settings.
@@ -61,14 +30,6 @@ pub struct AppSettings {
     /// Path to KovaaK's stats directory.
     #[serde(default = "default_stats_dir")]
     pub stats_dir: String,
-    /// Screen region for score OCR (set via setup wizard).
-    /// Deprecated — kept only so old settings.json files can be deserialized.
-    /// On startup this is migrated into `stats_field_regions.spm` and cleared.
-    #[serde(default, skip_serializing)]
-    pub region: Option<RegionRect>,
-    /// OCR poll rate in milliseconds.
-    #[serde(default = "default_ocr_poll_ms")]
-    pub ocr_poll_ms: u64,
     /// Whether the overlay is currently visible.
     #[serde(default = "default_true")]
     pub overlay_visible: bool,
@@ -81,9 +42,6 @@ pub struct AppSettings {
     /// Friends to compare scores against (rich profiles from KovaaK's API).
     #[serde(default)]
     pub friends: Vec<FriendProfile>,
-    /// Optional screen region for OCR-reading the scenario name at session start.
-    #[serde(default)]
-    pub scenario_region: Option<RegionRect>,
     /// Mouse DPI/CPI used to normalise smoothness metrics so they are comparable
     /// across different sensitivity setups. Defaults to 800.
     #[serde(default = "default_mouse_dpi")]
@@ -91,9 +49,6 @@ pub struct AppSettings {
     /// The username of the friend chosen as battle opponent in VS Mode.
     #[serde(default)]
     pub selected_friend: Option<String>,
-    /// Per-field OCR regions for the stats panel — one small region per stat.
-    #[serde(default)]
-    pub stats_field_regions: StatsFieldRegions,
     /// Whether live coaching notifications are enabled.
     #[serde(default = "default_true")]
     pub live_feedback_enabled: bool,
@@ -125,16 +80,12 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             stats_dir: default_stats_dir(),
-            region: None,
-            ocr_poll_ms: 100,
             overlay_visible: true,
             username: String::new(),
             monitor_index: 0,
             friends: Vec::new(),
-            scenario_region: None,
             mouse_dpi: default_mouse_dpi(),
             selected_friend: None,
-            stats_field_regions: StatsFieldRegions::default(),
             live_feedback_enabled: true,
             live_feedback_verbosity: 1,
             live_feedback_tts_enabled: false,
@@ -160,7 +111,11 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
             Ok(settings) => return Ok(settings),
             Err(e) => {
                 log::error!("Failed to deserialize settings: {e}");
-                log::error!("Raw settings JSON: {}", serde_json::to_string_pretty(&val).unwrap_or_else(|_| "<unserializable>".into()));
+                log::error!(
+                    "Raw settings JSON: {}",
+                    serde_json::to_string_pretty(&val)
+                        .unwrap_or_else(|_| "<unserializable>".into())
+                );
                 log::warn!("Falling back to default settings");
                 return Ok(AppSettings::default());
             }
@@ -177,13 +132,17 @@ pub fn persist(app: &AppHandle, settings: &AppSettings) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn default_mouse_dpi() -> u32 { 800 }
-fn default_ocr_poll_ms() -> u64 { 100 }
-fn default_true() -> bool { true }
-fn default_feedback_verbosity() -> u8 { 1 }
+fn default_mouse_dpi() -> u32 {
+    800
+}
+fn default_true() -> bool {
+    true
+}
+fn default_feedback_verbosity() -> u8 {
+    1
+}
 
-const KOVAAKS_STATS_SUFFIX: &str =
-    r"steamapps\common\FPSAimTrainer\FPSAimTrainer\stats";
+const KOVAAKS_STATS_SUFFIX: &str = r"steamapps\common\FPSAimTrainer\FPSAimTrainer\stats";
 
 fn default_stats_dir() -> String {
     #[cfg(target_os = "windows")]
@@ -206,8 +165,8 @@ fn default_stats_dir() -> String {
 /// the first path that contains FPSAimTrainer/stats, or None.
 #[cfg(target_os = "windows")]
 fn detect_kovaaks_stats_dir() -> Option<String> {
-    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
     use winreg::RegKey;
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
 
     // Try both registry locations Steam uses
     let steam_path = RegKey::predef(HKEY_CURRENT_USER)
@@ -233,7 +192,10 @@ fn detect_kovaaks_stats_dir() -> Option<String> {
                 let _parts: Vec<&str> = trimmed.splitn(3, '"').collect();
                 // parts: ["", "path", "    \"D:\\SteamLibrary\""]
                 // Better: split on all quotes and take 4th token
-                let tokens: Vec<&str> = trimmed.split('"').filter(|s| !s.trim().is_empty()).collect();
+                let tokens: Vec<&str> = trimmed
+                    .split('"')
+                    .filter(|s| !s.trim().is_empty())
+                    .collect();
                 // tokens[0]="path", tokens[1]="D:\\SteamLibrary"
                 if let Some(path) = tokens.get(1) {
                     // Unescape double-backslashes from VDF

@@ -268,8 +268,107 @@
         return false;
     }
 
+    static auto trim_ascii_token(const RC::StringType& input) -> std::string {
+        std::string out;
+        out.reserve(input.size());
+        bool prev_space = true;
+        for (auto c : input) {
+            const auto raw = static_cast<unsigned int>(c);
+            if (raw > 0x7F) {
+                continue;
+            }
+            char ch = static_cast<char>(raw);
+            if (ch == '\r' || ch == '\n' || ch == '\t') {
+                ch = ' ';
+            }
+            if (ch == ' ') {
+                if (prev_space || out.empty()) {
+                    continue;
+                }
+                out.push_back(' ');
+                prev_space = true;
+                continue;
+            }
+            if (ch < 0x20) {
+                continue;
+            }
+            out.push_back(ch);
+            prev_space = false;
+        }
+        while (!out.empty() && out.back() == ' ') {
+            out.pop_back();
+        }
+        return out;
+    }
+
+    static auto looks_like_real_scenario_name(const std::string& value) -> bool {
+        if (value.size() < 3 || value.size() > 160) {
+            return false;
+        }
+        bool has_alnum = false;
+        for (char ch : value) {
+            if (std::isalnum(static_cast<unsigned char>(ch))) {
+                has_alnum = true;
+                break;
+            }
+        }
+        if (!has_alnum) {
+            return false;
+        }
+        std::string lower;
+        lower.reserve(value.size());
+        for (char ch : value) {
+            lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(ch))));
+        }
+        if (lower == "scenario" || lower == "scenariotitle" || lower == "none") {
+            return false;
+        }
+        return true;
+    }
+
+    static auto maybe_update_ui_scenario_name(const RC::StringType& text_value, const char* source) -> bool {
+        if (text_value.empty()) {
+            return false;
+        }
+        const auto scenario_name = trim_ascii_token(text_value);
+        if (!looks_like_real_scenario_name(scenario_name)) {
+            return false;
+        }
+
+        bool changed = false;
+        {
+            std::lock_guard<std::mutex> guard(s_state_mutex);
+            if (s_last_ui_scenario_name != scenario_name) {
+                s_last_ui_scenario_name = scenario_name;
+                s_last_ui_scenario_name_ms = GetTickCount64();
+                changed = true;
+            }
+        }
+        if (!changed) {
+            return false;
+        }
+
+        const auto escaped = escape_json(scenario_name);
+        const auto source_escaped = escape_json(source ? source : "unknown");
+        std::array<char, 512> msg{};
+        std::snprintf(
+            msg.data(),
+            msg.size(),
+            "{\"ev\":\"ui_scenario_name\",\"field\":\"%s\",\"source\":\"%s\"}",
+            escaped.c_str(),
+            source_escaped.c_str()
+        );
+        kovaaks::RustBridge::emit_json(msg.data());
+        return true;
+    }
+
     static auto classify_session_ui_field(const RC::StringType& ctx_name) -> const char* {
         const auto n = normalize_ascii(ctx_name);
+        if (n.find("scenariotitle") != std::string::npos
+            || n.find("scenarioheader") != std::string::npos
+            || n.find("challengeheader") != std::string::npos) {
+            return "scenario_name";
+        }
         if (n.find("distscore") != std::string::npos
             || n.find("palettedsumscore") != std::string::npos
             || n.find("challengescore") != std::string::npos) {
@@ -311,7 +410,7 @@
         }
 
         RC::Unreal::FTextProperty* found = nullptr;
-        for (RC::Unreal::FProperty* property : text_block_class->ForEachPropertyInChain()) {
+        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(text_block_class)) {
             if (!property || !is_likely_valid_object_ptr(property)) {
                 continue;
             }
@@ -339,7 +438,7 @@
         }
 
         if (auto* text_property = resolve_textblock_text_property(text_block)) {
-            void* value_ptr = text_property->ContainerPtrToValuePtr<void>(text_block);
+            void* value_ptr = safe_property_value_ptr(text_property, text_block);
             if (value_ptr && is_likely_readable_region(value_ptr, sizeof(RC::Unreal::FText))) {
                 auto* text_value = reinterpret_cast<RC::Unreal::FText*>(value_ptr);
                 out_value = text_value->ToString();

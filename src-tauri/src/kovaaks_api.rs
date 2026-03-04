@@ -48,7 +48,9 @@ pub fn load_cache(path: &Path) {
 /// Persist the current in-memory cache to the file set by `load_cache`.
 fn save_cache(cache: &HashMap<String, Option<String>>) {
     let path_guard = CACHE_PATH.lock();
-    let Some(path) = path_guard.as_deref() else { return };
+    let Some(path) = path_guard.as_deref() else {
+        return;
+    };
     match serde_json::to_string(cache) {
         Ok(json) => {
             if let Err(e) = std::fs::write(path, &json) {
@@ -63,7 +65,7 @@ fn save_cache(cache: &HashMap<String, Option<String>>) {
 
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .user_agent("kovaaks-overlay/0.1")
+        .user_agent("aimmod/1.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client")
@@ -125,10 +127,7 @@ struct TotalPlayResponse {
 ///
 /// Uses `last-scores/by-name` which returns all recent score entries for that user+scenario.
 /// We return the maximum across all entries.  Returns `None` if the user has never played that scenario.
-pub async fn fetch_best_score(
-    username: &str,
-    scenario_name: &str,
-) -> anyhow::Result<Option<f64>> {
+pub async fn fetch_best_score(username: &str, scenario_name: &str) -> anyhow::Result<Option<f64>> {
     let response = CLIENT
         .get(format!(
             "{}/webapp-backend/user/scenario/last-scores/by-name",
@@ -242,7 +241,10 @@ pub async fn find_user_by_steam_id(
         return Ok(Some(profile));
     }
     // Fallback: first token only (in case KovaaK's username is an abbreviation).
-    let first = display_name.split_whitespace().next().unwrap_or(display_name);
+    let first = display_name
+        .split_whitespace()
+        .next()
+        .unwrap_or(display_name);
     if first != display_name {
         return search_by_query_match_steam_id(first, steam_id).await;
     }
@@ -267,9 +269,12 @@ async fn search_by_query_match_steam_id(
     }
 
     let results: Vec<SearchResult> = response.json().await.unwrap_or_default();
-    let found = results
-        .into_iter()
-        .find(|r| r.steam_id.as_deref().map(|s| s == steam_id).unwrap_or(false));
+    let found = results.into_iter().find(|r| {
+        r.steam_id
+            .as_deref()
+            .map(|s| s == steam_id)
+            .unwrap_or(false)
+    });
     Ok(found.map(search_result_to_profile))
 }
 
@@ -317,7 +322,10 @@ pub async fn validate_scenario_name(name: &str) -> Option<String> {
         return None;
     }
     // Pure-numeric OCR noise (e.g. "1234") is never a real scenario name.
-    if trimmed.chars().all(|c| c.is_ascii_digit() || c == '.' || c == ',') {
+    if trimmed
+        .chars()
+        .all(|c| c.is_ascii_digit() || c == '.' || c == ',')
+    {
         log::info!("Scenario validation SKIP (numeric only): {:?}", trimmed);
         return None;
     }
@@ -343,7 +351,10 @@ pub async fn validate_scenario_name(name: &str) -> Option<String> {
     match rows {
         Err(e) => {
             // Network error — fail-open, but do NOT cache (transient failure).
-            log::warn!("Scenario validation network error for {:?}: {e} — accepting anyway", trimmed);
+            log::warn!(
+                "Scenario validation network error for {:?}: {e} — accepting anyway",
+                trimmed
+            );
             Some(trimmed.to_string())
         }
         Ok(mut pool) => {
@@ -355,14 +366,21 @@ pub async fn validate_scenario_name(name: &str) -> Option<String> {
                     .split_whitespace()
                     .find(|w| w.len() > 2)
                     .unwrap_or(trimmed);
-                log::info!("Scenario validation: 0 results for {:?}, retrying with prefix {:?}", trimmed, first_long);
+                log::info!(
+                    "Scenario validation: 0 results for {:?}, retrying with prefix {:?}",
+                    trimmed,
+                    first_long
+                );
                 if let Ok(extra) = api_search(first_long, 20).await {
                     pool = extra;
                 }
             }
 
             if pool.is_empty() {
-                log::info!("Scenario validation REJECTED: {:?} (0 results after fallback)", trimmed);
+                log::info!(
+                    "Scenario validation REJECTED: {:?} (0 results after fallback)",
+                    trimmed
+                );
                 let mut cache = CACHE.lock();
                 cache.insert(cache_key, None);
                 save_cache(&cache);
@@ -394,14 +412,22 @@ pub async fn validate_scenario_name(name: &str) -> Option<String> {
             });
 
             const JW_THRESHOLD: f64 = 0.88;
-            let result = exact
-                .map(|r| r.clone())
-                .or_else(|| best.and_then(|(r, s)| if s >= JW_THRESHOLD { Some(r.clone()) } else { None }));
+            let result = exact.map(|r| r.clone()).or_else(|| {
+                best.and_then(|(r, s)| {
+                    if s >= JW_THRESHOLD {
+                        Some(r.clone())
+                    } else {
+                        None
+                    }
+                })
+            });
 
             if let Some(ref canonical) = result {
                 log::info!(
                     "Scenario validation OK: {:?} → {:?} ({} candidates)",
-                    trimmed, canonical, pool.len()
+                    trimmed,
+                    canonical,
+                    pool.len()
                 );
             } else {
                 log::info!(
@@ -478,13 +504,21 @@ pub struct ScenarioDetails {
 pub async fn search_scenarios(query: &str, page: u64, max: u64) -> anyhow::Result<ScenarioPage> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct ScenarioCounts { plays: u64, entries: u64 }
+    struct ScenarioCounts {
+        plays: u64,
+        entries: u64,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct ScenarioInner { aim_type: Option<String>, description: Option<String> }
+    struct ScenarioInner {
+        aim_type: Option<String>,
+        description: Option<String>,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct TopScore { score: f64 }
+    struct TopScore {
+        score: f64,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Row {
@@ -495,7 +529,11 @@ pub async fn search_scenarios(query: &str, page: u64, max: u64) -> anyhow::Resul
         top_score: TopScore,
     }
     #[derive(Deserialize)]
-    struct Resp { total: u64, page: u64, data: Vec<Row> }
+    struct Resp {
+        total: u64,
+        page: u64,
+        data: Vec<Row>,
+    }
 
     let capped = max.min(100);
     let resp: Resp = CLIENT
@@ -515,20 +553,28 @@ pub async fn search_scenarios(query: &str, page: u64, max: u64) -> anyhow::Resul
     Ok(ScenarioPage {
         total: resp.total,
         page: resp.page,
-        data: resp.data.into_iter().map(|r| ScenarioSearchResult {
-            leaderboard_id: r.leaderboard_id,
-            scenario_name: r.scenario_name,
-            aim_type: r.scenario.aim_type,
-            description: r.scenario.description,
-            play_count: r.counts.plays,
-            entry_count: r.counts.entries,
-            top_score: r.top_score.score,
-        }).collect(),
+        data: resp
+            .data
+            .into_iter()
+            .map(|r| ScenarioSearchResult {
+                leaderboard_id: r.leaderboard_id,
+                scenario_name: r.scenario_name,
+                aim_type: r.scenario.aim_type,
+                description: r.scenario.description,
+                play_count: r.counts.plays,
+                entry_count: r.counts.entries,
+                top_score: r.top_score.score,
+            })
+            .collect(),
     })
 }
 
 /// Fetch one page of global leaderboard scores for a given leaderboard ID (max 100).
-pub async fn get_leaderboard_page(leaderboard_id: u64, page: u64, max: u64) -> anyhow::Result<LeaderboardPage> {
+pub async fn get_leaderboard_page(
+    leaderboard_id: u64,
+    page: u64,
+    max: u64,
+) -> anyhow::Result<LeaderboardPage> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
     struct Row {
@@ -541,11 +587,18 @@ pub async fn get_leaderboard_page(leaderboard_id: u64, page: u64, max: u64) -> a
         kovaaks_plus_active: Option<bool>,
     }
     #[derive(Deserialize)]
-    struct Resp { total: u64, page: u64, data: Vec<Row> }
+    struct Resp {
+        total: u64,
+        page: u64,
+        data: Vec<Row>,
+    }
 
     let capped = max.min(100);
     let resp: Resp = CLIENT
-        .get(format!("{}/webapp-backend/leaderboard/scores/global", BASE_URL))
+        .get(format!(
+            "{}/webapp-backend/leaderboard/scores/global",
+            BASE_URL
+        ))
         .query(&[
             ("leaderboardId", leaderboard_id.to_string()),
             ("page", page.to_string()),
@@ -561,15 +614,19 @@ pub async fn get_leaderboard_page(leaderboard_id: u64, page: u64, max: u64) -> a
     Ok(LeaderboardPage {
         total: resp.total,
         page: resp.page,
-        data: resp.data.into_iter().map(|r| LeaderboardEntry {
-            rank: r.rank,
-            steam_id: r.steam_id,
-            steam_account_name: r.steam_account_name,
-            webapp_username: r.webapp_username,
-            score: r.score,
-            country: r.country,
-            kovaaks_plus: r.kovaaks_plus_active.unwrap_or(false),
-        }).collect(),
+        data: resp
+            .data
+            .into_iter()
+            .map(|r| LeaderboardEntry {
+                rank: r.rank,
+                steam_id: r.steam_id,
+                steam_account_name: r.steam_account_name,
+                webapp_username: r.webapp_username,
+                score: r.score,
+                country: r.country,
+                kovaaks_plus: r.kovaaks_plus_active.unwrap_or(false),
+            })
+            .collect(),
     })
 }
 
@@ -602,7 +659,12 @@ pub async fn get_scenario_details(leaderboard_id: u64) -> anyhow::Result<Scenari
         aim_type: resp.aim_type,
         play_count: resp.play_count,
         description: resp.description,
-        tags: resp.tags.unwrap_or_default().into_iter().filter(|t| !t.is_empty()).collect(),
+        tags: resp
+            .tags
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|t| !t.is_empty())
+            .collect(),
         created: resp.created,
         author_steam_account_name: resp.steam_account_name,
     })
@@ -614,12 +676,19 @@ pub async fn get_scenario_details(leaderboard_id: u64) -> anyhow::Result<Scenari
 pub async fn get_aim_type_for_scenario(canonical_name: &str) -> Option<String> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct ScenarioInner { aim_type: Option<String> }
+    struct ScenarioInner {
+        aim_type: Option<String>,
+    }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Row { scenario_name: String, scenario: ScenarioInner }
+    struct Row {
+        scenario_name: String,
+        scenario: ScenarioInner,
+    }
     #[derive(Deserialize)]
-    struct Resp { data: Vec<Row> }
+    struct Resp {
+        data: Vec<Row>,
+    }
 
     let resp = CLIENT
         .get(format!("{}/webapp-backend/scenario/popular", BASE_URL))
@@ -632,10 +701,13 @@ pub async fn get_aim_type_for_scenario(canonical_name: &str) -> Option<String> {
         .send()
         .await
         .ok()?;
-    if !resp.status().is_success() { return None; }
+    if !resp.status().is_success() {
+        return None;
+    }
     let body: Resp = resp.json().await.ok()?;
     // Find the exact name match (case-insensitive).
-    body.data.into_iter()
+    body.data
+        .into_iter()
         .find(|r| r.scenario_name.eq_ignore_ascii_case(canonical_name))
         .and_then(|r| r.scenario.aim_type)
         .filter(|t| !t.is_empty())
@@ -645,9 +717,13 @@ pub async fn get_aim_type_for_scenario(canonical_name: &str) -> Option<String> {
 async fn api_search(query: &str, max: usize) -> anyhow::Result<Vec<String>> {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
-    struct Row { scenario_name: String }
+    struct Row {
+        scenario_name: String,
+    }
     #[derive(Deserialize)]
-    struct Resp { data: Vec<Row> }
+    struct Resp {
+        data: Vec<Row>,
+    }
 
     let url = format!("{}/webapp-backend/scenario/popular", BASE_URL);
     let r = CLIENT

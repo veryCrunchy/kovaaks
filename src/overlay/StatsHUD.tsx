@@ -37,11 +37,17 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
   if (!reading && !preview) return null;
 
   const scenarioType = reading?.scenario_type ?? "Unknown";
+  const gameState = (reading?.game_state ?? "menu").toUpperCase();
   const accentColor = SCENARIO_COLOR[scenarioType] ?? "#ffffff";
   const showTTK = scenarioType !== "Tracking" && scenarioType !== "Unknown";
   const showDamage = scenarioType === "MultiHitClicking";
   const showKills =
     scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill";
+  const showChallengeRows =
+    (reading?.is_in_challenge ?? false)
+    || (reading?.is_in_scenario ?? false)
+    || (reading?.time_remaining != null && reading.time_remaining > 0)
+    || (reading?.challenge_seconds_total != null && reading.challenge_seconds_total > 0);
 
   return (
     <AnimatePresence>
@@ -73,7 +79,7 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
               style={{ background: accentColor, boxShadow: `0 0 6px ${accentColor}` }}
             />
             <span style={{ fontSize: 9, color: accentColor, fontWeight: 700, letterSpacing: "0.1em" }}>
-              {scenarioType === "Unknown" ? "IDLE" : scenarioType.toUpperCase().replace("CLICKING", " CLK")}
+              {`${gameState} · ${scenarioType === "Unknown" ? "IDLE" : scenarioType.toUpperCase().replace("CLICKING", " CLK")}`}
             </span>
           </div>
 
@@ -106,6 +112,16 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
             {/* Damage */}
             {showDamage && (
               <StatRow label="DMG" value={fmt(reading?.damage_dealt, 0)} accent={accentColor} />
+            )}
+
+            {showChallengeRows && (
+              <>
+                <StatRow label="REM" value={fmt(reading?.time_remaining, 1)} accent={accentColor} />
+                <StatRow label="QREM" value={fmt(reading?.queue_time_remaining, 1)} accent={accentColor} />
+                <StatRow label="CH SEC" value={fmt(reading?.challenge_seconds_total, 1)} accent={accentColor} />
+                <StatRow label="CH FPS" value={fmt(reading?.challenge_average_fps, 2)} accent={accentColor} />
+                <StatRow label="CH TICK" value={fmt(reading?.challenge_tick_count_total, 0)} accent={accentColor} />
+              </>
             )}
           </div>
         </div>

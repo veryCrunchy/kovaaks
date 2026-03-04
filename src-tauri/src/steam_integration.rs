@@ -7,12 +7,11 @@
 ///
 /// Source 2 is the preferred friends source because it is always available regardless
 /// of the user's privacy settings, reads in <1 ms, and needs no network.
-
 use once_cell::sync::Lazy;
 
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
-        .user_agent("kovaaks-overlay/0.1")
+        .user_agent("aimmod/1.0")
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("failed to build reqwest client")
@@ -24,14 +23,16 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
 pub fn get_steam_path() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let key = hkcu.open_subkey("Software\\Valve\\Steam").ok()?;
         key.get_value("SteamPath").ok()
     }
     #[cfg(not(target_os = "windows"))]
-    { None }
+    {
+        None
+    }
 }
 
 /// Returns the Steam 64-bit ID of the currently logged-in Steam account.
@@ -42,8 +43,8 @@ pub fn get_steam_path() -> Option<String> {
 pub fn get_active_steam_id() -> Option<String> {
     #[cfg(target_os = "windows")]
     {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let key = hkcu
             .open_subkey("Software\\Valve\\Steam\\ActiveProcess")
@@ -57,7 +58,9 @@ pub fn get_active_steam_id() -> Option<String> {
         Some((76_561_197_960_265_728u64 + account_id as u64).to_string())
     }
     #[cfg(not(target_os = "windows"))]
-    { None }
+    {
+        None
+    }
 }
 
 /// Returns the 32-bit Steam account ID for the currently active user.
@@ -65,17 +68,23 @@ pub fn get_active_steam_id() -> Option<String> {
 fn get_active_account_id32() -> Option<u32> {
     #[cfg(target_os = "windows")]
     {
-        use winreg::enums::*;
         use winreg::RegKey;
+        use winreg::enums::*;
         let hkcu = RegKey::predef(HKEY_CURRENT_USER);
         let key = hkcu
             .open_subkey("Software\\Valve\\Steam\\ActiveProcess")
             .ok()?;
         let account_id: u32 = key.get_value("ActiveUser").ok()?;
-        if account_id == 0 { None } else { Some(account_id) }
+        if account_id == 0 {
+            None
+        } else {
+            Some(account_id)
+        }
     }
     #[cfg(not(target_os = "windows"))]
-    { None }
+    {
+        None
+    }
 }
 
 // ─── Local friends list (localconfig.vdf) ────────────────────────────────────
@@ -118,7 +127,11 @@ pub fn get_local_friend_ids() -> Vec<String> {
     };
 
     let ids = parse_vdf_friend_ids(&content);
-    log::info!("get_local_friend_ids: found {} friends in {:?}", ids.len(), vdf_path);
+    log::info!(
+        "get_local_friend_ids: found {} friends in {:?}",
+        ids.len(),
+        vdf_path
+    );
     ids
 }
 
@@ -164,20 +177,31 @@ fn parse_vdf_friend_ids(content: &str) -> Vec<String> {
 
     while i < bytes.len() {
         match bytes[i] {
-            b'{' => { depth += 1; i += 1; }
+            b'{' => {
+                depth += 1;
+                i += 1;
+            }
             b'}' => {
-                if depth == 0 { break; }
+                if depth == 0 {
+                    break;
+                }
                 depth -= 1;
-                if depth == 0 { break; }
+                if depth == 0 {
+                    break;
+                }
                 i += 1;
             }
             b'"' if depth == 1 => {
                 // Read quoted key.
                 i += 1;
                 let key_start = i;
-                while i < bytes.len() && bytes[i] != b'"' { i += 1; }
+                while i < bytes.len() && bytes[i] != b'"' {
+                    i += 1;
+                }
                 let key = &inner[key_start..i];
-                if i < bytes.len() { i += 1; } // skip closing quote
+                if i < bytes.len() {
+                    i += 1;
+                } // skip closing quote
 
                 // Skip whitespace after key.
                 while i < bytes.len() && matches!(bytes[i], b' ' | b'\t' | b'\r' | b'\n') {
@@ -203,11 +227,17 @@ fn parse_vdf_friend_ids(content: &str) -> Vec<String> {
                 } else if i < bytes.len() && bytes[i] == b'"' {
                     // Plain string value — skip it.
                     i += 1;
-                    while i < bytes.len() && bytes[i] != b'"' { i += 1; }
-                    if i < bytes.len() { i += 1; }
+                    while i < bytes.len() && bytes[i] != b'"' {
+                        i += 1;
+                    }
+                    if i < bytes.len() {
+                        i += 1;
+                    }
                 }
             }
-            _ => { i += 1; }
+            _ => {
+                i += 1;
+            }
         }
     }
 
@@ -235,7 +265,10 @@ pub async fn get_steam_friend_ids_xml(steam_id: &str) -> anyhow::Result<Vec<Stri
     let body = CLIENT.get(&url).send().await?.text().await?;
 
     if body.contains("<error>") || body.contains("<friendsPrivate>") {
-        log::info!("get_steam_friend_ids_xml: friends list is private for {}", steam_id);
+        log::info!(
+            "get_steam_friend_ids_xml: friends list is private for {}",
+            steam_id
+        );
         return Ok(vec![]);
     }
 
@@ -249,11 +282,17 @@ pub async fn get_steam_friend_ids_xml(steam_id: &str) -> anyhow::Result<Vec<Stri
 pub async fn get_friend_ids(steam_id: &str) -> Vec<String> {
     let local = get_local_friend_ids();
     if !local.is_empty() {
-        log::info!("get_friend_ids: {} friends from localconfig.vdf", local.len());
+        log::info!(
+            "get_friend_ids: {} friends from localconfig.vdf",
+            local.len()
+        );
         return local;
     }
 
-    log::info!("get_friend_ids: local VDF empty, trying public XML for {}", steam_id);
+    log::info!(
+        "get_friend_ids: local VDF empty, trying public XML for {}",
+        steam_id
+    );
     get_steam_friend_ids_xml(steam_id).await.unwrap_or_default()
 }
 

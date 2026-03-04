@@ -1,24 +1,142 @@
+// ─── UE4SS deploy + injection command ───────────────────────────────────────
+
+#[tauri::command]
+fn inject_bridge(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
+    let stats_dir = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.stats_dir.clone()
+    };
+    let _ = bridge::start_log_tailer(app.clone(), &stats_dir);
+    deploy_and_inject_ue4ss(&app, &stats_dir)
+}
+
+#[tauri::command]
+fn ue4ss_get_recent_logs(limit: Option<usize>) -> Vec<String> {
+    bridge::recent_logs(limit.unwrap_or(400))
+}
+
+#[tauri::command]
+fn ue4ss_trigger_hot_reload() -> Result<(), String> {
+    bridge::trigger_hot_reload()
+}
+
+#[derive(serde::Serialize)]
+struct Ue4ssRuntimeFlags {
+    profile: String,
+    enable_pe_hook: bool,
+    disable_pe_hook: bool,
+    discovery: bool,
+    safe_mode: bool,
+    no_rust: bool,
+    log_all_events: bool,
+    object_debug: bool,
+    non_ui_probe: bool,
+    ui_counter_fallback: bool,
+    score_ui_fallback: bool,
+    hook_process_internal: bool,
+    hook_process_local_script: bool,
+    class_probe_hooks: bool,
+    class_probe_scalar_reads: bool,
+    class_probe_scan_all: bool,
+    allow_unsafe_hooks: bool,
+    native_hooks: bool,
+    hook_process_event: bool,
+    detour_callbacks: bool,
+    direct_pull_invoke: bool,
+    experimental_runtime: bool,
+    ui_settext_hook: bool,
+    ui_widget_probe: bool,
+    in_game_overlay: bool,
+}
+
+#[tauri::command]
+fn ue4ss_get_runtime_flags(state: tauri::State<AppState>) -> Result<Ue4ssRuntimeFlags, String> {
+    let stats_dir = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.stats_dir.clone()
+    };
+    let raw = bridge::get_runtime_flags(&stats_dir)?;
+    Ok(Ue4ssRuntimeFlags {
+        profile: raw.profile,
+        enable_pe_hook: raw.enable_pe_hook,
+        disable_pe_hook: raw.disable_pe_hook,
+        discovery: raw.discovery,
+        safe_mode: raw.safe_mode,
+        no_rust: raw.no_rust,
+        log_all_events: raw.log_all_events,
+        object_debug: raw.object_debug,
+        non_ui_probe: raw.non_ui_probe,
+        ui_counter_fallback: raw.ui_counter_fallback,
+        score_ui_fallback: raw.score_ui_fallback,
+        hook_process_internal: raw.hook_process_internal,
+        hook_process_local_script: raw.hook_process_local_script,
+        class_probe_hooks: raw.class_probe_hooks,
+        class_probe_scalar_reads: raw.class_probe_scalar_reads,
+        class_probe_scan_all: raw.class_probe_scan_all,
+        allow_unsafe_hooks: raw.allow_unsafe_hooks,
+        native_hooks: raw.native_hooks,
+        hook_process_event: raw.hook_process_event,
+        detour_callbacks: raw.detour_callbacks,
+        direct_pull_invoke: raw.direct_pull_invoke,
+        experimental_runtime: raw.experimental_runtime,
+        ui_settext_hook: raw.ui_settext_hook,
+        ui_widget_probe: raw.ui_widget_probe,
+        in_game_overlay: raw.in_game_overlay,
+    })
+}
+
+#[tauri::command]
+fn ue4ss_set_runtime_flag(
+    key: String,
+    enabled: bool,
+    state: tauri::State<AppState>,
+) -> Result<(), String> {
+    let stats_dir = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.stats_dir.clone()
+    };
+    bridge::set_runtime_flag(&stats_dir, &key, enabled)
+}
+
+#[tauri::command]
+fn ue4ss_reload_runtime_flags(state: tauri::State<AppState>) -> Result<(), String> {
+    let stats_dir = {
+        let s = state.settings.lock().map_err(|e| e.to_string())?;
+        s.stats_dir.clone()
+    };
+    bridge::request_runtime_flag_reload(&stats_dir)
+}
+
+fn deploy_and_inject_ue4ss(app: &AppHandle, stats_dir: &str) -> Result<(), String> {
+    // UE4SS payload is shipped as a Tauri resource folder (see bundle.resources).
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|_| "Could not get resource directory")?;
+    bridge::deploy_and_inject(resource_dir.as_path(), stats_dir)
+}
+mod bridge;
 mod file_watcher;
-mod replay_store;
-mod screen_recorder;
 mod kovaaks_api;
 mod logger;
+mod mem_debug;
+mod memory_reader;
 mod mouse_hook;
-mod ocr;
+mod replay_store;
 mod sapi;
 mod scenario_index;
+mod screen_recorder;
 mod session_store;
 mod settings;
-mod stats_ocr;
 mod steam_api;
 mod steam_integration;
 mod window_tracker;
 
 use std::sync::{Arc, Mutex};
 use tauri::{
+    AppHandle, Emitter, Manager, Runtime,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Emitter, Manager, Runtime,
 };
 
 pub use settings::{AppSettings, FriendProfile};
@@ -26,28 +144,6 @@ pub use settings::{AppSettings, FriendProfile};
 /// Global app state accessible from Tauri commands.
 pub struct AppState {
     pub settings: Arc<Mutex<AppSettings>>,
-}
-
-// ─── Auto-setup state ─────────────────────────────────────────────────────────
-
-static AUTO_SETUP_RUNNING: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
-const EVENT_AUTO_SETUP_PROGRESS: &str = "auto-setup-progress";
-const EVENT_AUTO_SETUP_COMPLETE: &str = "auto-setup-complete";
-
-#[derive(serde::Serialize, Clone)]
-struct AutoSetupProgress {
-    confirmed: Vec<String>,
-    total: usize,
-}
-
-#[derive(serde::Serialize, Clone)]
-struct AutoSetupComplete {
-    regions: settings::StatsFieldRegions,
-    confirmed_count: usize,
-    /// Auto-detected scenario-title OCR region derived from UI.json (may be None).
-    scenario_region: Option<settings::RegionRect>,
 }
 
 // ─── Monitor helpers ──────────────────────────────────────────────────────────
@@ -63,7 +159,7 @@ pub struct MonitorInfo {
 }
 
 /// Physical screen origin + scale factor of the overlay window.
-/// Used by the RegionPicker frontend to convert CSS coords → absolute screen pixels.
+/// Used by frontend overlays to convert CSS coords → absolute screen pixels.
 #[derive(serde::Serialize, Clone)]
 pub struct OverlayOrigin {
     pub x: i32,
@@ -94,14 +190,16 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
 /// We exit fullscreen first so the OS accepts the new position, then
 /// re-enter fullscreen on the target monitor.
 pub fn apply_monitor(app: &AppHandle, index: usize) {
-    let Some(win) = app.get_webview_window("overlay") else { return };
+    let Some(win) = app.get_webview_window("overlay") else {
+        return;
+    };
     let monitors = win.available_monitors().unwrap_or_default();
     let monitor = monitors.get(index).or_else(|| monitors.first());
     let Some(m) = monitor else { return };
 
-    let pos  = m.position();
+    let pos = m.position();
     let size = m.size();
-    let sf   = m.scale_factor();
+    let sf = m.scale_factor();
     let logical_pos = pos.to_logical::<f64>(sf);
 
     let _ = win.set_fullscreen(false);
@@ -111,8 +209,10 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     // Keep the screen recorder capture rect in sync with whichever monitor the
     // overlay is on.  Uses physical pixel coordinates to match GDI capture.
     let monitor_rect = settings::RegionRect {
-        x: pos.x, y: pos.y,
-        width: size.width, height: size.height,
+        x: pos.x,
+        y: pos.y,
+        width: size.width,
+        height: size.height,
     };
     screen_recorder::update_monitor_rect(&monitor_rect);
 }
@@ -172,59 +272,10 @@ fn save_settings(
     *s = new_settings.clone();
     settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
     file_watcher::restart(&app, &new_settings.stats_dir);
-    ocr::update_region(&app, new_settings.stats_field_regions.spm);
-    ocr::update_scenario_region(new_settings.scenario_region);
-    ocr::update_poll_ms(new_settings.ocr_poll_ms);
     mouse_hook::set_dpi(new_settings.mouse_dpi);
     mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
-    stats_ocr::update_field_regions(new_settings.stats_field_regions);
     let _ = app.emit("settings-changed", ());
-    Ok(())
-}
-
-#[tauri::command]
-fn set_region(
-    region: settings::RegionRect,
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    s.region = Some(region);
-    let cloned = s.clone();
-    drop(s);
-    settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
-    ocr::update_region(&app, cloned.region);
-    Ok(())
-}
-
-#[tauri::command]
-fn set_scenario_region(
-    region: settings::RegionRect,
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    s.scenario_region = Some(region);
-    let cloned = s.clone();
-    drop(s);
-    settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
-    ocr::update_scenario_region(cloned.scenario_region);
-    Ok(())
-}
-
-#[tauri::command]
-fn set_stats_field_regions(
-    regions: settings::StatsFieldRegions,
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    s.stats_field_regions = regions;
-    let cloned = s.clone();
-    drop(s);
-    settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
-    stats_ocr::update_field_regions(cloned.stats_field_regions);
     Ok(())
 }
 
@@ -276,8 +327,8 @@ async fn add_friend(
 ) -> Result<FriendProfile, String> {
     let trimmed = username.trim().to_string();
 
-    let looks_like_steam = steam_api::is_steam64_id(&trimmed)
-        || trimmed.contains("steamcommunity.com");
+    let looks_like_steam =
+        steam_api::is_steam64_id(&trimmed) || trimmed.contains("steamcommunity.com");
 
     /// Resolve via Steam community XML then cross-reference KovaaK's.
     /// Returns a UserProfile with a real KovaaK's username when one is linked,
@@ -306,12 +357,10 @@ async fn add_friend(
 
     let profile = match search_type.as_deref() {
         Some("steam") => resolve_via_steam(&trimmed).await?,
-        Some("kovaaks") => {
-            kovaaks_api::fetch_user_profile(&trimmed)
-                .await
-                .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("No KovaaK's account found for '{}'", trimmed))?
-        }
+        Some("kovaaks") => kovaaks_api::fetch_user_profile(&trimmed)
+            .await
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| format!("No KovaaK's account found for '{}'", trimmed))?,
         _ => {
             // Auto: if input is an obvious Steam ID/URL go straight to Steam path.
             // Otherwise try KovaaK's username first, then fall back to Steam so that
@@ -340,7 +389,9 @@ async fn add_friend(
     let already_exists = if !friend.steam_id.is_empty() {
         s.friends.iter().any(|f| f.steam_id == friend.steam_id)
     } else {
-        s.friends.iter().any(|f| f.username.eq_ignore_ascii_case(&friend.username))
+        s.friends
+            .iter()
+            .any(|f| f.username.eq_ignore_ascii_case(&friend.username))
     };
     if !already_exists {
         s.friends.push(friend.clone());
@@ -351,7 +402,6 @@ async fn add_friend(
     Ok(friend)
 }
 
-
 /// Remove a friend by username and persist.
 #[tauri::command]
 fn remove_friend(
@@ -360,7 +410,8 @@ fn remove_friend(
     app: AppHandle,
 ) -> Result<(), String> {
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    s.friends.retain(|f| !f.username.eq_ignore_ascii_case(&username));
+    s.friends
+        .retain(|f| !f.username.eq_ignore_ascii_case(&username));
     let cloned = s.clone();
     drop(s);
     settings::persist(&app, &cloned).map_err(|e| e.to_string())
@@ -374,13 +425,39 @@ async fn fetch_friend_score(
     username: String,
     scenario_name: String,
 ) -> Result<Option<f64>, String> {
-    // Friends without a KovaaK's webapp account are stored with their Steam64 ID
-    // as the username field.  The API supports fetching scores by steamId directly.
+    // If Steam-only user, use leaderboard search fallback
     if steam_api::is_steam64_id(&username) {
-        return kovaaks_api::fetch_best_score_by_steam_id(&username, &scenario_name)
+        // 1. Search for scenario to get leaderboard ID
+        let scenario_page = kovaaks_api::search_scenarios(&scenario_name, 0, 20)
             .await
-            .map_err(|e| e.to_string());
+            .map_err(|e| format!("Failed to search scenario: {e}"))?;
+        let scenario = scenario_page
+            .data
+            .iter()
+            .find(|s| s.scenario_name.eq_ignore_ascii_case(&scenario_name));
+        let leaderboard_id = if let Some(s) = scenario {
+            s.leaderboard_id
+        } else {
+            return Ok(None);
+        };
+
+        // 2. Search leaderboard pages for the steam_id
+        let max_pages = 5;
+        let page_size = 100;
+        for page in 0..max_pages {
+            let lb = kovaaks_api::get_leaderboard_page(leaderboard_id, page, page_size)
+                .await
+                .map_err(|e| format!("Failed to fetch leaderboard: {e}"))?;
+            if let Some(entry) = lb.data.iter().find(|e| e.steam_id == username) {
+                return Ok(Some(entry.score));
+            }
+            if lb.data.is_empty() {
+                break;
+            }
+        }
+        return Ok(None);
     }
+    // Normal KovaaK's username path
     kovaaks_api::fetch_best_score(&username, &scenario_name)
         .await
         .map_err(|e| e.to_string())
@@ -538,16 +615,17 @@ async fn import_steam_friends(
             };
 
             // 2. Cross-reference with KovaaK's — skip if they don't play KovaaK's.
-            let kovaaks = match kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
-                .await
-                .unwrap_or(None)
-            {
-                Some(p) => p,
-                None => {
-                    let _ = app_handle.emit("steam-import-progress", ());
-                    return None; // not a KovaaK's player — skip
-                }
-            };
+            let kovaaks =
+                match kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
+                    .await
+                    .unwrap_or(None)
+                {
+                    Some(p) => p,
+                    None => {
+                        let _ = app_handle.emit("steam-import-progress", ());
+                        return None; // not a KovaaK's player — skip
+                    }
+                };
 
             let friend = FriendProfile {
                 username: kovaaks.username,
@@ -579,16 +657,23 @@ async fn import_steam_friends(
             let dupe = if !f.steam_id.is_empty() {
                 s.friends.iter().any(|x| x.steam_id == f.steam_id)
             } else {
-                s.friends.iter().any(|x| x.username.eq_ignore_ascii_case(&f.username))
+                s.friends
+                    .iter()
+                    .any(|x| x.username.eq_ignore_ascii_case(&f.username))
             };
-            if !dupe { s.friends.push(f.clone()); }
+            if !dupe {
+                s.friends.push(f.clone());
+            }
         }
         let cloned = s.clone();
         drop(s);
         settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     }
 
-    log::info!("import_steam_friends: imported {} friends", new_friends.len());
+    log::info!(
+        "import_steam_friends: imported {} friends",
+        new_friends.len()
+    );
     Ok(new_friends)
 }
 
@@ -607,13 +692,21 @@ async fn validate_scenario(scenario_name: String) -> Option<String> {
     // 1. Try the local index first — fast, no network.
     if scenario_index::len() > 0 {
         if let Some(canonical) = scenario_index::fuzzy_match(&scenario_name) {
-            log::info!("validate_scenario: local match {:?} → {:?}", scenario_name, canonical);
+            log::info!(
+                "validate_scenario: local match {:?} → {:?}",
+                scenario_name,
+                canonical
+            );
             return Some(canonical);
         }
     }
     // 2. Fall back to the KovaaK's API for scenarios not yet in the local index.
     let result = kovaaks_api::validate_scenario_name(&scenario_name).await;
-    log::info!("validate_scenario: API result for {:?} = {:?}", scenario_name, result);
+    log::info!(
+        "validate_scenario: API result for {:?} = {:?}",
+        scenario_name,
+        result
+    );
     result
 }
 
@@ -630,28 +723,6 @@ async fn validate_username(username: String) -> Result<Option<FriendProfile>, St
         country: p.country,
         kovaaks_plus: p.kovaaks_plus,
     }))
-}
-
-#[tauri::command]
-fn start_ocr(app: AppHandle, state: tauri::State<AppState>) -> Result<(), String> {
-    let (spm_region, scenario_region, poll_ms, stats_dir) = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
-        (s.stats_field_regions.spm, s.scenario_region, s.ocr_poll_ms, s.stats_dir.clone())
-    };
-    // Rebuild the local scenario index from CSV filenames in the stats dir.
-    // This is the primary source for fast, offline OCR correction.
-    let stats_path = std::path::Path::new(&stats_dir);
-    if stats_path.exists() {
-        scenario_index::rebuild(stats_path);
-    }
-    ocr::update_scenario_region(scenario_region);
-    ocr::start(app, spm_region, poll_ms);
-    Ok(())
-}
-
-#[tauri::command]
-fn stop_ocr() {
-    ocr::stop();
 }
 
 #[tauri::command]
@@ -680,10 +751,7 @@ fn get_session_screen_frames() -> Vec<screen_recorder::ScreenFrame> {
 }
 
 #[tauri::command]
-fn load_session_replay(
-    app: AppHandle,
-    session_id: String,
-) -> Option<replay_store::ReplayData> {
+fn load_session_replay(app: AppHandle, session_id: String) -> Option<replay_store::ReplayData> {
     replay_store::load_replay(&app, &session_id)
 }
 
@@ -701,7 +769,10 @@ fn get_monitors(app: AppHandle) -> Vec<MonitorInfo> {
             let size = m.size();
             MonitorInfo {
                 index: i,
-                name: m.name().map(|s| s.to_string()).unwrap_or_else(|| format!("Monitor {}", i + 1)),
+                name: m
+                    .name()
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("Monitor {}", i + 1)),
                 width: size.width,
                 height: size.height,
                 x: pos.x,
@@ -818,16 +889,17 @@ async fn get_leaderboard_page(
 }
 
 #[tauri::command]
-async fn get_scenario_details(
-    leaderboard_id: u64,
-) -> Result<kovaaks_api::ScenarioDetails, String> {
+async fn get_scenario_details(leaderboard_id: u64) -> Result<kovaaks_api::ScenarioDetails, String> {
     kovaaks_api::get_scenario_details(leaderboard_id)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[derive(serde::Serialize)]
-struct CursorPos { x: i32, y: i32 }
+struct CursorPos {
+    x: i32,
+    y: i32,
+}
 
 /// Return the current cursor position in physical screen coordinates.
 /// Used by the frontend to implement cursor-proximity passthrough toggling.
@@ -838,16 +910,13 @@ fn get_cursor_pos() -> CursorPos {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
         let mut pt = POINT { x: 0, y: 0 };
-        unsafe { let _ = GetCursorPos(&mut pt); }
+        unsafe {
+            let _ = GetCursorPos(&mut pt);
+        }
         return CursorPos { x: pt.x, y: pt.y };
     }
     #[allow(unreachable_code)]
     CursorPos { x: 0, y: 0 }
-}
-
-#[tauri::command]
-fn get_capture_preview() -> Option<Vec<u8>> {
-    ocr::get_capture_png()
 }
 
 #[tauri::command]
@@ -856,501 +925,10 @@ fn set_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
         win.set_ignore_cursor_events(enabled)
             .map_err(|e| e.to_string())?;
     }
-    // When passthrough is OFF (settings/picker open), keep overlay visible
+    // When passthrough is OFF (settings open), keep overlay visible
     // even if KovaaK's isn't the foreground window.
     window_tracker::set_force_show(!enabled);
     Ok(())
-}
-
-/// Start the background auto-setup loop which continuously captures the screen
-/// and automatically detects KovaaK's stats panel field regions.
-/// Emits `auto-setup-progress` periodically and `auto-setup-complete` when all
-/// 5 fields are confirmed (3 consistent detections each).
-#[tauri::command]
-fn start_auto_setup(
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<(), String> {
-    if AUTO_SETUP_RUNNING.swap(true, std::sync::atomic::Ordering::SeqCst) {
-        return Ok(()); // already running
-    }
-    let (monitor_index, stats_dir) = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
-        (s.monitor_index, s.stats_dir.clone())
-    };
-    let monitor_rect = resolve_monitor_rect(&app, monitor_index)?;
-    let app_clone = app.clone();
-    std::thread::Builder::new()
-        .name("auto-setup".into())
-        .spawn(move || auto_setup_loop(app_clone, monitor_rect, stats_dir))
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-/// Stop the background auto-setup loop started by `start_auto_setup`.
-#[tauri::command]
-fn stop_auto_setup() {
-    AUTO_SETUP_RUNNING.store(false, std::sync::atomic::Ordering::SeqCst);
-}
-
-// ─── UI.json helpers ──────────────────────────────────────────────────────────
-
-/// Read KovaaK's UI.json from `{stats_dir}/../../Saved/SaveGames/UI.json`.
-fn read_kovaaks_ui_json(stats_dir: &str) -> Option<serde_json::Value> {
-    let base = std::path::Path::new(stats_dir).parent()?.parent()?;
-    let path = base.join("Saved").join("SaveGames").join("UI.json");
-    let text = std::fs::read_to_string(&path)
-        .map_err(|e| log::debug!("ui_json: could not read {}: {e}", path.display()))
-        .ok()?;
-    serde_json::from_str(&text)
-        .map_err(|e| log::debug!("ui_json: parse error: {e}"))
-        .ok()
-}
-
-fn ui_window_pos(ui: &serde_json::Value, name: &str) -> Option<(f32, f32)> {
-    ui["windowPositionSettings"].as_array()?.iter()
-        .find(|w| w["windowName"].as_str() == Some(name))
-        .map(|w| (
-            w["position"]["x"].as_f64().unwrap_or(0.0) as f32,
-            w["position"]["y"].as_f64().unwrap_or(0.0) as f32,
-        ))
-}
-
-fn ui_window_scale(ui: &serde_json::Value, name: &str) -> f32 {
-    ui["windowScaleSettings"].as_array()
-        .and_then(|a| a.iter().find(|w| w["windowName"].as_str() == Some(name)))
-        .and_then(|w| w["scale"].as_f64())
-        .unwrap_or(1.0) as f32
-}
-
-/// Background loop for timed auto-setup.
-///
-/// Polls at POLL_INTERVAL, runs full-screen OCR word detection, and accumulates
-/// per-field results across frames.  A field is "confirmed" after CONFIRM_THRESHOLD
-/// consecutive detections that agree within TOLERANCE pixels.  Once all 5 fields
-/// are confirmed (or the loop is stopped), emits `auto-setup-complete`.
-fn auto_setup_loop(app: AppHandle, monitor_rect: settings::RegionRect, stats_dir: String) {
-    use std::collections::HashMap;
-    use std::sync::atomic::Ordering;
-    use std::time::Duration;
-
-    const POLL_INTERVAL: Duration = Duration::from_millis(1500);
-    const CONFIRM_THRESHOLD: u32 = 3;
-    const TOLERANCE: i32 = 12;
-    const TOTAL: usize = 6;
-
-    struct Candidate {
-        rect: settings::RegionRect,
-        consecutive: u32,
-    }
-
-    let field_keys: [&str; TOTAL] = ["kills", "kps", "accuracy", "damage", "spm", "ttk"];
-    let mut candidates: HashMap<&str, Candidate> = HashMap::new();
-    let mut confirmed_set: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    let mut confirmed_regions = settings::StatsFieldRegions::default();
-
-    // Try to read KovaaK's UI.json to narrow the OCR capture rect to just the
-    // SessionStats panel and derive the ScenarioTitle region automatically.
-    let (ocr_capture_rect, scenario_region_from_ui) = Some(stats_dir.as_str())
-        .and_then(read_kovaaks_ui_json)
-        .map(|ui| {
-            // ── SessionStats capture rect ──────────────────────────────────────
-            let stats_capture = ui_window_pos(&ui, "SessionStats").map(|(sx, sy)| {
-                let scale = ui_window_scale(&ui, "SessionStats");
-                // The panel origin is its top-left corner.  Use generous dimensions
-                // (320 × 220 at scale=1) so all 6 stat rows fit comfortably.
-                let x = (monitor_rect.x + sx as i32 - 5).max(monitor_rect.x);
-                let y = (monitor_rect.y + sy as i32 - 5).max(monitor_rect.y);
-                let w = (325.0 * scale).ceil() as u32;
-                let h = (225.0 * scale).ceil() as u32;
-                log::info!(
-                    "auto-setup: UI.json SessionStats ({sx},{sy}) scale={scale:.3} \
-                     → OCR rect ({x},{y}) {w}×{h}",
-                );
-                settings::RegionRect { x, y, width: w, height: h }
-            }).unwrap_or(monitor_rect);
-
-            // ── ScenarioTitle OCR region ───────────────────────────────────────
-            let scenario = ui_window_pos(&ui, "ScenarioTitle").map(|(tx, ty)| {
-                let scale = ui_window_scale(&ui, "ScenarioTitle");
-                // Position is the widget's top-left anchor.  The text box is wide and
-                // may extend above/below the anchor, so use generous padding.
-                // -70 left / -20 top covers variations in anchor placement.
-                let x = (monitor_rect.x + tx as i32 - 70).max(monitor_rect.x);
-                let y = (monitor_rect.y + ty as i32 - 20).max(monitor_rect.y);
-                let w = ((700.0 * scale) as u32).min(monitor_rect.width);
-                let h = (80.0 * scale).ceil() as u32;
-                log::info!(
-                    "auto-setup: UI.json ScenarioTitle ({tx},{ty}) scale={scale:.3} \
-                     → scenario region ({x},{y}) {w}×{h}",
-                );
-                settings::RegionRect { x, y, width: w, height: h }
-            });
-
-            (stats_capture, scenario)
-        })
-        .unwrap_or((monitor_rect, None));
-
-    log::info!(
-        "auto-setup: started — monitor ({},{}) {}×{}, OCR rect ({},{}) {}×{}",
-        monitor_rect.x, monitor_rect.y, monitor_rect.width, monitor_rect.height,
-        ocr_capture_rect.x, ocr_capture_rect.y, ocr_capture_rect.width, ocr_capture_rect.height,
-    );
-
-    while AUTO_SETUP_RUNNING.load(Ordering::SeqCst) {
-        std::thread::sleep(POLL_INTERVAL);
-        if !AUTO_SETUP_RUNNING.load(Ordering::SeqCst) { break; }
-
-        let words = match ocr::capture_screen_words(&ocr_capture_rect) {
-            Ok(w) => w,
-            Err(e) => { log::debug!("auto-setup: capture failed: {e}"); continue; }
-        };
-        log::debug!("auto-setup: OCR returned {} words", words.len());
-        if log::log_enabled!(log::Level::Trace) {
-            for w in words.iter().take(40) {
-                log::trace!("auto-setup: word {:?} at ({},{}) {}×{}", w.text, w.x, w.y, w.width, w.height);
-            }
-        }
-
-        let detected = detect_field_regions_from_words(&words, &ocr_capture_rect);
-        let detected_per_field: [(&str, Option<settings::RegionRect>); TOTAL] = [
-            ("kills",    detected.kills),
-            ("kps",      detected.kps),
-            ("accuracy", detected.accuracy),
-            ("damage",   detected.damage),
-            ("spm",      detected.spm),
-            ("ttk",      detected.ttk),
-        ];
-
-        for (field, maybe_rect) in detected_per_field {
-            if confirmed_set.contains(field) { continue; }
-            if let Some(rect) = maybe_rect {
-                let newly_confirmed = match candidates.get(field) {
-                    None => {
-                        candidates.insert(field, Candidate { rect, consecutive: 1 });
-                        false
-                    }
-                    Some(c) if rects_close(&c.rect, &rect, TOLERANCE) => {
-                        let n = c.consecutive + 1;
-                        candidates.insert(field, Candidate { rect: c.rect, consecutive: n });
-                        n >= CONFIRM_THRESHOLD
-                    }
-                    _ => {
-                        candidates.insert(field, Candidate { rect, consecutive: 1 });
-                        false
-                    }
-                };
-                if newly_confirmed {
-                    let r = candidates[field].rect;
-                    log::info!("auto-setup: confirmed {} ({},{}) {}×{}", field, r.x, r.y, r.width, r.height);
-                    confirmed_set.insert(field);
-                    match field {
-                        "kills"    => confirmed_regions.kills    = Some(r),
-                        "kps"      => confirmed_regions.kps      = Some(r),
-                        "accuracy" => confirmed_regions.accuracy = Some(r),
-                        "damage"   => confirmed_regions.damage   = Some(r),
-                        "spm"      => confirmed_regions.spm      = Some(r),
-                        "ttk"      => confirmed_regions.ttk      = Some(r),
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        let confirmed_list: Vec<String> =
-            field_keys.iter().filter(|&&k| confirmed_set.contains(k)).map(|s| s.to_string()).collect();
-        let _ = app.emit(EVENT_AUTO_SETUP_PROGRESS, AutoSetupProgress {
-            confirmed: confirmed_list,
-            total: TOTAL,
-        });
-
-        if confirmed_set.len() == TOTAL {
-            log::info!("auto-setup: all {} fields confirmed — saving", TOTAL);
-            AUTO_SETUP_RUNNING.store(false, Ordering::SeqCst);
-            let _ = app.emit(EVENT_AUTO_SETUP_COMPLETE, AutoSetupComplete {
-                regions: confirmed_regions,
-                confirmed_count: TOTAL,
-                scenario_region: scenario_region_from_ui,
-            });
-            break;
-        }
-    }
-    log::info!("auto-setup: stopped ({}/{} confirmed)", confirmed_set.len(), TOTAL);
-}
-
-/// Automatically detect KovaaK's stats panel field regions by capturing the
-/// monitor and matching known label strings in the full-screen OCR word list.
-///
-/// Returns a `StatsFieldRegions` with every field that could be located.
-/// Fields that are not found are returned as `None` so the caller can decide
-/// whether to keep existing manual regions for those fields.
-#[tauri::command]
-fn auto_detect_stats_regions(
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<settings::StatsFieldRegions, String> {
-    let monitor_index = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
-        s.monitor_index
-    };
-    let monitor_rect = resolve_monitor_rect(&app, monitor_index)?;
-    log::info!(
-        "auto_detect: capturing monitor {} at ({},{}) {}×{}",
-        monitor_index, monitor_rect.x, monitor_rect.y,
-        monitor_rect.width, monitor_rect.height,
-    );
-
-    let words = ocr::capture_screen_words(&monitor_rect).map_err(|e| e.to_string())?;
-    log::info!("auto_detect: OCR returned {} words", words.len());
-
-    Ok(detect_field_regions_from_words(&words, &monitor_rect))
-}
-
-// ─── Auto-detect helpers ───────────────────────────────────────────────────────
-
-/// Returns the physical screen rectangle for the given monitor index.
-/// Falls back to the first monitor if the index is out of range.
-fn resolve_monitor_rect(app: &AppHandle, monitor_index: usize) -> Result<settings::RegionRect, String> {
-    let win = app
-        .get_webview_window("overlay")
-        .ok_or_else(|| "overlay window not found".to_string())?;
-    let monitors = win.available_monitors().map_err(|e| e.to_string())?;
-    let m = monitors
-        .get(monitor_index)
-        .or_else(|| monitors.first())
-        .ok_or_else(|| "no monitors found".to_string())?;
-    let pos = m.position();
-    let size = m.size();
-    Ok(settings::RegionRect { x: pos.x, y: pos.y, width: size.width, height: size.height })
-}
-
-/// Check whether two `RegionRect`s are within `tolerance` pixels on all four edges.
-fn rects_close(a: &settings::RegionRect, b: &settings::RegionRect, tolerance: i32) -> bool {
-    (a.x - b.x).abs() <= tolerance
-        && (a.y - b.y).abs() <= tolerance
-        && (a.width as i32 - b.width as i32).abs() <= tolerance
-        && (a.height as i32 - b.height as i32).abs() <= tolerance
-}
-
-/// Axis-aligned bounding box (capture-image pixel coordinates).
-#[derive(Clone, Debug)]
-struct BBox {
-    x: i32,
-    y: i32,
-    width: u32,
-    height: u32,
-}
-
-impl BBox {
-    fn right(&self) -> i32 { self.x + self.width as i32 }
-    fn bottom(&self) -> i32 { self.y + self.height as i32 }
-    fn centre_y(&self) -> i32 { self.y + self.height as i32 / 2 }
-
-    /// Smallest box containing both `self` and `other`.
-    fn union(&self, other: &BBox) -> BBox {
-        let x1 = self.x.min(other.x);
-        let y1 = self.y.min(other.y);
-        let x2 = self.right().max(other.right());
-        let y2 = self.bottom().max(other.bottom());
-        BBox { x: x1, y: y1, width: (x2 - x1) as u32, height: (y2 - y1) as u32 }
-    }
-}
-
-fn word_to_bbox(w: &ocr::OcrWordResult) -> BBox {
-    BBox { x: w.x, y: w.y, width: w.width, height: w.height }
-}
-
-/// Search `words` for a label composed of one or more tokens (case-insensitive).
-/// For multi-word labels (e.g. `["Kill", "Count"]`) we verify that the later tokens
-/// appear within 5 positions of the first and on the same row (centre_y within 20 px).
-/// Returns the union bounding box of all matched label words.
-fn find_label_in_words(words: &[ocr::OcrWordResult], tokens: &[&str]) -> Option<BBox> {
-    if tokens.is_empty() || words.is_empty() {
-        return None;
-    }
-    // KovaaK's stats panel labels include a trailing colon in the rendered text
-    // (e.g. "Accuracy:" / "Kill Count:").  Windows.Media.Ocr preserves that colon
-    // as part of the word token.  Strip trailing punctuation before comparing so
-    // that label alternatives like "Accuracy" match the OCR word "Accuracy:".
-    fn clean(s: &str) -> &str {
-        s.trim_end_matches(|c: char| ":.,!?".contains(c))
-    }
-
-    // Two passes: first prefer words whose raw OCR text ends with ":"
-    // (KovaaK's stats-panel labels like "SPM:" / "KPS:"), then accept any
-    // match.  This prevents accidentally matching a plain "SPM" leaderboard
-    // column header that also appears on screen.
-    for require_colon in [true, false] {
-        'outer: for start in 0..words.len() {
-            let first_raw = &words[start].text;
-            if !clean(first_raw).eq_ignore_ascii_case(tokens[0]) {
-                continue;
-            }
-            // In pass 1 the first-token word must end with ":"
-            if require_colon && !first_raw.ends_with(':') {
-                continue;
-            }
-            let mut bbox = word_to_bbox(&words[start]);
-            let row_cy = bbox.centre_y();
-            for (ti, &tok) in tokens.iter().enumerate().skip(1) {
-                let mut found = false;
-                let end = (start + ti + 5).min(words.len());
-                for wi in (start + ti)..end {
-                    let cand = &words[wi];
-                    if clean(&cand.text).eq_ignore_ascii_case(tok)
-                        && (word_to_bbox(cand).centre_y() - row_cy).abs() < 20
-                    {
-                        bbox = bbox.union(&word_to_bbox(cand));
-                        found = true;
-                        break;
-                    }
-                }
-                if !found {
-                    continue 'outer;
-                }
-            }
-            return Some(bbox);
-        }
-    }
-    None
-}
-
-/// Find the value region for a detected label box.
-///
-/// Strategy: scan all OCR words that are
-///   • on the same horizontal row as the label (centre_y within `label.height` pixels), and
-///   • to the right of the label's right edge, and
-///   • contain at least one ASCII digit (the value itself).
-///
-/// Returns the union of all matching words, or `None` if no digit word is found.
-fn find_value_box(words: &[ocr::OcrWordResult], label_box: &BBox) -> Option<BBox> {
-    let row_cy = label_box.centre_y();
-    let row_tolerance = (label_box.height as i32).max(12);
-    // Stop merging words once there is a horizontal gap larger than this.
-    // This prevents a distant timer or unrelated number from being pulled in.
-    const MAX_WORD_GAP: i32 = 40;
-
-    // Collect candidates: right of label, same row, contains a digit.
-    let mut candidates: Vec<BBox> = words
-        .iter()
-        .filter_map(|w| {
-            let wb = word_to_bbox(w);
-            if wb.x < label_box.right() - 4 {
-                return None;
-            }
-            if (wb.centre_y() - row_cy).abs() > row_tolerance {
-                return None;
-            }
-            if !w.text.chars().any(|c| c.is_ascii_digit()) {
-                return None;
-            }
-            Some(wb)
-        })
-        .collect();
-
-    // Work left-to-right so we stop at the first large gap.
-    candidates.sort_by_key(|wb| wb.x);
-
-    // The first digit word must be reasonably close to the label's right edge.
-    // If it isn't (e.g. value not yet rendered and the only digit on the row is
-    // the FPS counter 1600 px away), reject the entire match.
-    const MAX_LABEL_TO_VALUE: i32 = 200;
-
-    let mut combined: Option<BBox> = None;
-    for wb in candidates {
-        if let Some(ref acc) = combined {
-            if wb.x - acc.right() > MAX_WORD_GAP {
-                break; // large gap → unrelated element, stop here
-            }
-            combined = Some(acc.union(&wb));
-        } else {
-            if wb.x - label_box.right() > MAX_LABEL_TO_VALUE {
-                break; // first candidate is too far — no value near label
-            }
-            combined = Some(wb);
-        }
-    }
-    combined
-}
-
-/// Match OCR words against all known KovaaK's stats panel labels and assemble
-/// absolute `RegionRect`s (screen coordinates) for each found field.
-///
-/// Each field has a primary label and zero or more fallback alternatives; the
-/// first matching alternative wins.  This handles variations in how KovaaK's
-/// renders the stats panel text (e.g. "Kills" vs "Kill Count", "K/s" vs "KPS").
-fn detect_field_regions_from_words(
-    words: &[ocr::OcrWordResult],
-    capture_rect: &settings::RegionRect,
-) -> settings::StatsFieldRegions {
-    // Each entry: (field_name, list-of-alternative-token-sequences)
-    const LABELS: &[(&str, &[&[&str]])] = &[
-        ("kills",    &[&["Kill", "Count"], &["Kills"], &["Kill"]]),
-        ("kps",      &[&["KPS"], &["K/s"], &["Kills/s"], &["k/s"]]),
-        ("accuracy", &[&["Accuracy"], &["Acc"]]),
-        ("damage",   &[&["Damage"], &["Damage", "Dealt"], &["Dmg"]]),
-        ("spm",      &[&["SPM"], &["Shots/m"], &["Shots/min"]]),
-        ("ttk",      &[&["Avg", "TTK"], &["TTK"], &["Avg", "Time"]]),
-    ];
-
-    if log::log_enabled!(log::Level::Debug) && !words.is_empty() {
-        let sample: Vec<&str> = words.iter().take(30).map(|w| w.text.as_str()).collect();
-        log::debug!("auto_detect: {} words, first 30: {:?}", words.len(), sample);
-    } else if words.is_empty() {
-        log::debug!("auto_detect: OCR returned 0 words — is KovaaK's visible and running?");
-    }
-
-    let mut out = settings::StatsFieldRegions::default();
-    const PAD_V: i32 = 6;  // vertical padding (top / bottom)
-    const PAD_R: i32 = 30; // right padding — generous so growing numbers aren't clipped
-
-    for &(field, alternatives) in LABELS {
-        let mut found_label: Option<BBox> = None;
-        for &tokens in alternatives {
-            if let Some(lb) = find_label_in_words(words, tokens) {
-                found_label = Some(lb);
-                break;
-            }
-        }
-        let Some(label_box) = found_label else {
-            log::debug!("auto_detect: label for '{}' not found (tried all alternatives)", field);
-            continue;
-        };
-        let Some(val_box) = find_value_box(words, &label_box) else {
-            log::debug!("auto_detect: value for '{}' not found", field);
-            continue;
-        };
-
-        // Left edge: anchored to the label's right side + a small gap.
-        // This ensures the region never clips leading digits as a number
-        // grows wider (e.g. "1/2" → "100/149") because the value always
-        // extends rightward from a fixed column just past the label.
-        const LEFT_GAP: i32 = 4;
-        let left  = capture_rect.x + label_box.right() + LEFT_GAP;
-        let right = capture_rect.x + val_box.right()   + PAD_R;
-        let top   = capture_rect.y + (val_box.y - PAD_V).max(0);
-        let bot   = capture_rect.y + val_box.bottom()   + PAD_V;
-        let r = settings::RegionRect {
-            x:      left,
-            y:      top,
-            width:  (right - left).max(1) as u32,
-            height: (bot   - top ).max(1) as u32,
-        };
-        log::info!(
-            "auto_detect: {} → ({},{}) {}×{}",
-            field, r.x, r.y, r.width, r.height,
-        );
-        match field {
-            "kills"    => out.kills    = Some(r),
-            "kps"      => out.kps      = Some(r),
-            "accuracy" => out.accuracy = Some(r),
-            "damage"   => out.damage   = Some(r),
-            "spm"      => out.spm      = Some(r),
-            "ttk"      => out.ttk      = Some(r),
-            _ => {}
-        }
-    }
-    out
 }
 
 // ─── Single-instance helper ────────────────────────────────────────────────────
@@ -1367,7 +945,7 @@ fn kill_existing_instance() {
 
     #[cfg(target_os = "windows")]
     {
-        // Resolve just the file name of our own executable (e.g. "kovaaks-overlay.exe").
+        // Resolve just the file name of our own executable (e.g. "aimmod.exe").
         let exe_name = std::env::current_exe()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
@@ -1379,7 +957,13 @@ fn kill_existing_instance() {
 
         // Ask Windows for every running process whose image name matches ours.
         let result = std::process::Command::new("tasklist")
-            .args(["/FI", &format!("IMAGENAME eq {exe_name}"), "/FO", "CSV", "/NH"])
+            .args([
+                "/FI",
+                &format!("IMAGENAME eq {exe_name}"),
+                "/FO",
+                "CSV",
+                "/NH",
+            ])
             .output();
 
         if let Ok(output) = result {
@@ -1415,8 +999,8 @@ fn kill_existing_instance() {
     {
         let pid_path = std::env::current_exe()
             .ok()
-            .and_then(|p| p.parent().map(|d| d.join("kovaaks-overlay.pid")))
-            .unwrap_or_else(|| std::env::temp_dir().join("kovaaks-overlay.pid"));
+            .and_then(|p| p.parent().map(|d| d.join("aimmod.pid")))
+            .unwrap_or_else(|| std::env::temp_dir().join("aimmod.pid"));
 
         if let Ok(contents) = std::fs::read_to_string(&pid_path) {
             if let Ok(old_pid) = contents.trim().parse::<u32>() {
@@ -1464,9 +1048,6 @@ pub fn run() {
             clear_log_buffer,
             get_settings,
             save_settings,
-            set_region,
-            set_scenario_region,
-            set_stats_field_regions,
             get_friends,
             add_friend,
             remove_friend,
@@ -1478,8 +1059,6 @@ pub fn run() {
             detect_current_user,
             validate_username,
             validate_scenario,
-            start_ocr,
-            stop_ocr,
             start_mouse_hook,
             stop_mouse_hook,
             get_session_mouse_data,
@@ -1491,36 +1070,33 @@ pub fn run() {
             set_mouse_passthrough,
             get_monitors,
             set_overlay_monitor,
-            get_capture_preview,
             get_cursor_pos,
             open_speech_settings,
             open_natural_voices_store,
-            auto_detect_stats_regions,
-            start_auto_setup,
-            stop_auto_setup,
             search_scenarios,
             get_leaderboard_page,
             get_scenario_details,
+            mem_debug::mem_read_watches,
+            mem_debug::mem_scan,
+            mem_debug::mem_scan_cancel,
+            mem_debug::mem_rescan,
+            mem_debug::mem_follow_chain,
+            mem_debug::mem_get_modules,
+            mem_debug::mem_ptr_scan,
+            mem_debug::mem_auto_chain_find,
+            mem_debug::mem_scan_struct,
+            inject_bridge,
+            ue4ss_get_recent_logs,
+            ue4ss_trigger_hot_reload,
+            ue4ss_get_runtime_flags,
+            ue4ss_set_runtime_flag,
+            ue4ss_reload_runtime_flags,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
         ])
         .setup(|app| {
             // Load persisted settings
-            let mut loaded = settings::load(app.handle()).unwrap_or_default();
-
-            // Migrate legacy `region` → `stats_field_regions.spm`.
-            // The old setup wizard stored the SPM capture region in the top-level
-            // `region` field.  After the per-stat refactor it lives in
-            // `stats_field_regions.spm`.  Copy it once and persist so subsequent
-            // startups don't need to do this.
-            if let (Some(legacy), None) = (loaded.region, loaded.stats_field_regions.spm) {
-                log::info!("Migrating legacy `region` → `stats_field_regions.spm`");
-                loaded.stats_field_regions.spm = Some(legacy);
-                // `region` is skip_serializing so it won't be written back.
-                if let Err(e) = settings::persist(app.handle(), &loaded) {
-                    log::warn!("Failed to persist region migration: {e}");
-                }
-            }
+            let loaded = settings::load(app.handle()).unwrap_or_default();
 
             {
                 let state = app.state::<AppState>();
@@ -1535,7 +1111,10 @@ pub fn run() {
 
             // Register the app handle so the logger can emit live events
             logger::register_app(app.handle().clone());
-            log::info!("KovaaK's Overlay starting up — log file: {}", logger::log_file_path().display());
+            log::info!(
+                "AimMod starting up — log file: {}",
+                logger::log_file_path().display()
+            );
 
             // Migrate legacy session names: strip " - Challenge" / " - Challenge Start"
             // suffixes that were incorrectly included before parse_filename was fixed.
@@ -1551,16 +1130,21 @@ pub fn run() {
             mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
             mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
 
-            // Start OCR (begins reading SPM once a region is configured)
-            ocr::update_scenario_region(loaded.scenario_region);
-            ocr::start(app.handle().clone(), loaded.stats_field_regions.spm, loaded.ocr_poll_ms);
-
-            // Start stats-panel OCR
-            stats_ocr::update_field_regions(loaded.stats_field_regions);
-            stats_ocr::start(app.handle().clone());
+            // Start pipe server before injection so early UE4SS events are not lost.
+            bridge::start(app.handle().clone());
+            if let Err(e) = bridge::start_log_tailer(app.handle().clone(), &loaded.stats_dir) {
+                log::warn!("Failed to start UE4SS log tailer: {e}");
+            }
+            // Deploy UE4SS runtime/mod payload and manually inject UE4SS.dll.
+            if let Err(e) = deploy_and_inject_ue4ss(app.handle(), &loaded.stats_dir) {
+                log::error!("Failed to deploy/inject UE4SS runtime: {e}");
+            }
 
             // Start window tracker — shows/hides overlay based on KovaaK's focus
             window_tracker::start(app.handle().clone());
+
+            // Start live memory reader — polls KovaaK's process for kills / TTK
+            memory_reader::start(app.handle().clone());
 
             // Build system tray (Windows only)
             #[cfg(not(target_os = "linux"))]
@@ -1598,24 +1182,34 @@ pub fn run() {
 }
 
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
-    let open_settings = MenuItem::with_id(app, "open_settings", "Settings  (F8)", true, None::<&str>)?;
+    let open_settings =
+        MenuItem::with_id(app, "open_settings", "Settings  (F8)", true, None::<&str>)?;
     let open_stats = MenuItem::with_id(app, "open_stats", "Session Stats", true, None::<&str>)?;
-    let toggle_overlay = MenuItem::with_id(app, "toggle_overlay", "Toggle Overlay", true, None::<&str>)?;
+    let toggle_overlay =
+        MenuItem::with_id(app, "toggle_overlay", "Toggle AimMod", true, None::<&str>)?;
     let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
 
-    let menu = Menu::with_items(app, &[&open_settings, &open_stats, &toggle_overlay, &separator, &quit])?;
+    let menu = Menu::with_items(
+        app,
+        &[
+            &open_settings,
+            &open_stats,
+            &toggle_overlay,
+            &separator,
+            &quit,
+        ],
+    )?;
 
     let mut tray_builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("KovaaK's Overlay");
+        .tooltip("AimMod");
     if let Some(icon) = app.default_window_icon() {
         tray_builder = tray_builder.icon(icon.clone());
     }
     let _tray = tray_builder
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open_settings" => {
-                // Emit to the overlay window — same as pressing F8
                 let _ = app.emit("toggle-settings", ());
             }
             "open_stats" => {
@@ -1643,7 +1237,6 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
                 ..
             } = event
             {
-                // Left click does nothing (menu is right-click only)
             }
         })
         .build(app)?;

@@ -18,6 +18,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "aimmod"
+version = "1.0.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "csv",
+ "image",
+ "log",
+ "notify",
+ "once_cell",
+ "parking_lot",
+ "rdev",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "strsim",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-process",
+ "tauri-plugin-shell",
+ "tauri-plugin-store",
+ "tauri-plugin-updater",
+ "thiserror 1.0.69",
+ "tokio",
+ "windows 0.62.2",
+ "winreg 0.52.0",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2129,35 +2158,6 @@ dependencies = [
  "bitflags 2.11.0",
  "serde",
  "unicode-segmentation",
-]
-
-[[package]]
-name = "kovaaks-overlay"
-version = "0.6.1"
-dependencies = [
- "anyhow",
- "chrono",
- "csv",
- "image",
- "log",
- "notify",
- "once_cell",
- "parking_lot",
- "rdev",
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "strsim",
- "tauri",
- "tauri-build",
- "tauri-plugin-process",
- "tauri-plugin-shell",
- "tauri-plugin-store",
- "tauri-plugin-updater",
- "thiserror 1.0.69",
- "tokio",
- "windows 0.62.2",
- "winreg 0.52.0",
 ]
 
 [[package]]

@@ -25,11 +25,10 @@ use tauri::{AppHandle, Emitter, Manager};
 static TRACKING_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// When true the overlay is kept visible regardless of which window has focus
-/// (e.g. settings panel is open, region picker is active).
+/// (e.g. settings panel is open).
 static FORCE_SHOW: AtomicBool = AtomicBool::new(false);
 
-/// True while KovaaK's is the foreground window.  Read by the OCR thread to skip
-/// captures when the user is not in-game (prevents OCR on unrelated windows).
+/// True while KovaaK's is the foreground window.
 static GAME_FOCUSED: AtomicBool = AtomicBool::new(false);
 
 /// Last known KovaaK's HWND stored as a raw pointer so focus can be restored.
@@ -63,7 +62,7 @@ pub fn stop() {
     TRACKING_RUNNING.store(false, Ordering::SeqCst);
 }
 
-/// Call this whenever the overlay enters or leaves "settings / region-picker" mode
+/// Call this whenever the overlay enters or leaves settings mode
 /// so the tracker keeps it visible even if KovaaK's loses focus.
 pub fn set_force_show(val: bool) {
     FORCE_SHOW.store(val, Ordering::Relaxed);
@@ -74,12 +73,12 @@ pub fn set_force_show(val: bool) {
 #[cfg(all(target_os = "windows", feature = "ocr"))]
 fn tracker_loop(app: AppHandle) {
     use windows::Win32::Foundation::{HWND, RECT};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowRect, SetWindowPos, HWND_TOPMOST,
-        SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW,
-    };
     use windows::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetForegroundWindow, GetWindowRect, HWND_TOPMOST, SWP_HIDEWINDOW, SWP_NOMOVE, SWP_NOSIZE,
+        SWP_SHOWWINDOW, SetWindowPos,
     };
 
     const POLL_MS: u64 = 250;
@@ -171,11 +170,13 @@ fn tracker_loop(app: AppHandle) {
                     let (x, y, w, h) = clamped;
                     if let Some(win) = app.get_webview_window("overlay") {
                         let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-                        let _ =
-                            win.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: w, height: h }));
+                        let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize {
+                            width: w,
+                            height: h,
+                        }));
                     }
                     last_rect = Some(clamped);
-                    log::info!("Overlay repositioned: ({x},{y}) {w}×{h}");
+                    log::info!("AimMod repositioned: ({x},{y}) {w}×{h}");
                 }
             }
         }
@@ -191,7 +192,15 @@ fn tracker_loop(app: AppHandle) {
                 let reassert = state_changed || topmost_ticks_remaining == 0;
                 if reassert {
                     unsafe {
-                        let _ = SetWindowPos(oh, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+                        let _ = SetWindowPos(
+                            oh,
+                            Some(HWND_TOPMOST),
+                            0,
+                            0,
+                            0,
+                            0,
+                            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW,
+                        );
                     }
                     topmost_ticks_remaining = TOPMOST_REASSERT_TICKS;
                 } else {
@@ -199,16 +208,24 @@ fn tracker_loop(app: AppHandle) {
                 }
                 if state_changed {
                     let _ = app.emit("kovaaks-focused", true);
-                    log::info!("Overlay shown (KovaaK's active)");
+                    log::info!("AimMod shown (KovaaK's active)");
                     overlay_visible = true;
                 }
             } else if overlay_visible {
                 unsafe {
-                    let _ = SetWindowPos(oh, Some(HWND_TOPMOST), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW);
+                    let _ = SetWindowPos(
+                        oh,
+                        Some(HWND_TOPMOST),
+                        0,
+                        0,
+                        0,
+                        0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_HIDEWINDOW,
+                    );
                 }
                 GAME_FOCUSED.store(false, Ordering::Relaxed);
                 let _ = app.emit("kovaaks-focused", false);
-                log::info!("Overlay hidden (alt-tabbed)");
+                log::info!("AimMod hidden (alt-tabbed)");
                 overlay_visible = false;
                 topmost_ticks_remaining = 0; // reset so we re-assert immediately on next show
             }
@@ -225,8 +242,8 @@ fn tracker_loop(app: AppHandle) {
 #[cfg(all(target_os = "windows", feature = "ocr"))]
 fn is_kovaaks_window(hwnd: windows::Win32::Foundation::HWND) -> bool {
     use windows::Win32::System::Threading::{
-        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, GetWindowThreadProcessId};
 

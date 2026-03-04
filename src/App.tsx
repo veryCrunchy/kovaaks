@@ -3,9 +3,9 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { VSMode } from "./overlay/VSMode";
 import { SmoothnessHUD } from "./overlay/SmoothnessHUD";
+import { LiveMemStatsHUD } from "./overlay/LiveMemStatsHUD";
 import { StatsHUD } from "./overlay/StatsHUD";
 import { LiveFeedbackToast } from "./overlay/LiveFeedbackToast";
-import { DebugStatsOCR } from "./overlay/DebugStatsOCR";
 import { DraggableHUD } from "./overlay/DraggableHUD";
 import { PostSessionOverview } from "./overlay/PostSessionOverview";
 import type { AppSettings } from "./types/settings";
@@ -15,12 +15,8 @@ import "./index.css";
 const Settings = lazy(() =>
   import("./settings/Settings").then(m => ({ default: m.Settings }))
 );
-const UnifiedRegionPicker = lazy(() =>
-  import("./settings/UnifiedRegionPicker").then(m => ({ default: m.UnifiedRegionPicker }))
-);
-import { AutoSetupHUD } from "./overlay/AutoSetupHUD";
 
-type Mode = "overlay" | "settings" | "region-picker" | "layout" | "auto-setup";
+type Mode = "overlay" | "settings" | "layout";
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("overlay");
@@ -68,15 +64,6 @@ export default function App() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // F9 — jump straight to region picker; return to overlay when done (not settings)
-  useEffect(() => {
-    const unlisten = listen<void>("open-region-picker", () => {
-      setReturnMode("overlay");
-      setMode("region-picker");
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, []);
-
   // F10 — toggle HUD drag-to-reposition mode; return to overlay when done
   useEffect(() => {
     const unlisten = listen<void>("toggle-layout-huds", () => {
@@ -97,29 +84,9 @@ export default function App() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // OCR-detected scenario name (fires at session start, before CSV is written).
-  // validate_scenario returns the canonical corrected name, or null if garbage.
+  // Manage mouse click-through: active in overlay mode
   useEffect(() => {
-    const unlisten = listen<string>("scenario-detected", (e) => {
-      const name = e.payload;
-      console.log("[scenario-detected] received:", name);
-      invoke<string | null>("validate_scenario", { scenarioName: name })
-        .then((canonical) => {
-          if (canonical !== null) {
-            console.log("[scenario-detected] accepted:", canonical, canonical !== name ? `(corrected from "${name}")` : "");
-            setCurrentScenario(canonical);
-          } else {
-            console.warn("[scenario-detected] rejected:", name);
-          }
-        })
-        .catch((e) => console.error("[scenario-detected] validate_scenario error:", e));
-    });
-    return () => { unlisten.then(fn => fn()); };
-  }, []);
-
-  // Manage mouse click-through: active in overlay and auto-setup modes
-  useEffect(() => {
-    const passthrough = mode === "overlay" || mode === "auto-setup";
+    const passthrough = mode === "overlay";
     invoke("set_mouse_passthrough", { enabled: passthrough }).catch(console.error);
   }, [mode]);
 
@@ -146,8 +113,8 @@ export default function App() {
         />
       )}
 
-      {/* Overlay HUDs — hidden while region picker is open so the game is fully visible */}
-      {mode !== "region-picker" && hudVis !== null && (
+      {/* Overlay HUDs */}
+      {hudVis !== null && (
         <>
           {hudVis.vsmode && (
             <DraggableHUD storageKey="vsmode" defaultPos={{ x: 16, y: 16 }} layoutMode={mode === "layout"}>
@@ -159,6 +126,9 @@ export default function App() {
               <SmoothnessHUD preview={true} />
             </DraggableHUD>
           )}
+          <DraggableHUD storageKey="live-mem" defaultPos={{ x: window.innerWidth - 140, y: 16 }} layoutMode={mode === "layout"}>
+            <LiveMemStatsHUD preview={mode === "layout"} />
+          </DraggableHUD>
           {hudVis.stats && (
             <DraggableHUD storageKey="statshud" defaultPos={{ x: window.innerWidth - 160, y: window.innerHeight - 200 }} layoutMode={mode === "layout"}>
               <StatsHUD preview={true} />
@@ -172,11 +142,6 @@ export default function App() {
           {hudVis.postSession && (
             <DraggableHUD storageKey="post-session" defaultPos={{ x: Math.round(window.innerWidth / 2) - 150, y: Math.round(window.innerHeight / 2) - 200 }} layoutMode={mode === "layout"}>
               <PostSessionOverview preview={mode === "layout"} />
-            </DraggableHUD>
-          )}
-          {import.meta.env.DEV && (
-            <DraggableHUD storageKey="debug-ocr" defaultPos={{ x: 16, y: window.innerHeight - 280 }} layoutMode={mode === "layout"}>
-              <DebugStatsOCR />
             </DraggableHUD>
           )}
         </>
@@ -244,40 +209,11 @@ export default function App() {
             >
               <Settings
                 onClose={() => { setMode("overlay"); reloadHudVis(); }}
-                onPickRegions={() => { setReturnMode("settings"); setMode("region-picker"); }}
                 onLayoutHUDs={() => { setReturnMode("settings"); setMode("layout"); }}
-                onAutoSetup={() => {
-                  setReturnMode("settings");
-                  setMode("auto-setup");
-                  // Give focus back to KovaaK's so the user can start playing
-                  invoke("focus_game_window").catch(console.error);
-                }}
               />
             </div>
           </div>
         </Suspense>
-      )}
-
-      {/* Region picker — full-screen transparent overlay so user sees the game */}
-      {mode === "region-picker" && (
-        <Suspense fallback={null}>
-          <UnifiedRegionPicker
-            onComplete={() => setMode(returnMode)}
-            onStartAutoSetup={() => {
-              setMode("auto-setup");
-              invoke("focus_game_window").catch(console.error);
-            }}
-          />
-        </Suspense>
-      )}
-
-      {/* Auto-setup HUD — transparent corner widget, passthrough enabled so
-          KovaaK's receives full mouse/keyboard input while detection runs. */}
-      {mode === "auto-setup" && (
-        <AutoSetupHUD
-          onComplete={() => { reloadHudVis(); setMode(returnMode); }}
-          onCancel={() => setMode(returnMode)}
-        />
       )}
     </div>
   );

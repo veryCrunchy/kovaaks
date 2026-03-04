@@ -141,7 +141,9 @@ pub fn get_all_sessions(app: &AppHandle) -> Vec<SessionRecord> {
 
 pub fn clear_sessions(app: &AppHandle) {
     use tauri_plugin_store::StoreExt;
-    let Ok(store) = app.store(STORE_PATH) else { return };
+    let Ok(store) = app.store(STORE_PATH) else {
+        return;
+    };
     store.set(STORE_KEY.to_string(), serde_json::Value::Array(vec![]));
     let _ = store.save();
 }
@@ -158,7 +160,9 @@ pub fn clear_sessions(app: &AppHandle) {
 /// delete after a few releases when no old sessions.json files remain.
 pub fn migrate_session_names(app: &AppHandle) {
     use tauri_plugin_store::StoreExt;
-    let Ok(store) = app.store(STORE_PATH) else { return };
+    let Ok(store) = app.store(STORE_PATH) else {
+        return;
+    };
 
     let mut sessions: Vec<SessionRecord> = store
         .get(STORE_KEY)
@@ -169,10 +173,7 @@ pub fn migrate_session_names(app: &AppHandle) {
     for record in &mut sessions {
         let stripped = crate::file_watcher::strip_challenge_suffix(&record.scenario);
         if stripped != record.scenario {
-            log::info!(
-                "session migration: {:?} → {:?}",
-                record.scenario, stripped,
-            );
+            log::info!("session migration: {:?} → {:?}", record.scenario, stripped,);
             record.scenario = stripped;
             changed += 1;
         }

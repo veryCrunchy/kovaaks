@@ -16,12 +16,10 @@ type Tab = "general" | "friends" | "smoothness" | "stats";
 
 interface SettingsProps {
   onClose: () => void;
-  onPickRegions: () => void;
   onLayoutHUDs: () => void;
-  onAutoSetup: () => void;
 }
 
-export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: SettingsProps) {
+export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [saving, setSaving] = useState(false);
@@ -90,9 +88,7 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
             className="text-xs font-bold tracking-widest"
             style={{ color: "#00f5a0" }}
           >
-            KOVAAK'S
-            <br />
-            OVERLAY
+            AIMMOD
           </div>
           {/* Close button */}
           <button
@@ -177,7 +173,6 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
           <div className="flex flex-col gap-0.5" style={{ color: "rgba(255,255,255,0.2)" }}>
             {[
               { key: "F8", label: "Toggle settings" },
-              { key: "F9", label: "Region picker" },
               { key: "F10", label: "Reposition HUDs" },
             ].map(({ key, label }) => (
               <div key={key} className="flex items-center justify-between text-xs">
@@ -294,8 +289,6 @@ export function Settings({ onClose, onPickRegions, onLayoutHUDs, onAutoSetup }: 
             settings={settings}
             onChange={setSettings}
             onSave={handleSave}
-            onPickRegions={onPickRegions}
-            onAutoSetup={onAutoSetup}
             saving={saving}
             saved={saved}
             error={error}
@@ -333,8 +326,6 @@ interface GeneralSettingsProps {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onSave: () => void;
-  onPickRegions: () => void;
-  onAutoSetup: () => void;
   saving: boolean;
   saved: boolean;
   error: string | null;
@@ -344,15 +335,11 @@ function GeneralSettings({
   settings,
   onChange,
   onSave,
-  onPickRegions,
-  onAutoSetup,
   saving,
   saved,
   error,
 }: GeneralSettingsProps) {
   const [monitors, setMonitors] = useState<MonitorInfo[]>([]);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [previewLoading, setPreviewLoading] = useState(false);
   const [detectingUser, setDetectingUser] = useState(false);
   const [detectError, setDetectError] = useState<string | null>(null);
 
@@ -373,30 +360,6 @@ function GeneralSettings({
       setDetectingUser(false);
     }
   };
-
-  // Revoke object URL when preview is dismissed or component unmounts
-  useEffect(() => {
-    return () => { if (previewUrl) URL.revokeObjectURL(previewUrl); };
-  }, [previewUrl]);
-
-  const handlePreview = useCallback(async () => {
-    setPreviewLoading(true);
-    setPreviewUrl(null);
-    try {
-      const bytes = await invoke<number[] | null>("get_capture_preview");
-      if (!bytes || bytes.length === 0) {
-        setPreviewLoading(false);
-        alert("No capture available yet — start a KovaaK's scenario first so OCR can grab a frame.");
-        return;
-      }
-      const blob = new Blob([new Uint8Array(bytes)], { type: "image/png" });
-      setPreviewUrl(URL.createObjectURL(blob));
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, []);
 
   useEffect(() => {
     invoke<MonitorInfo[]>("get_monitors").then(setMonitors).catch(console.error);
@@ -454,8 +417,8 @@ function GeneralSettings({
 
         {/* Monitor */}
         <FieldGroup
-          label="Overlay Monitor"
-          description="Which screen to show the overlay on"
+          label="AimMod Display"
+          description="Which screen to show AimMod on"
         >
           <div className="flex flex-col gap-2">
             {monitors.length === 0 ? (
@@ -511,102 +474,6 @@ function GeneralSettings({
             className="w-full rounded-lg px-3 py-2 text-sm font-mono"
             style={inputStyle}
           />
-        </FieldGroup>
-
-        {/* OCR Regions */}
-        <FieldGroup
-          label="OCR Regions"
-          description="Screen regions for SPM, scenario name, and live stats. Auto Setup detects them while you play."
-        >
-          {(() => {
-            const allDefs = [
-              { key: "spm",      label: "SPM",          color: "#00f5a0", rect: settings.stats_field_regions?.spm },
-              { key: "scenario", label: "Scenario Name", color: "#00b4ff", rect: settings.scenario_region },
-              { key: "kills",    label: "Kill Count",    color: "#f87171", rect: settings.stats_field_regions?.kills },
-              { key: "kps",      label: "KPS",           color: "#fb923c", rect: settings.stats_field_regions?.kps },
-              { key: "accuracy", label: "Accuracy",      color: "#fbbf24", rect: settings.stats_field_regions?.accuracy },
-              { key: "damage",   label: "Damage",        color: "#a78bfa", rect: settings.stats_field_regions?.damage },
-              { key: "ttk",      label: "Avg TTK",       color: "#34d399", rect: settings.stats_field_regions?.ttk },
-            ];
-            const configured = allDefs.filter(d => d.rect).length;
-            return (
-              <div className="flex flex-col gap-3">
-                <div className="flex flex-wrap gap-2">
-                  {allDefs.map(d => (
-                    <div
-                      key={d.key}
-                      className="text-xs px-2.5 py-1 rounded-md"
-                      style={{
-                        background: d.rect ? `${d.color}14` : "rgba(255,255,255,0.04)",
-                        border: `1px solid ${d.rect ? `${d.color}44` : "rgba(255,255,255,0.1)"}`,
-                        color: d.rect ? d.color : "rgba(255,255,255,0.3)",
-                        fontFamily: "'JetBrains Mono', monospace",
-                      }}
-                    >
-                      <span style={{ marginRight: 5 }}>{d.rect ? "●" : "○"}</span>
-                      {d.label}
-                      {d.rect && (
-                        <span style={{ opacity: 0.5, marginLeft: 5 }}>
-                          {d.rect.width}×{d.rect.height}
-                        </span>
-                      )}
-                    </div>
-                  ))}
-                </div>
-                <div className="flex items-center gap-3 flex-wrap">
-                  <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
-                    {configured}/{allDefs.length} configured
-                  </span>
-                  <button
-                    onClick={onAutoSetup}
-                    className="px-4 py-1.5 rounded-lg text-sm"
-                    style={{
-                      background: configured === 0 ? "rgba(251,191,36,0.12)" : "rgba(251,191,36,0.07)",
-                      border: configured === 0 ? "1px solid rgba(251,191,36,0.45)" : "1px solid rgba(251,191,36,0.22)",
-                      color: configured === 0 ? "#fbbf24" : "rgba(251,191,36,0.7)",
-                      cursor: "pointer",
-                      fontWeight: configured === 0 ? 700 : undefined,
-                    }}
-                  >
-                    {configured === 0 ? "Auto Setup" : "Re-run Auto Setup"}
-                  </button>
-                  <button
-                    onClick={onPickRegions}
-                    className="px-4 py-1.5 rounded-lg text-sm"
-                    style={{
-                      background: "rgba(255,255,255,0.07)",
-                      border: "1px solid rgba(255,255,255,0.12)",
-                      color: "rgba(255,255,255,0.6)",
-                      cursor: "pointer",
-                    }}
-                  >
-                    {configured === 0 ? "Manual Setup" : "Edit Regions"}
-                  </button>
-                </div>
-              </div>
-            );
-          })()}
-        </FieldGroup>
-
-        {/* OCR poll rate */}
-        <FieldGroup
-          label="OCR Poll Rate"
-          description="How often to read the SPM (ms). Lower = more CPU."
-        >
-          <div className="flex items-center gap-3">
-            <input
-              type="range"
-              min={50}
-              max={500}
-              step={50}
-              value={settings.ocr_poll_ms}
-              onChange={(e) => update("ocr_poll_ms", parseInt(e.target.value))}
-              style={{ accentColor: "#00f5a0" }}
-            />
-            <span className="text-sm tabular-nums" style={{ color: "rgba(255,255,255,0.6)", minWidth: 50 }}>
-              {settings.ocr_poll_ms}ms
-            </span>
-          </div>
         </FieldGroup>
 
         {/* Mouse DPI */}
@@ -725,8 +592,8 @@ function GeneralSettings({
           </div>
         </FieldGroup>
 
-        {/* Overlay toggle */}
-        <FieldGroup label="Overlay" description="Show or hide the in-game overlay">
+        {/* AimMod visibility toggle */}
+        <FieldGroup label="AimMod" description="Show or hide AimMod in-game">
           <label className="flex items-center gap-3 cursor-pointer">
             <div
               onClick={() => update("overlay_visible", !settings.overlay_visible)}
@@ -757,7 +624,7 @@ function GeneralSettings({
         </FieldGroup>
 
         {/* HUD visibility */}
-        <FieldGroup label="Visible HUDs" description="Show or hide individual overlay elements">
+        <FieldGroup label="Visible HUDs" description="Show or hide individual AimMod HUD elements">
           {(
             [
               ["VS Mode", "hud_vsmode_visible"],
@@ -825,83 +692,6 @@ function GeneralSettings({
         )}
       </div>
 
-      {/* ── Capture preview modal ─────────────────────────────────────────── */}
-      {previewUrl && (
-        <div
-          className="fixed inset-0 z-50 flex flex-col items-center justify-center"
-          style={{ background: "rgba(0,0,0,0.85)", backdropFilter: "blur(6px)" }}
-          onClick={() => setPreviewUrl(null)}
-        >
-          <div
-            className="flex flex-col items-center gap-4"
-            style={{ maxWidth: "90vw" }}
-            onClick={e => e.stopPropagation()}
-          >
-            <div className="flex items-center justify-between w-full">
-              <span
-                className="text-xs tracking-widest"
-                style={{ color: "#00f5a0", fontFamily: "'JetBrains Mono', monospace" }}
-              >
-                CAPTURE PREVIEW — what OCR sees
-              </span>
-              <div className="flex gap-2">
-                <button
-                  onClick={handlePreview}
-                  disabled={previewLoading}
-                  style={{
-                    background: "rgba(0,245,160,0.1)",
-                    border: "1px solid rgba(0,245,160,0.25)",
-                    borderRadius: 6,
-                    color: "#00f5a0",
-                    cursor: previewLoading ? "not-allowed" : "pointer",
-                    fontSize: 11,
-                    padding: "3px 10px",
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  {previewLoading ? "Refreshing…" : "Refresh"}
-                </button>
-                <button
-                  onClick={() => setPreviewUrl(null)}
-                  style={{
-                    background: "rgba(255,255,255,0.06)",
-                    border: "1px solid rgba(255,255,255,0.1)",
-                    borderRadius: 6,
-                    color: "rgba(255,255,255,0.5)",
-                    cursor: "pointer",
-                    fontSize: 14,
-                    padding: "2px 8px",
-                    lineHeight: 1,
-                    fontFamily: "'JetBrains Mono', monospace",
-                  }}
-                >
-                  ×
-                </button>
-              </div>
-            </div>
-
-            {/* Render the tiny OCR region with pixelated scaling — shows each pixel clearly */}
-            <img
-              src={previewUrl}
-              alt="OCR capture preview"
-              style={{
-                imageRendering: "pixelated",
-                maxWidth: "min(90vw, 1200px)",
-                maxHeight: "60vh",
-                minWidth: 300,
-                border: "2px solid rgba(0,245,160,0.4)",
-                borderRadius: 6,
-                boxShadow: "0 0 40px rgba(0,245,160,0.15)",
-                background: "#000",
-              }}
-            />
-
-            <p className="text-xs" style={{ color: "rgba(255,255,255,0.3)", fontFamily: "'JetBrains Mono', monospace" }}>
-              Click outside or × to close · Refresh to grab a new frame
-            </p>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
