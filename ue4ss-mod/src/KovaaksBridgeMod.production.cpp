@@ -94,6 +94,8 @@ std::wstring game_bin_dir() {
     return path.substr(0, pos + 1);
 }
 
+#include "kmod/state_sync_request.inl"
+
 bool env_flag_enabled(const char* name) {
     char value[16] = {};
     const auto len = GetEnvironmentVariableA(name, value, static_cast<DWORD>(sizeof(value)));
@@ -783,6 +785,89 @@ private:
         s_last_run_scenario_name = last_scenario_name_;
     }
 
+    auto emit_requested_state_snapshot(uint64_t now_ms, const std::string& request_reason) -> void {
+        const auto reason = sanitize_state_request_reason(request_reason);
+        std::string scenario_name = last_scenario_name_;
+        if (scenario_name.empty()) {
+            scenario_name = s_last_run_scenario_name;
+        } else {
+            s_last_run_scenario_name = scenario_name;
+        }
+
+        const auto scenario_name_escaped = escape_json_ascii(scenario_name);
+        std::array<char, 1024> metadata{};
+        std::snprintf(
+            metadata.data(),
+            metadata.size(),
+            "{\"ev\":\"scenario_metadata\",\"trigger\":\"state_request:%s\",\"run_id\":0,\"ts_ms\":%llu,\"scenario_name\":\"%s\",\"scenario_id\":\"\",\"scenario_manager\":\"\",\"scenario_play_type\":-1,\"is_in_trainer\":%d,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_currently_in_benchmark\":%d,\"challenge_time_length\":-1.0,\"queue_time_remaining\":%.6f,\"game_seconds\":-1.0,\"source\":\"production_state_sync\"}",
+            reason.c_str(),
+            static_cast<unsigned long long>(now_ms),
+            scenario_name_escaped.c_str(),
+            last_is_in_trainer_,
+            last_is_in_challenge_,
+            last_is_in_scenario_,
+            last_is_in_scenario_editor_,
+            last_is_currently_in_benchmark_,
+            static_cast<double>(s_last_pull_queue_time_remaining)
+        );
+        kovaaks::RustBridge::emit_json(metadata.data());
+
+        if (!scenario_name.empty()) {
+            std::array<char, 512> scenario_msg{};
+            std::snprintf(
+                scenario_msg.data(),
+                scenario_msg.size(),
+                "{\"ev\":\"ui_scenario_name\",\"field\":\"%s\",\"source\":\"state_manager\"}",
+                scenario_name_escaped.c_str()
+            );
+            kovaaks::RustBridge::emit_json(scenario_msg.data());
+        }
+
+        const auto emit_i32_if_valid = [](const char* ev, int32_t value) {
+            if (value >= 0) {
+                kovaaks::RustBridge::emit_i32(ev, value);
+            }
+        };
+        const auto emit_f32_if_valid = [](const char* ev, float value) {
+            if (std::isfinite(value) && value >= 0.0f) {
+                kovaaks::RustBridge::emit_f32(ev, value);
+            }
+        };
+
+        emit_i32_if_valid("pull_is_in_challenge", last_is_in_challenge_);
+        emit_i32_if_valid("pull_is_in_scenario", last_is_in_scenario_);
+        emit_i32_if_valid("pull_is_in_scenario_editor", last_is_in_scenario_editor_);
+        emit_i32_if_valid("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_);
+        emit_i32_if_valid("pull_is_in_trainer", last_is_in_trainer_);
+        emit_i32_if_valid("pull_shots_fired_total", last_shots_fired_);
+        emit_i32_if_valid("pull_shots_hit_total", last_shots_hit_);
+        emit_i32_if_valid("pull_kills_total", last_kills_total_);
+        emit_i32_if_valid("pull_challenge_tick_count_total", last_challenge_tick_count_);
+
+        emit_f32_if_valid("pull_seconds_total", last_seconds_);
+        emit_f32_if_valid("pull_challenge_seconds_total", last_challenge_seconds_total_);
+        emit_f32_if_valid("pull_score_total", last_score_total_);
+        emit_f32_if_valid("pull_score_per_minute", last_score_per_minute_);
+        emit_f32_if_valid("pull_kills_per_second", last_kills_per_second_);
+        emit_f32_if_valid("pull_accuracy", last_accuracy_);
+        emit_f32_if_valid("pull_damage_done", last_damage_done_);
+        emit_f32_if_valid("pull_damage_possible", last_damage_possible_);
+        emit_f32_if_valid("pull_damage_efficiency", last_damage_efficiency_);
+        emit_f32_if_valid("pull_time_remaining", last_time_remaining_);
+        emit_f32_if_valid("pull_queue_time_remaining", last_queue_time_remaining_);
+        emit_f32_if_valid("pull_challenge_average_fps", last_challenge_average_fps_);
+
+        std::array<char, 320> ack{};
+        std::snprintf(
+            ack.data(),
+            ack.size(),
+            "{\"ev\":\"state_snapshot\",\"source\":\"state_request\",\"reason\":\"%s\",\"ts_ms\":%llu}",
+            reason.c_str(),
+            static_cast<unsigned long long>(now_ms)
+        );
+        kovaaks::RustBridge::emit_json(ack.data());
+    }
+
     #include "kmod/in_game_overlay.inl"
 
     struct EmitTagScope {
@@ -1152,6 +1237,25 @@ private:
             current_time_remaining,
             current_queue_time_remaining
         );
+
+        if (kovaaks::RustBridge::is_connected()) {
+            std::string request_reason{};
+            if (consume_state_snapshot_request(request_reason)) {
+                emit_requested_state_snapshot(now, request_reason);
+                std::array<char, 256> sbuf{};
+                std::snprintf(
+                    sbuf.data(),
+                    sbuf.size(),
+                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                    request_reason.c_str(),
+                    static_cast<unsigned long long>(now)
+                );
+                runtime_log_line(sbuf.data());
+                if (verbose_logs_) {
+                    events_log_line(sbuf.data());
+                }
+            }
+        }
 
         const bool has_state_signal =
             current_is_in_challenge >= 0

@@ -309,6 +309,8 @@ bool consume_reload_flags_request() {
     return true;
 }
 
+#include "kmod/state_sync_request.inl"
+
 bool is_likely_readable_region(const void* ptr, size_t bytes) {
     if (!ptr || bytes == 0) {
         return false;
@@ -1035,6 +1037,27 @@ public:
                 runtime_log_line("[KovaaksBridgeMod] direct pull invoke disabled by default; set kovaaks_enable_direct_pull_invoke.flag to opt in");
             }
         }
+
+        if (s_rust_enabled && kovaaks::RustBridge::is_connected()) {
+            std::string request_reason{};
+            if (consume_state_snapshot_request(request_reason)) {
+                const uint64_t now_ms = GetTickCount64();
+                emit_requested_state_snapshot(now_ms, request_reason);
+                std::array<char, 256> sbuf{};
+                std::snprintf(
+                    sbuf.data(),
+                    sbuf.size(),
+                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                    request_reason.c_str(),
+                    static_cast<unsigned long long>(now_ms)
+                );
+                runtime_log_line(sbuf.data());
+                if (s_log_all_events || s_non_ui_probe_enabled || s_object_debug_enabled) {
+                    events_log_line(sbuf.data());
+                }
+            }
+        }
+
         if (!s_log_all_events && !s_object_debug_enabled && !s_non_ui_probe_enabled) {
             return;
         }
@@ -3053,6 +3076,183 @@ private:
             static_cast<double>(meta.game_seconds)
         );
         kovaaks::RustBridge::emit_json(msg.data());
+    }
+
+    static auto emit_requested_state_snapshot(
+        uint64_t now_ms,
+        const std::string& request_reason
+    ) -> void {
+        std::string scenario_name{};
+        std::string scenario_id{};
+        std::string scenario_manager_id{};
+        (void)try_resolve_current_scenario_identity(now_ms, scenario_name, scenario_id, scenario_manager_id);
+
+        ScenarioRunMetaSnapshot meta{};
+        uint64_t run_id = 0;
+        int32_t pull_is_in_trainer = -1;
+        int32_t pull_is_in_challenge = -1;
+        int32_t pull_is_in_scenario = -1;
+        int32_t pull_is_in_scenario_editor = -1;
+        int32_t pull_is_currently_in_benchmark = -1;
+        int32_t pull_scenario_play_type = -1;
+        int32_t pull_scenario_is_paused = -1;
+        int32_t pull_scenario_is_enabled = -1;
+        int32_t pull_scenario_is_in_editor = -1;
+        int32_t pull_shots_fired_total = -1;
+        int32_t pull_shots_hit_total = -1;
+        int32_t pull_kills_total = -1;
+        int32_t pull_challenge_tick_count_total = -1;
+        float pull_time_remaining = -1.0f;
+        float pull_queue_time_remaining = -1.0f;
+        float pull_challenge_time_length = -1.0f;
+        float pull_challenge_seconds_total = -1.0f;
+        float pull_seconds_total = -1.0f;
+        float pull_score_total = -1.0f;
+        float pull_score_per_minute = -1.0f;
+        float pull_accuracy = -1.0f;
+        float pull_damage_done = -1.0f;
+        float pull_damage_possible = -1.0f;
+        float pull_damage_efficiency = -1.0f;
+        float pull_kills_per_second = -1.0f;
+        float pull_challenge_average_fps = -1.0f;
+
+        {
+            std::lock_guard<std::mutex> guard(s_state_mutex);
+            if (scenario_id.empty()) {
+                scenario_id = s_last_run_scenario_id;
+            }
+            if (scenario_manager_id.empty()) {
+                scenario_manager_id = s_last_run_scenario_manager_id;
+            }
+            if (scenario_name.empty()) {
+                scenario_name = s_last_run_scenario_name;
+            }
+            if (scenario_name.empty() && !scenario_id.empty()) {
+                scenario_name = derive_scenario_name_from_id(scenario_id);
+            }
+            if (!scenario_name.empty()) {
+                s_last_run_scenario_name = scenario_name;
+            }
+            if (!scenario_id.empty()) {
+                s_last_run_scenario_id = scenario_id;
+            }
+            if (!scenario_manager_id.empty()) {
+                s_last_run_scenario_manager_id = scenario_manager_id;
+            }
+
+            meta.scenario_play_type = s_last_pull_scenario_play_type;
+            meta.is_in_trainer = s_last_pull_is_in_trainer;
+            meta.is_in_challenge = s_last_pull_is_in_challenge;
+            meta.is_in_scenario = s_last_pull_is_in_scenario;
+            meta.is_in_scenario_editor = s_last_pull_is_in_scenario_editor;
+            meta.is_currently_in_benchmark = s_last_pull_is_currently_in_benchmark;
+            meta.challenge_time_length = s_last_pull_challenge_time_length;
+            meta.queue_time_remaining = s_last_pull_queue_time_remaining;
+            meta.game_seconds = s_last_pull_game_seconds;
+
+            run_id = s_run_sequence;
+
+            pull_is_in_trainer = s_last_pull_is_in_trainer;
+            pull_is_in_challenge = s_last_pull_is_in_challenge;
+            pull_is_in_scenario = s_last_pull_is_in_scenario;
+            pull_is_in_scenario_editor = s_last_pull_is_in_scenario_editor;
+            pull_is_currently_in_benchmark = s_last_pull_is_currently_in_benchmark;
+            pull_scenario_play_type = s_last_pull_scenario_play_type;
+            pull_scenario_is_paused = s_last_pull_scenario_is_paused;
+            pull_scenario_is_enabled = s_last_pull_scenario_is_enabled;
+            pull_scenario_is_in_editor = s_last_pull_scenario_is_in_editor;
+            pull_shots_fired_total = s_last_pull_shots_fired;
+            pull_shots_hit_total = s_last_pull_shots_hit;
+            pull_kills_total = s_last_pull_kills;
+            pull_challenge_tick_count_total = s_last_pull_challenge_tick_count;
+            pull_time_remaining = s_last_pull_time_remaining;
+            pull_queue_time_remaining = s_last_pull_queue_time_remaining;
+            pull_challenge_time_length = s_last_pull_challenge_time_length;
+            pull_challenge_seconds_total = s_last_pull_challenge_seconds;
+            pull_seconds_total = s_last_pull_seconds;
+            pull_score_total = s_last_pull_score;
+            pull_score_per_minute = s_last_pull_spm;
+            pull_accuracy = s_last_pull_accuracy;
+            pull_damage_done = s_last_pull_damage_done;
+            pull_damage_possible = s_last_pull_damage_possible;
+            pull_damage_efficiency = s_last_pull_damage_efficiency;
+            pull_kills_per_second = s_last_pull_kps;
+            pull_challenge_average_fps = s_last_pull_challenge_average_fps;
+        }
+
+        const auto reason = sanitize_state_request_reason(request_reason);
+        const auto trigger = "state_request:" + reason;
+        emit_scenario_metadata_event(
+            trigger.c_str(),
+            now_ms,
+            run_id,
+            scenario_name,
+            scenario_id,
+            scenario_manager_id,
+            meta
+        );
+
+        if (!scenario_name.empty()) {
+            const auto scenario_name_escaped = escape_json(scenario_name);
+            std::array<char, 1024> name_msg{};
+            std::snprintf(
+                name_msg.data(),
+                name_msg.size(),
+                "{\"ev\":\"ui_scenario_name\",\"field\":\"%s\",\"source\":\"state_manager\"}",
+                scenario_name_escaped.c_str()
+            );
+            kovaaks::RustBridge::emit_json(name_msg.data());
+        }
+
+        const auto emit_i32_if_valid = [](const char* ev, int32_t value) {
+            if (value >= 0) {
+                kovaaks::RustBridge::emit_i32(ev, value);
+            }
+        };
+        const auto emit_f32_if_valid = [](const char* ev, float value) {
+            if (std::isfinite(value) && value >= 0.0f) {
+                kovaaks::RustBridge::emit_f32(ev, value);
+            }
+        };
+
+        emit_i32_if_valid("pull_is_in_trainer", pull_is_in_trainer);
+        emit_i32_if_valid("pull_is_in_challenge", pull_is_in_challenge);
+        emit_i32_if_valid("pull_is_in_scenario", pull_is_in_scenario);
+        emit_i32_if_valid("pull_is_in_scenario_editor", pull_is_in_scenario_editor);
+        emit_i32_if_valid("pull_is_currently_in_benchmark", pull_is_currently_in_benchmark);
+        emit_i32_if_valid("pull_scenario_play_type", pull_scenario_play_type);
+        emit_i32_if_valid("pull_scenario_is_paused", pull_scenario_is_paused);
+        emit_i32_if_valid("pull_scenario_is_enabled", pull_scenario_is_enabled);
+        emit_i32_if_valid("pull_scenario_is_in_editor", pull_scenario_is_in_editor);
+        emit_i32_if_valid("pull_shots_fired_total", pull_shots_fired_total);
+        emit_i32_if_valid("pull_shots_hit_total", pull_shots_hit_total);
+        emit_i32_if_valid("pull_kills_total", pull_kills_total);
+        emit_i32_if_valid("pull_challenge_tick_count_total", pull_challenge_tick_count_total);
+
+        emit_f32_if_valid("pull_time_remaining", pull_time_remaining);
+        emit_f32_if_valid("pull_queue_time_remaining", pull_queue_time_remaining);
+        emit_f32_if_valid("pull_challenge_time_length", pull_challenge_time_length);
+        emit_f32_if_valid("pull_challenge_seconds_total", pull_challenge_seconds_total);
+        emit_f32_if_valid("pull_seconds_total", pull_seconds_total);
+        emit_f32_if_valid("pull_score_total", pull_score_total);
+        emit_f32_if_valid("pull_score_per_minute", pull_score_per_minute);
+        emit_f32_if_valid("pull_accuracy", pull_accuracy);
+        emit_f32_if_valid("pull_damage_done", pull_damage_done);
+        emit_f32_if_valid("pull_damage_possible", pull_damage_possible);
+        emit_f32_if_valid("pull_damage_efficiency", pull_damage_efficiency);
+        emit_f32_if_valid("pull_kills_per_second", pull_kills_per_second);
+        emit_f32_if_valid("pull_challenge_average_fps", pull_challenge_average_fps);
+
+        const auto reason_escaped = escape_json(reason);
+        std::array<char, 512> ack_msg{};
+        std::snprintf(
+            ack_msg.data(),
+            ack_msg.size(),
+            "{\"ev\":\"state_snapshot\",\"source\":\"state_request\",\"reason\":\"%s\",\"ts_ms\":%llu}",
+            reason_escaped.c_str(),
+            static_cast<unsigned long long>(now_ms)
+        );
+        kovaaks::RustBridge::emit_json(ack_msg.data());
     }
 
     static auto begin_new_scenario_run(const char* trigger, uint64_t now_ms, bool force) -> bool {

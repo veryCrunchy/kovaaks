@@ -308,12 +308,76 @@ mod imp {
     const IN_GAME_OVERLAY_TARGET_DIR: &str = "aimmod_overlay";
     const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
     const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
+    const STATE_REQUEST_FILE: &str = "kovaaks_request_state.flag";
     const LOG_RING_CAPACITY: usize = 1200;
     const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
+
+    fn remembered_game_bin_dir() -> &'static Mutex<Option<PathBuf>> {
+        static STATE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(None))
+    }
+
+    fn remember_game_bin_dir(game_bin_dir: &Path) {
+        if let Ok(mut slot) = remembered_game_bin_dir().lock() {
+            *slot = Some(game_bin_dir.to_path_buf());
+        }
+    }
+
+    fn known_game_bin_dir() -> Option<PathBuf> {
+        remembered_game_bin_dir()
+            .lock()
+            .ok()
+            .and_then(|slot| slot.clone())
+    }
+
+    fn sanitize_state_request_reason(reason: &str) -> String {
+        let mut out = String::with_capacity(reason.len());
+        for ch in reason.chars() {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | ':' | '.') {
+                out.push(ch);
+            }
+        }
+        if out.is_empty() {
+            "unknown".to_string()
+        } else {
+            out
+        }
+    }
+
+    fn request_mod_state_sync_for_dir(game_bin_dir: &Path, reason: &str) -> Result<(), String> {
+        let request_path = game_bin_dir.join(STATE_REQUEST_FILE);
+        let reason = sanitize_state_request_reason(reason);
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let body = format!("reason={reason}\nts_ms={now_ms}\n");
+        std::fs::write(&request_path, body).map_err(|e| {
+            format!(
+                "Failed to write state request file {}: {}",
+                request_path.display(),
+                e
+            )
+        })
+    }
+
+    fn request_mod_state_sync(reason: &str) {
+        let Some(game_bin_dir) = known_game_bin_dir() else {
+            return;
+        };
+        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, reason) {
+            log::warn!("bridge: state sync request failed: {e}");
+        } else {
+            log::info!(
+                "bridge: requested mod state sync ({})",
+                sanitize_state_request_reason(reason)
+            );
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct BridgeCompatState {
@@ -332,6 +396,7 @@ mod imp {
         session_active: bool,
         challenge_active: bool,
         session_started_at: Option<Instant>,
+        recovery_start_streak: u8,
         tracking_paused_by_idle: bool,
         last_stats_flow_at: Option<Instant>,
     }
@@ -830,6 +895,7 @@ mod imp {
                 state.challenge_active = true;
             }
             state.session_started_at = Some(now);
+            state.recovery_start_streak = 0;
             state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = Some(now);
         }
@@ -844,6 +910,18 @@ mod imp {
         let session_start = crate::mouse_hook::start_session_tracking();
         crate::screen_recorder::start(session_start);
         log::info!("bridge: session tracking restarted ({reason})");
+    }
+
+    fn handle_session_end_signal(app: &AppHandle, reason: &str) {
+        let challenge_active = bridge_session_state()
+            .lock()
+            .map(|state| state.challenge_active)
+            .unwrap_or(false);
+        if challenge_active {
+            log::warn!("bridge: ignoring session_end while challenge is active ({reason})");
+            return;
+        }
+        end_session_tracking(app, reason, false);
     }
 
     pub fn take_run_snapshot() -> Option<super::BridgeRunSnapshot> {
@@ -1024,6 +1102,7 @@ mod imp {
             if !state.session_active {
                 state.session_active = true;
                 state.session_started_at = Some(now);
+                state.recovery_start_streak = 0;
                 emit_session = true;
             }
             (emit_session, emit_challenge)
@@ -1099,6 +1178,7 @@ mod imp {
             let emit_session = state.session_active;
             state.session_active = false;
             state.session_started_at = None;
+            state.recovery_start_streak = 0;
             state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = None;
             (emit_session, emit_challenge)
@@ -1228,6 +1308,9 @@ mod imp {
                 | "shot_fired"
                 | "shot_hit"
                 | "kill"
+                | "class_hook_probe"
+                | "script_hook_probe"
+                | "hook_probe"
         )
     }
 
@@ -1552,7 +1635,7 @@ mod imp {
                 begin_session_tracking(app, "bridge:session_start", false);
             }
             "session_end" => {
-                end_session_tracking(app, "bridge:session_end", false);
+                handle_session_end_signal(app, "bridge:session_end");
             }
             "challenge_start" | "scenario_start" => {
                 begin_session_tracking(app, "bridge:challenge_start", true);
@@ -1756,6 +1839,7 @@ mod imp {
         let mut should_emit_stats = false;
         let mut emit_alias_qrem: Option<f64> = None;
         let mut emit_alias_ch: Option<f64> = None;
+        let mut recovery_signal: Option<(bool, bool)> = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
             match parsed.ev.as_str() {
@@ -2115,6 +2199,48 @@ mod imp {
                     let _ = app.emit(super::EVENT_LIVE_SCORE, &payload);
                 }
             }
+
+            let has_active_session_metrics = state.stats.is_in_challenge == Some(true)
+                || state
+                    .stats
+                    .challenge_seconds_total
+                    .map_or(false, |v| v > 0.25)
+                || state.stats.time_remaining.map_or(false, |v| v > 0.25)
+                || state.stats.accuracy_shots.map_or(false, |v| v > 0)
+                || state.stats.kills.map_or(false, |v| v > 0)
+                || state.stats.damage_dealt.map_or(false, |v| v > 0.0)
+                || state.live_score_total.map_or(false, |v| v > 0.0);
+            let recovery_challenge_active = state.stats.is_in_challenge == Some(true)
+                || state.stats.time_remaining.map_or(false, |v| v > 0.25)
+                || state
+                    .stats
+                    .challenge_seconds_total
+                    .map_or(false, |v| v > 0.25);
+            recovery_signal = Some((has_active_session_metrics, recovery_challenge_active));
+        }
+
+        if let Some((has_active_metrics, challenge_active_hint)) = recovery_signal {
+            let should_start_from_recovery = {
+                let mut state = bridge_session_state().lock().unwrap();
+                if state.session_active {
+                    state.recovery_start_streak = 0;
+                    false
+                } else if has_active_metrics {
+                    state.recovery_start_streak = state.recovery_start_streak.saturating_add(1);
+                    if state.recovery_start_streak >= 2 {
+                        state.recovery_start_streak = 0;
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    state.recovery_start_streak = 0;
+                    false
+                }
+            };
+            if should_start_from_recovery {
+                begin_session_tracking(app, "bridge:compat_recovery", challenge_active_hint);
+            }
         }
 
         if let Some(ch) = emit_alias_ch {
@@ -2239,6 +2365,7 @@ mod imp {
             }
 
             log::info!("bridge: DLL connected — reading events");
+            request_mod_state_sync("bridge_pipe_connected");
             read_events(pipe, &app);
             log::info!("bridge: pipe disconnected — waiting for next connection");
 
@@ -2291,11 +2418,11 @@ mod imp {
                                 // (e.g. class_hook_probe) because they can drive
                                 // lifecycle/state normalization.
                                 emit_bridge_compat_events(app, &parsed);
-                                if is_noisy_bridge_event(&parsed.ev) {
-                                    continue;
-                                }
                                 if is_stats_flow_event(&parsed) {
                                     mark_stats_flow_activity(parsed.ev.as_str());
+                                }
+                                if is_noisy_bridge_event(&parsed.ev) {
+                                    continue;
                                 }
                                 let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
                                 if super::is_metric_event_name(&parsed.ev) {
@@ -2502,6 +2629,9 @@ mod imp {
             "bridge: UE4SS payload deployed to {}",
             game_bin_dir.display()
         );
+        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, "deploy_and_inject") {
+            log::warn!("bridge: unable to queue state sync request after deploy: {e}");
+        }
         start_log_tailer_for_bin_dir(game_bin_dir.clone(), None);
 
         let ue4ss_path = game_bin_dir.join(UE4SS_DLL);
@@ -2566,6 +2696,9 @@ mod imp {
 
     pub fn start_log_tailer(app: AppHandle, stats_dir: &str) -> Result<(), String> {
         let game_bin_dir = resolve_game_bin_dir(stats_dir)?;
+        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, "start_log_tailer") {
+            log::warn!("bridge: unable to queue state sync request for log tailer: {e}");
+        }
         start_log_tailer_for_bin_dir(game_bin_dir, Some(app));
         Ok(())
     }
@@ -3216,6 +3349,7 @@ mod imp {
                 stats_dir
             ));
         }
+        remember_game_bin_dir(&bin_dir);
         Ok(bin_dir)
     }
 

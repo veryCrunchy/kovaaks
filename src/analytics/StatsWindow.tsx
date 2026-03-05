@@ -3301,12 +3301,11 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
 
   const best = Math.max(...filteredRecords.map((r) => r.score), 0);
   const hasSmooth = records.some((r) => r.smoothness != null);
-  const hasPanel = records.some((r) => r.stats_panel != null);
 
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
     { id: "movement", label: "Movement", hidden: !hasSmooth },
-    { id: "performance", label: "Performance", hidden: !hasPanel },
+    { id: "performance", label: "Performance" },
     { id: "coaching", label: "Coaching" },
     { id: "replay", label: "Replay" },
     { id: "leaderboard", label: "Leaderboard" },
