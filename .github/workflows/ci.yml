@@ -41,6 +41,10 @@ jobs:
       - name: Type-check frontend
         run: pnpm build
 
+      - name: Ensure Tauri resource path exists
+        shell: pwsh
+        run: New-Item -ItemType Directory -Path src-tauri/ue4ss -Force | Out-Null
+
       - name: Check Rust
         run: cargo check
         working-directory: src-tauri
