@@ -72,9 +72,19 @@ struct BridgeStatsPanelEvent {
     scenario_is_paused: Option<bool>,
     scenario_is_enabled: Option<bool>,
     scenario_play_type: Option<i32>,
+    game_state_code: i32,
     game_state: String,
     scenario_name: Option<String>,
     scenario_type: String,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeTickStreamV1 {
+    pub sample_hz: Option<u32>,
+    pub keyframe_interval_ms: Option<u32>,
+    pub context: Option<serde_json::Value>,
+    pub keyframes: Vec<serde_json::Value>,
+    pub deltas: Vec<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -133,6 +143,8 @@ pub struct BridgeRunSnapshot {
     pub ended_at_unix_ms: Option<u64>,
     pub event_counts: BridgeRunEventCounts,
     pub timeline: Vec<BridgeRunTimelinePoint>,
+    #[serde(default)]
+    pub tick_stream_v1: Option<BridgeTickStreamV1>,
 }
 
 #[cfg(target_os = "windows")]
@@ -252,13 +264,13 @@ mod imp {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Mutex, OnceLock};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use tauri::{AppHandle, Emitter};
 
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
-    use windows::Win32::Storage::FileSystem::ReadFile;
+    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
@@ -286,6 +298,7 @@ mod imp {
     use windows::core::{BOOL, PCSTR};
 
     static STARTED: AtomicBool = AtomicBool::new(false);
+    static COMMAND_PIPE_STARTED: AtomicBool = AtomicBool::new(false);
     static LOG_TAILER_STARTED: AtomicBool = AtomicBool::new(false);
     static SESSION_IDLE_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
     static LOG_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
@@ -298,31 +311,14 @@ mod imp {
     const IN_GAME_OVERLAY_TARGET_DIR: &str = "aimmod_overlay";
     const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
     const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
-    const STATE_REQUEST_FILE: &str = "kovaaks_request_state.flag";
+    const COMMAND_PIPE_NAME: &str = "\\\\.\\pipe\\kovaaks-bridge-cmd";
     const LOG_RING_CAPACITY: usize = 1200;
+    const MAX_BRIDGE_COMMAND_QUEUE: usize = 8192;
     const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
-
-    fn remembered_game_bin_dir() -> &'static Mutex<Option<PathBuf>> {
-        static STATE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
-        STATE.get_or_init(|| Mutex::new(None))
-    }
-
-    fn remember_game_bin_dir(game_bin_dir: &Path) {
-        if let Ok(mut slot) = remembered_game_bin_dir().lock() {
-            *slot = Some(game_bin_dir.to_path_buf());
-        }
-    }
-
-    fn known_game_bin_dir() -> Option<PathBuf> {
-        remembered_game_bin_dir()
-            .lock()
-            .ok()
-            .and_then(|slot| slot.clone())
-    }
 
     fn sanitize_state_request_reason(reason: &str) -> String {
         let mut out = String::with_capacity(reason.len());
@@ -338,35 +334,379 @@ mod imp {
         }
     }
 
-    fn request_mod_state_sync_for_dir(game_bin_dir: &Path, reason: &str) -> Result<(), String> {
-        let request_path = game_bin_dir.join(STATE_REQUEST_FILE);
+    fn bridge_command_queue() -> &'static Mutex<VecDeque<String>> {
+        static QUEUE: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
+        QUEUE.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_BRIDGE_COMMAND_QUEUE)))
+    }
+
+    fn in_game_replay_stop_flag() -> &'static Mutex<Option<Arc<AtomicBool>>> {
+        static STOP_FLAG: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
+        STOP_FLAG.get_or_init(|| Mutex::new(None))
+    }
+
+    fn enqueue_bridge_command(json_line: String) -> bool {
+        if json_line.trim().is_empty() {
+            return true;
+        }
+        if let Ok(mut queue) = bridge_command_queue().lock() {
+            if queue.len() >= MAX_BRIDGE_COMMAND_QUEUE {
+                return false;
+            }
+            queue.push_back(json_line);
+            return true;
+        }
+        false
+    }
+
+    fn enqueue_bridge_command_blocking(json_line: String) -> bool {
+        if json_line.trim().is_empty() {
+            return true;
+        }
+        let mut retries = 0u32;
+        loop {
+            if enqueue_bridge_command(json_line.clone()) {
+                return true;
+            }
+            retries = retries.saturating_add(1);
+            if retries >= 2000 {
+                log::warn!("bridge: command queue saturated; dropping command after retries");
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    fn request_mod_state_sync(reason: &str) {
         let reason = sanitize_state_request_reason(reason);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
             .unwrap_or(0);
-        let body = format!("reason={reason}\nts_ms={now_ms}\n");
-        std::fs::write(&request_path, body).map_err(|e| {
-            format!(
-                "Failed to write state request file {}: {}",
-                request_path.display(),
-                e
-            )
+        let cmd = format!(
+            "{{\"cmd\":\"state_snapshot_request\",\"reason\":\"{}\",\"ts_ms\":{}}}",
+            reason, now_ms
+        );
+        let _ = enqueue_bridge_command(cmd);
+        log::info!("bridge: queued mod state sync request ({})", reason);
+    }
+
+    #[derive(Clone, Debug)]
+    struct InGameReplayEntityCommand {
+        id: String,
+        profile: String,
+        is_player: bool,
+        is_bot: bool,
+        x: f64,
+        y: f64,
+        z: f64,
+        pitch: f64,
+        yaw: f64,
+        roll: f64,
+        vx: f64,
+        vy: f64,
+        vz: f64,
+    }
+
+    #[derive(Clone, Debug)]
+    struct InGameReplayFrameCommand {
+        ts_ms: u64,
+        seq: u64,
+        upserts: Vec<InGameReplayEntityCommand>,
+        removes: Vec<String>,
+    }
+
+    fn replay_json_boolish(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(v) => Some(*v),
+            serde_json::Value::Number(n) => n.as_f64().map(|v| v >= 0.5),
+            serde_json::Value::String(s) => {
+                let t = s.trim().to_ascii_lowercase();
+                if t == "1" || t == "true" {
+                    Some(true)
+                } else if t == "0" || t == "false" {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn replay_json_u64(value: &serde_json::Value) -> Option<u64> {
+        replay_json_number(value).and_then(|v| {
+            if v.is_finite() && v >= 0.0 {
+                Some(v.round() as u64)
+            } else {
+                None
+            }
         })
     }
 
-    fn request_mod_state_sync(reason: &str) {
-        let Some(game_bin_dir) = known_game_bin_dir() else {
-            return;
-        };
-        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, reason) {
-            log::warn!("bridge: state sync request failed: {e}");
-        } else {
-            log::info!(
-                "bridge: requested mod state sync ({})",
-                sanitize_state_request_reason(reason)
-            );
+    fn parse_replay_entity_command(value: &serde_json::Value) -> Option<InGameReplayEntityCommand> {
+        let obj = value.as_object()?;
+        let id = obj.get("id")?.as_str()?.trim().to_string();
+        if id.is_empty() {
+            return None;
         }
+
+        let profile = obj
+            .get("profile")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let is_player = obj
+            .get("is_player")
+            .and_then(replay_json_boolish)
+            .unwrap_or(false);
+        let is_bot = obj
+            .get("is_bot")
+            .and_then(replay_json_boolish)
+            .unwrap_or(false);
+
+        let location = obj.get("location").and_then(|v| v.as_object())?;
+        let rotation = obj.get("rotation").and_then(|v| v.as_object())?;
+        let velocity = obj.get("velocity").and_then(|v| v.as_object());
+
+        let x = location.get("x").and_then(replay_json_number).unwrap_or(0.0);
+        let y = location.get("y").and_then(replay_json_number).unwrap_or(0.0);
+        let z = location.get("z").and_then(replay_json_number).unwrap_or(0.0);
+        let pitch = rotation
+            .get("pitch")
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+        let yaw = rotation
+            .get("yaw")
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+        let roll = rotation
+            .get("roll")
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+
+        let vx = velocity
+            .and_then(|v| v.get("x"))
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+        let vy = velocity
+            .and_then(|v| v.get("y"))
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+        let vz = velocity
+            .and_then(|v| v.get("z"))
+            .and_then(replay_json_number)
+            .unwrap_or(0.0);
+
+        Some(InGameReplayEntityCommand {
+            id,
+            profile,
+            is_player,
+            is_bot,
+            x,
+            y,
+            z,
+            pitch,
+            yaw,
+            roll,
+            vx,
+            vy,
+            vz,
+        })
+    }
+
+    fn parse_replay_frame_command(
+        value: &serde_json::Value,
+        entity_field: &str,
+    ) -> Option<InGameReplayFrameCommand> {
+        let obj = value.as_object()?;
+        let ts_ms = obj.get("ts_ms").and_then(replay_json_u64).unwrap_or(0);
+        let seq = obj.get("seq").and_then(replay_json_u64).unwrap_or(ts_ms);
+
+        let mut upserts = Vec::new();
+        if let Some(entries) = obj.get(entity_field).and_then(|v| v.as_array()) {
+            upserts.reserve(entries.len());
+            for entry in entries {
+                if let Some(entity) = parse_replay_entity_command(entry) {
+                    upserts.push(entity);
+                }
+            }
+        }
+
+        let mut removes = Vec::new();
+        if let Some(entries) = obj.get("remove").and_then(|v| v.as_array()) {
+            removes.reserve(entries.len());
+            for entry in entries {
+                if let Some(id) = entry.as_str() {
+                    let id = id.trim();
+                    if !id.is_empty() {
+                        removes.push(id.to_string());
+                    }
+                }
+            }
+        }
+
+        Some(InGameReplayFrameCommand {
+            ts_ms,
+            seq,
+            upserts,
+            removes,
+        })
+    }
+
+    fn build_in_game_replay_frames(stream: &super::BridgeTickStreamV1) -> Vec<InGameReplayFrameCommand> {
+        let mut frames = Vec::with_capacity(stream.keyframes.len() + stream.deltas.len());
+        for value in &stream.keyframes {
+            if let Some(frame) = parse_replay_frame_command(value, "entities") {
+                frames.push(frame);
+            }
+        }
+        for value in &stream.deltas {
+            if let Some(frame) = parse_replay_frame_command(value, "upserts") {
+                frames.push(frame);
+            }
+        }
+        frames.sort_by_key(|frame| (frame.ts_ms, frame.seq));
+        frames
+    }
+
+    pub fn stop_in_game_replay_stream() -> Result<(), String> {
+        if let Ok(mut slot) = in_game_replay_stop_flag().lock() {
+            if let Some(flag) = slot.take() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        let stop_cmd = serde_json::json!({
+            "cmd": "replay_play_stop"
+        })
+        .to_string();
+        if !enqueue_bridge_command_blocking(stop_cmd) {
+            return Err("bridge command queue saturated".to_string());
+        }
+        Ok(())
+    }
+
+    pub fn start_in_game_replay_stream(
+        session_id: &str,
+        stream: super::BridgeTickStreamV1,
+        speed: f64,
+    ) -> Result<(), String> {
+        let frames = build_in_game_replay_frames(&stream);
+        if frames.is_empty() {
+            return Err("replay has no tick_stream_v1 frame data".to_string());
+        }
+
+        stop_in_game_replay_stream()?;
+
+        let stop_flag = Arc::new(AtomicBool::new(false));
+        {
+            let mut slot = in_game_replay_stop_flag()
+                .lock()
+                .map_err(|e| format!("replay stop lock poisoned: {e}"))?;
+            *slot = Some(stop_flag.clone());
+        }
+
+        let safe_session_id = sanitize_state_request_reason(session_id);
+        let speed = if speed.is_finite() {
+            speed.clamp(0.1, 4.0)
+        } else {
+            1.0
+        };
+
+        std::thread::Builder::new()
+            .name("bridge-in-game-replay".into())
+            .spawn(move || {
+                let start_cmd = serde_json::json!({
+                    "cmd": "replay_play_start",
+                    "session_id": safe_session_id,
+                    "speed": speed
+                })
+                .to_string();
+                if !enqueue_bridge_command_blocking(start_cmd) {
+                    return;
+                }
+
+                let mut known_entities: HashSet<String> = HashSet::new();
+                let mut last_ts_ms: Option<u64> = None;
+
+                for frame in frames {
+                    if stop_flag.load(Ordering::SeqCst) {
+                        break;
+                    }
+
+                    if let Some(prev) = last_ts_ms {
+                        if frame.ts_ms > prev {
+                            let dt_ms = ((frame.ts_ms - prev) as f64 / speed).round();
+                            if dt_ms > 0.0 {
+                                std::thread::sleep(Duration::from_millis(dt_ms as u64));
+                            }
+                        }
+                    }
+                    last_ts_ms = Some(frame.ts_ms);
+
+                    for id in &frame.removes {
+                        if stop_flag.load(Ordering::SeqCst) {
+                            break;
+                        }
+                        let cmd = serde_json::json!({
+                            "cmd": "replay_remove_entity",
+                            "id": id
+                        })
+                        .to_string();
+                        if !enqueue_bridge_command_blocking(cmd) {
+                            break;
+                        }
+                        known_entities.remove(id);
+                    }
+
+                    for entity in &frame.upserts {
+                        if stop_flag.load(Ordering::SeqCst) {
+                            break;
+                        }
+
+                        if !known_entities.contains(&entity.id) {
+                            let meta_cmd = serde_json::json!({
+                                "cmd": "replay_entity_meta",
+                                "id": entity.id,
+                                "profile": entity.profile,
+                                "is_player": if entity.is_player { 1 } else { 0 },
+                                "is_bot": if entity.is_bot { 1 } else { 0 }
+                            })
+                            .to_string();
+                            if !enqueue_bridge_command_blocking(meta_cmd) {
+                                break;
+                            }
+                            known_entities.insert(entity.id.clone());
+                        }
+
+                        let pose_cmd = serde_json::json!({
+                            "cmd": "replay_entity_pose",
+                            "id": entity.id,
+                            "x": entity.x,
+                            "y": entity.y,
+                            "z": entity.z,
+                            "pitch": entity.pitch,
+                            "yaw": entity.yaw,
+                            "roll": entity.roll,
+                            "vx": entity.vx,
+                            "vy": entity.vy,
+                            "vz": entity.vz
+                        })
+                        .to_string();
+                        if !enqueue_bridge_command_blocking(pose_cmd) {
+                            break;
+                        }
+                    }
+                }
+
+                let stop_cmd = serde_json::json!({
+                    "cmd": "replay_play_stop"
+                })
+                .to_string();
+                let _ = enqueue_bridge_command_blocking(stop_cmd);
+            })
+            .map_err(|e| format!("failed to spawn in-game replay thread: {e}"))?;
+
+        Ok(())
     }
 
     #[derive(Clone, Debug)]
@@ -377,7 +717,8 @@ mod imp {
         last_nonzero_damage_total: Option<Instant>,
         last_nonzero_seconds: Option<Instant>,
         last_nonzero_score_total: Option<Instant>,
-        live_score_total: Option<f64>,
+        score_metric_total: Option<f64>,
+        score_total_derived: Option<f64>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -407,6 +748,8 @@ mod imp {
     const MAX_RUN_TIMELINE_POINTS: usize = 1800;
     const MAX_PENDING_SHOT_EVENTS: usize = 4096;
     const MAX_SHOT_LATENCY_SAMPLES: usize = 8192;
+    const MAX_TICK_STREAM_KEYFRAMES: usize = 12000;
+    const MAX_TICK_STREAM_DELTAS: usize = 72000;
     const RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS: f64 = 1.25;
 
     #[derive(Clone, Debug, Default)]
@@ -442,6 +785,7 @@ mod imp {
         corrective_hits: u32,
         event_counts: super::BridgeRunEventCounts,
         timeline: Vec<super::BridgeRunTimelinePoint>,
+        tick_stream_v1: super::BridgeTickStreamV1,
     }
 
     fn run_capture_state() -> &'static Mutex<RunCaptureState> {
@@ -553,6 +897,7 @@ mod imp {
         state.corrective_hits = 0;
         state.event_counts = super::BridgeRunEventCounts::default();
         state.timeline.clear();
+        state.tick_stream_v1 = super::BridgeTickStreamV1::default();
     }
 
     fn align_run_capture_start_with_hint_locked(
@@ -629,6 +974,9 @@ mod imp {
             || state.metrics.damage_possible.is_some()
             || state.metrics.damage_efficiency.is_some()
             || state.metrics.accuracy_pct.is_some()
+            || state.tick_stream_v1.context.is_some()
+            || !state.tick_stream_v1.keyframes.is_empty()
+            || !state.tick_stream_v1.deltas.is_empty()
     }
 
     fn record_run_timeline_point_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
@@ -896,6 +1244,154 @@ mod imp {
         }
     }
 
+    fn replay_json_number(value: &serde_json::Value) -> Option<f64> {
+        match value {
+            serde_json::Value::Number(n) => n.as_f64(),
+            serde_json::Value::String(s) => s.parse::<f64>().ok(),
+            _ => None,
+        }
+    }
+
+    fn replay_json_u32(value: &serde_json::Value) -> Option<u32> {
+        replay_json_number(value).and_then(|v| {
+            if v.is_finite() && v >= 0.0 {
+                Some(v.round() as u32)
+            } else {
+                None
+            }
+        })
+    }
+
+    fn replay_read_scalars_from_payload(
+        scalars_obj: &serde_json::Map<String, serde_json::Value>,
+        state: &mut RunCaptureState,
+    ) -> Option<f64> {
+        if let Some(v) = scalars_obj.get("score_metric_total").and_then(replay_json_number) {
+            if v.is_finite() && v >= 0.0 {
+                state.metrics.score_total = Some(v);
+            }
+        }
+        if let Some(v) = scalars_obj.get("score_total").and_then(replay_json_number) {
+            if v.is_finite() && v >= 0.0 {
+                state.metrics.score_total = Some(v);
+            }
+        }
+        if let Some(v) = scalars_obj.get("score_total_derived").and_then(replay_json_number) {
+            if v.is_finite() && v >= 0.0 {
+                state.metrics.score_total_derived = Some(v);
+            }
+        }
+        if let Some(v) = scalars_obj
+            .get("challenge_seconds_total")
+            .and_then(replay_json_number)
+        {
+            if v.is_finite() && v >= 0.0 {
+                state.metrics.duration_secs = Some(v);
+                state.duration_from_challenge_secs = true;
+            }
+        }
+        if let Some(v) = scalars_obj
+            .get("session_seconds_total")
+            .and_then(replay_json_number)
+        {
+            if v.is_finite() && v >= 0.0 && !state.duration_from_challenge_secs {
+                state.metrics.duration_secs = Some(v);
+            }
+        }
+        state.metrics.duration_secs
+    }
+
+    fn observe_replay_stream_raw(raw: &str) {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return;
+        };
+        let Some(obj) = payload.as_object() else {
+            return;
+        };
+        let Some(ev) = obj.get("ev").and_then(|v| v.as_str()) else {
+            return;
+        };
+        if !matches!(
+            ev,
+            "replay_context" | "replay_tick_keyframe" | "replay_tick_delta" | "replay_tick_end"
+        ) {
+            return;
+        }
+
+        let Ok(mut state) = run_capture_state().lock() else {
+            return;
+        };
+
+        match ev {
+            "replay_context" => {
+                if let Some(v) = obj.get("sample_hz").and_then(replay_json_u32) {
+                    state.tick_stream_v1.sample_hz = Some(v);
+                }
+                if let Some(v) = obj.get("keyframe_interval_ms").and_then(replay_json_u32) {
+                    state.tick_stream_v1.keyframe_interval_ms = Some(v);
+                }
+                if let Some(ctx) = obj.get("context") {
+                    state.tick_stream_v1.context = Some(ctx.clone());
+                } else {
+                    state.tick_stream_v1.context = Some(payload.clone());
+                }
+            }
+            "replay_tick_keyframe" => {
+                if let Some(v) = obj.get("sample_hz").and_then(replay_json_u32) {
+                    state.tick_stream_v1.sample_hz = Some(v);
+                }
+                if let Some(v) = obj.get("keyframe_interval_ms").and_then(replay_json_u32) {
+                    state.tick_stream_v1.keyframe_interval_ms = Some(v);
+                }
+                state.tick_stream_v1.keyframes.push(payload.clone());
+                if state.tick_stream_v1.keyframes.len() > MAX_TICK_STREAM_KEYFRAMES {
+                    let trim = state.tick_stream_v1.keyframes.len() - MAX_TICK_STREAM_KEYFRAMES;
+                    state.tick_stream_v1.keyframes.drain(0..trim);
+                }
+
+                if let Some(ctx) = obj.get("context") {
+                    state.tick_stream_v1.context = Some(ctx.clone());
+                }
+
+                let mut time_hint = None;
+                if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
+                    time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
+                }
+                ensure_run_capture_started_locked(&mut state, time_hint);
+                record_run_timeline_point_locked(&mut state, time_hint);
+            }
+            "replay_tick_delta" => {
+                if let Some(v) = obj.get("sample_hz").and_then(replay_json_u32) {
+                    state.tick_stream_v1.sample_hz = Some(v);
+                }
+                if let Some(v) = obj.get("keyframe_interval_ms").and_then(replay_json_u32) {
+                    state.tick_stream_v1.keyframe_interval_ms = Some(v);
+                }
+                state.tick_stream_v1.deltas.push(payload.clone());
+                if state.tick_stream_v1.deltas.len() > MAX_TICK_STREAM_DELTAS {
+                    let trim = state.tick_stream_v1.deltas.len() - MAX_TICK_STREAM_DELTAS;
+                    state.tick_stream_v1.deltas.drain(0..trim);
+                }
+
+                let mut time_hint = None;
+                if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
+                    time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
+                }
+                ensure_run_capture_started_locked(&mut state, time_hint);
+                record_run_timeline_point_locked(&mut state, time_hint);
+            }
+            "replay_tick_end" => {
+                if let Some(v) = obj.get("final_score_total").and_then(replay_json_number) {
+                    if v.is_finite() && v >= 0.0 {
+                        state.metrics.score_total = Some(v);
+                    }
+                }
+                mark_run_capture_end(state.metrics.duration_secs);
+            }
+            _ => {}
+        }
+    }
+
     fn run_capture_duration_hint_locked(state: &RunCaptureState) -> Option<f64> {
         finite_non_negative(state.metrics.duration_secs)
             .or_else(|| state.timeline.last().map(|p| p.t_sec as f64))
@@ -1039,6 +1535,14 @@ mod imp {
             ended_at_unix_ms: state.ended_at_unix_ms.or(Some(unix_now_ms())),
             event_counts: state.event_counts.clone(),
             timeline: state.timeline.clone(),
+            tick_stream_v1: if state.tick_stream_v1.context.is_some()
+                || !state.tick_stream_v1.keyframes.is_empty()
+                || !state.tick_stream_v1.deltas.is_empty()
+            {
+                Some(state.tick_stream_v1.clone())
+            } else {
+                None
+            },
         };
 
         *state = RunCaptureState::default();
@@ -1074,6 +1578,7 @@ mod imp {
                     scenario_is_paused: None,
                     scenario_is_enabled: None,
                     scenario_play_type: None,
+                    game_state_code: 0,
                     game_state: "menu".to_string(),
                     scenario_name: None,
                     scenario_type: "Unknown".to_string(),
@@ -1083,7 +1588,8 @@ mod imp {
                 last_nonzero_damage_total: None,
                 last_nonzero_seconds: None,
                 last_nonzero_score_total: None,
-                live_score_total: None,
+                score_metric_total: None,
+                score_total_derived: None,
             })
         })
     }
@@ -1125,6 +1631,7 @@ mod imp {
                 scenario_is_paused: None,
                 scenario_is_enabled: None,
                 scenario_play_type: None,
+                game_state_code: 0,
                 game_state: "menu".to_string(),
                 scenario_name: None,
                 scenario_type: "Unknown".to_string(),
@@ -1134,7 +1641,8 @@ mod imp {
             state.last_nonzero_damage_total = None;
             state.last_nonzero_seconds = None;
             state.last_nonzero_score_total = None;
-            state.live_score_total = None;
+            state.score_metric_total = None;
+            state.score_total_derived = None;
         }
     }
 
@@ -1460,12 +1968,12 @@ mod imp {
         "Unknown"
     }
 
-    fn derive_game_state(stats: &BridgeStatsPanelEvent) -> &'static str {
+    fn derive_game_state(stats: &BridgeStatsPanelEvent) -> (i32, &'static str) {
         if stats.is_in_scenario_editor == Some(true) {
-            return "editor";
+            return (6, "editor");
         }
         if stats.scenario_is_paused == Some(true) {
-            return "paused";
+            return (5, "paused");
         }
         let in_challenge = stats.is_in_challenge == Some(true);
         let in_scenario = stats.is_in_scenario == Some(true);
@@ -1474,24 +1982,37 @@ mod imp {
         let has_challenge_timer = stats.time_remaining.map_or(false, |v| v > 0.0001);
 
         if in_challenge || has_challenge_timer {
-            return "challenge";
+            return (4, "challenge");
         }
         if in_scenario {
             if has_queue_timer {
-                return "queued";
+                return (2, "queued");
             }
-            return "freeplay";
+            return (3, "freeplay");
         }
         if in_trainer {
             if has_queue_timer {
-                return "queued";
+                return (2, "queued");
             }
-            return "trainer_menu";
+            return (1, "trainer_menu");
         }
         if has_queue_timer {
-            return "queued";
+            return (2, "queued");
         }
-        "menu"
+        (0, "menu")
+    }
+
+    fn game_state_label_from_code(code: i32) -> &'static str {
+        match code {
+            1 => "trainer_menu",
+            2 => "queued",
+            3 => "freeplay",
+            4 => "challenge",
+            5 => "paused",
+            6 => "editor",
+            7 => "replay",
+            _ => "menu",
+        }
     }
 
     fn normalize_scenario_name(raw: &str) -> Option<String> {
@@ -1787,9 +2308,12 @@ mod imp {
                     state.stats.queue_time_remaining = Some(0.0);
                     should_emit_stats = true;
                 }
-                let next_game_state = derive_game_state(&state.stats).to_string();
-                if state.stats.game_state != next_game_state {
-                    state.stats.game_state = next_game_state;
+                let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                if state.stats.game_state != next_game_state
+                    || state.stats.game_state_code != next_game_state_code
+                {
+                    state.stats.game_state_code = next_game_state_code;
+                    state.stats.game_state = next_game_state.to_string();
                     should_emit_stats = true;
                 }
                 if should_emit_stats {
@@ -1871,9 +2395,12 @@ mod imp {
                     }
                 }
                 if state_changed {
-                    let next_game_state = derive_game_state(&state.stats).to_string();
-                    if state.stats.game_state != next_game_state {
-                        state.stats.game_state = next_game_state;
+                    let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                    if state.stats.game_state != next_game_state
+                        || state.stats.game_state_code != next_game_state_code
+                    {
+                        state.stats.game_state_code = next_game_state_code;
+                        state.stats.game_state = next_game_state.to_string();
                     }
                     let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
                 }
@@ -1917,9 +2444,12 @@ mod imp {
                         .map_or(false, |prev| (prev - qrem).abs() <= 0.0001)
                     {
                         state.stats.queue_time_remaining = Some(qrem);
-                        let next_game_state = derive_game_state(&state.stats).to_string();
-                        if state.stats.game_state != next_game_state {
-                            state.stats.game_state = next_game_state;
+                        let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                        if state.stats.game_state != next_game_state
+                            || state.stats.game_state_code != next_game_state_code
+                        {
+                            state.stats.game_state_code = next_game_state_code;
+                            state.stats.game_state = next_game_state.to_string();
                         }
                         queue_changed = true;
                         let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
@@ -2283,9 +2813,9 @@ mod imp {
                         emit_alias_qrem = Some(value);
                     }
                 }
-                "pull_score_total" | "pull_score_total_derived" => {
+                "pull_score_total" => {
                     if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
-                        state.live_score_total,
+                        state.score_metric_total,
                         value,
                         now,
                         state.last_nonzero_score_total,
@@ -2293,7 +2823,34 @@ mod imp {
                         low_confidence_zero,
                     ) {
                         state.last_nonzero_score_total = next_last_nonzero;
-                        state.live_score_total = Some(value);
+                        state.score_metric_total = Some(value);
+                    }
+                }
+                "pull_score_total_derived" => {
+                    if value.is_finite() && value >= 0.0 {
+                        state.score_total_derived = Some(value);
+                    }
+                }
+                "pull_game_state_code" => {
+                    let next_code = value.round() as i32;
+                    if state.stats.game_state_code != next_code {
+                        state.stats.game_state_code = next_code;
+                        state.stats.game_state = game_state_label_from_code(next_code).to_string();
+                        should_emit_stats = true;
+                    }
+                }
+                "pull_game_state" => {
+                    let next_code = value.round() as i32;
+                    let next_label = parsed
+                        .field
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or_else(|| game_state_label_from_code(next_code));
+                    if state.stats.game_state_code != next_code || state.stats.game_state != next_label {
+                        state.stats.game_state_code = next_code;
+                        state.stats.game_state = next_label.to_string();
+                        should_emit_stats = true;
                     }
                 }
                 _ => {}
@@ -2321,9 +2878,12 @@ mod imp {
                 should_emit_stats = true;
             }
 
-            let next_game_state = derive_game_state(&state.stats).to_string();
-            if state.stats.game_state != next_game_state {
-                state.stats.game_state = next_game_state;
+            let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+            if state.stats.game_state != next_game_state
+                || state.stats.game_state_code != next_game_state_code
+            {
+                state.stats.game_state_code = next_game_state_code;
+                state.stats.game_state = next_game_state.to_string();
                 should_emit_stats = true;
             }
 
@@ -2342,7 +2902,10 @@ mod imp {
                 || state.stats.accuracy_shots.map_or(false, |v| v > 0)
                 || state.stats.kills.map_or(false, |v| v > 0)
                 || state.stats.damage_dealt.map_or(false, |v| v > 0.0)
-                || state.live_score_total.map_or(false, |v| v > 0.0);
+                || state
+                    .score_metric_total
+                    .or(state.score_total_derived)
+                    .map_or(false, |v| v > 0.0);
             let recovery_challenge_active = state.stats.is_in_challenge == Some(true)
                 || state.stats.time_remaining.map_or(false, |v| v > 0.25)
                 || state
@@ -2457,10 +3020,84 @@ mod imp {
             return;
         }
         start_session_idle_watchdog();
+        if !COMMAND_PIPE_STARTED.swap(true, Ordering::SeqCst) {
+            std::thread::Builder::new()
+                .name("bridge-command-pipe".into())
+                .spawn(command_pipe_loop)
+                .ok();
+        }
         std::thread::Builder::new()
             .name("bridge-pipe".into())
             .spawn(move || pipe_server_loop(app))
             .ok();
+    }
+
+    fn command_pipe_loop() {
+        let name = to_wide(COMMAND_PIPE_NAME);
+        // PIPE_ACCESS_OUTBOUND = 0x00000002
+        let pipe = unsafe {
+            CreateNamedPipeW(
+                windows::core::PCWSTR(name.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000002), // PIPE_ACCESS_OUTBOUND
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                1,     // max instances
+                65536, // out buffer
+                0,     // in buffer
+                0,
+                None,
+            )
+        };
+        use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+        if pipe == INVALID_HANDLE_VALUE {
+            log::error!("bridge: CreateNamedPipe(command) failed");
+            return;
+        }
+
+        loop {
+            log::debug!("bridge: waiting for command pipe client");
+            unsafe {
+                let r = ConnectNamedPipe(pipe, None);
+                if let Err(ref e) = r {
+                    if e.code().0 != ERROR_PIPE_CONNECTED_HRESULT {
+                        log::error!("bridge: command ConnectNamedPipe failed: {e}");
+                        break;
+                    }
+                }
+            }
+
+            log::info!("bridge: command pipe connected");
+            loop {
+                let next_cmd = bridge_command_queue()
+                    .lock()
+                    .ok()
+                    .and_then(|mut queue| queue.pop_front());
+
+                let Some(command) = next_cmd else {
+                    std::thread::sleep(Duration::from_millis(20));
+                    continue;
+                };
+
+                let mut line = command;
+                line.push('\n');
+                let bytes = line.as_bytes();
+                let mut written = 0u32;
+                match unsafe { WriteFile(pipe, Some(bytes), Some(&mut written), None) } {
+                    Ok(_) if written as usize == bytes.len() => {}
+                    _ => {
+                        log::warn!("bridge: command pipe write failed; awaiting reconnect");
+                        break;
+                    }
+                }
+            }
+
+            unsafe {
+                let _ = DisconnectNamedPipe(pipe);
+            }
+        }
+
+        unsafe {
+            let _ = CloseHandle(pipe);
+        }
     }
 
     fn pipe_server_loop(app: AppHandle) {
@@ -2498,6 +3135,7 @@ mod imp {
             }
 
             log::info!("bridge: DLL connected — reading events");
+            request_mod_state_sync("bridge_connected");
             read_events(pipe, &app);
             log::info!("bridge: pipe disconnected — waiting for next connection");
 
@@ -2523,6 +3161,7 @@ mod imp {
                     while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                         let chunk: Vec<u8> = buf.drain(..=nl).collect();
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
+                            observe_replay_stream_raw(s);
                             let parsed_event = super::parse_bridge_payload(s);
                             let is_noisy_bridge_event = |ev: &str| {
                                 matches!(
@@ -3474,7 +4113,6 @@ mod imp {
                 stats_dir
             ));
         }
-        remember_game_bin_dir(&bin_dir);
         Ok(bin_dir)
     }
 
@@ -4292,6 +4930,34 @@ pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
 #[cfg(not(target_os = "windows"))]
 pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
     None
+}
+
+#[cfg(target_os = "windows")]
+pub fn start_in_game_replay_stream(
+    session_id: &str,
+    stream: BridgeTickStreamV1,
+    speed: f64,
+) -> Result<(), String> {
+    imp::start_in_game_replay_stream(session_id, stream, speed)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn start_in_game_replay_stream(
+    _session_id: &str,
+    _stream: BridgeTickStreamV1,
+    _speed: f64,
+) -> Result<(), String> {
+    Err("in-game replay is only available on Windows runtime".to_string())
+}
+
+#[cfg(target_os = "windows")]
+pub fn stop_in_game_replay_stream() -> Result<(), String> {
+    imp::stop_in_game_replay_stream()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn stop_in_game_replay_stream() -> Result<(), String> {
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

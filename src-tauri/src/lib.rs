@@ -832,6 +832,28 @@ fn load_session_replay(app: AppHandle, session_id: String) -> Option<replay_stor
 }
 
 #[tauri::command]
+fn replay_play_in_game(
+    app: AppHandle,
+    session_id: String,
+    speed: Option<f64>,
+) -> Result<(), String> {
+    let replay = replay_store::load_replay(&app, &session_id)
+        .ok_or_else(|| format!("replay not found: {session_id}"))?;
+    let run_snapshot = replay
+        .run_snapshot
+        .ok_or_else(|| "replay has no run snapshot".to_string())?;
+    let tick_stream = run_snapshot
+        .tick_stream_v1
+        .ok_or_else(|| "replay has no tick_stream_v1 payload".to_string())?;
+    bridge::start_in_game_replay_stream(&session_id, tick_stream, speed.unwrap_or(1.0))
+}
+
+#[tauri::command]
+fn replay_stop_in_game() -> Result<(), String> {
+    bridge::stop_in_game_replay_stream()
+}
+
+#[tauri::command]
 fn get_monitors(app: AppHandle) -> Vec<MonitorInfo> {
     let Some(win) = app.get_webview_window("overlay") else {
         return vec![];
@@ -1141,6 +1163,8 @@ pub fn run() {
             get_session_raw_positions,
             get_session_screen_frames,
             load_session_replay,
+            replay_play_in_game,
+            replay_stop_in_game,
             toggle_settings,
             toggle_overlay,
             set_mouse_passthrough,
