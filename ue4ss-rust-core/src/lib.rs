@@ -100,6 +100,21 @@ pub extern "C" fn bridge_emit_json(json: *const c_char) -> bool {
 }
 
 #[no_mangle]
+pub extern "C" fn bridge_poll_command(out_json: *mut c_char, out_len: u32) -> i32 {
+    if out_json.is_null() || out_len == 0 {
+        return -1;
+    }
+
+    let out_len = out_len as usize;
+    if out_len < 2 {
+        return -1;
+    }
+
+    let out = unsafe { std::slice::from_raw_parts_mut(out_json as *mut u8, out_len) };
+    pipe::poll_command_line(out)
+}
+
+#[no_mangle]
 pub extern "C" fn bridge_emit_shot_hit(dmg: f32) -> bool {
     if !dmg.is_finite() {
         return false;
