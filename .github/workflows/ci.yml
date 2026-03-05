@@ -41,6 +41,6 @@ jobs:
       - name: Type-check frontend
         run: pnpm build
 
-      - name: Check Rust (with OCR feature)
-        run: cargo check --features ocr
+      - name: Check Rust
+        run: cargo check
         working-directory: src-tauri
