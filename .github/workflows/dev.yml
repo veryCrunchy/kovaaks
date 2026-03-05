@@ -82,6 +82,21 @@ jobs:
             throw "Expected settings profile 'development' but found '$settingsProfile'."
           }
 
+      - name: Compute prerelease tags
+        id: prerelease_meta
+        shell: pwsh
+        run: |
+          $tauriConfig = Get-Content "src-tauri/tauri.conf.json" -Raw | ConvertFrom-Json
+          $baseVersion = [string]$tauriConfig.version
+          if ([string]::IsNullOrWhiteSpace($baseVersion)) {
+            throw "Could not read version from src-tauri/tauri.conf.json"
+          }
+
+          $preTag = "v$baseVersion-pre.${{ github.run_number }}.${{ github.run_attempt }}"
+
+          "base_version=$baseVersion" >> $env:GITHUB_OUTPUT
+          "pre_tag=$preTag" >> $env:GITHUB_OUTPUT
+
       - name: Build and publish dev pre-release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -89,13 +104,14 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: dev
-          releaseName: "AimMod (dev)"
-          releaseBody: "Latest build from main — ${{ github.sha }}"
+          tagName: ${{ steps.prerelease_meta.outputs.pre_tag }}
+          releaseName: "AimMod ${{ steps.prerelease_meta.outputs.pre_tag }}"
           releaseDraft: false
           prerelease: true
+          generateReleaseNotes: true
           # Do not overwrite the stable updater JSON with dev builds
           includeUpdaterJson: false
+          assetNamePattern: '[name]-pre-debug-[version]-[platform]-[arch][setup][ext]'
           args: --target x86_64-pc-windows-msvc
 
       - name: Stage stripped production AimMod runtime payload
@@ -149,11 +165,12 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: main-prod
-          releaseName: "AimMod (main-prod)"
-          releaseBody: "Production-profile pre-release from main — ${{ github.sha }}"
+          tagName: ${{ steps.prerelease_meta.outputs.pre_tag }}
+          releaseName: "AimMod ${{ steps.prerelease_meta.outputs.pre_tag }}"
           releaseDraft: false
           prerelease: true
+          generateReleaseNotes: false
           # Do not overwrite the stable updater JSON with main pre-releases
           includeUpdaterJson: false
+          assetNamePattern: '[name]-pre-[version]-[platform]-[arch][setup][ext]'
           args: --target x86_64-pc-windows-msvc
