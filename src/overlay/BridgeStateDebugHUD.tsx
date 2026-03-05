@@ -128,6 +128,8 @@ export function BridgeStateDebugHUD() {
         <span>{scenarioName ?? "null"}</span>
         <span style={{ color: "rgba(226,232,240,0.75)" }}>game_state</span>
         <span>{stats?.game_state ?? "null"}</span>
+        <span style={{ color: "rgba(226,232,240,0.75)" }}>game_state_code</span>
+        <span>{stats?.game_state_code ?? "null"}</span>
         <span style={{ color: "rgba(226,232,240,0.75)" }}>is_in_scenario</span>
         <span>{fmtBool(stats?.is_in_scenario)}</span>
         <span style={{ color: "rgba(226,232,240,0.75)" }}>is_in_challenge</span>

@@ -1941,6 +1941,8 @@ function ReplayTab({
   );
   const [replayData, setReplayData] = useState<ReplayData | null>(null);
   const [loading, setLoading] = useState(false);
+  const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
+  const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedId) { setReplayData(null); return; }
@@ -1960,6 +1962,9 @@ function ReplayTab({
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
   const runSnapshot: BridgeRunSnapshot | null = replayData?.run_snapshot ?? null;
   const selectedShotTiming = selectedRecord?.shot_timing ?? null;
+  const hasInGameTickStream =
+    (runSnapshot?.tick_stream_v1?.keyframes?.length ?? 0) > 0
+    || (runSnapshot?.tick_stream_v1?.deltas?.length ?? 0) > 0;
   const runTimeline = useMemo(() => runSnapshot?.timeline ?? [], [runSnapshot]);
   const hasRunTimelineSignal = useMemo(
     () => runTimeline.some((point) =>
@@ -2008,6 +2013,33 @@ function ReplayTab({
       ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
       : null
     );
+
+  const handlePlayInGameReplay = async () => {
+    if (!selectedId) return;
+    setInGameReplayBusy(true);
+    setInGameReplayStatus(null);
+    try {
+      await invoke("replay_play_in_game", { sessionId: selectedId, speed: 1.0 });
+      setInGameReplayStatus("Streaming replay to game...");
+    } catch (err) {
+      setInGameReplayStatus(String(err));
+    } finally {
+      setInGameReplayBusy(false);
+    }
+  };
+
+  const handleStopInGameReplay = async () => {
+    setInGameReplayBusy(true);
+    setInGameReplayStatus(null);
+    try {
+      await invoke("replay_stop_in_game");
+      setInGameReplayStatus("Stopped in-game replay.");
+    } catch (err) {
+      setInGameReplayStatus(String(err));
+    } finally {
+      setInGameReplayBusy(false);
+    }
+  };
   // Worst-moment clips removed — full interactive viewer is shown instead
 
   if (replayRecords.length === 0) {
@@ -2100,6 +2132,54 @@ function ReplayTab({
       )}
       {!loading && runSnapshot && selectedRecord && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={CHART_STYLE}>
+            <SectionTitle>In-Game Replay</SectionTitle>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <button
+                type="button"
+                onClick={handlePlayInGameReplay}
+                disabled={inGameReplayBusy || !hasInGameTickStream}
+                style={{
+                  background: hasInGameTickStream ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  color: hasInGameTickStream ? "#00f5a0" : "rgba(255,255,255,0.45)",
+                  borderRadius: 8,
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  cursor: inGameReplayBusy || !hasInGameTickStream ? "not-allowed" : "pointer",
+                }}
+              >
+                Play In Game
+              </button>
+              <button
+                type="button"
+                onClick={handleStopInGameReplay}
+                disabled={inGameReplayBusy}
+                style={{
+                  background: "rgba(255,255,255,0.06)",
+                  border: "1px solid rgba(255,255,255,0.2)",
+                  color: "rgba(255,255,255,0.8)",
+                  borderRadius: 8,
+                  padding: "8px 12px",
+                  fontSize: 12,
+                  cursor: inGameReplayBusy ? "not-allowed" : "pointer",
+                }}
+              >
+                Stop
+              </button>
+              {!hasInGameTickStream && (
+                <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>
+                  This replay has no tick stream data for in-game playback.
+                </span>
+              )}
+            </div>
+            {inGameReplayStatus && (
+              <div style={{ marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.62)" }}>
+                {inGameReplayStatus}
+              </div>
+            )}
+          </div>
+
           <div style={CHART_STYLE}>
             <SectionTitle>Bridge run stats (persisted)</SectionTitle>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>

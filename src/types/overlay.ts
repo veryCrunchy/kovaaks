@@ -46,6 +46,7 @@ export interface StatsPanelReading {
   scenario_is_paused?: boolean | null;
   scenario_is_enabled?: boolean | null;
   scenario_play_type?: number | null;
+  game_state_code?: number | null;
   game_state?: string | null;
   /** State-manager scenario identity when available. */
   scenario_name?: string | null;

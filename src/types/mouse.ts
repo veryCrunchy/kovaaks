@@ -116,6 +116,15 @@ export interface BridgeRunSnapshot {
   ended_at_unix_ms: number | null;
   event_counts: BridgeRunEventCounts;
   timeline: BridgeRunTimelinePoint[];
+  tick_stream_v1?: BridgeTickStreamV1 | null;
+}
+
+export interface BridgeTickStreamV1 {
+  sample_hz: number | null;
+  keyframe_interval_ms: number | null;
+  context: unknown | null;
+  keyframes: unknown[];
+  deltas: unknown[];
 }
 
 export interface ReplayData {
