@@ -9,7 +9,7 @@
 //!   2. Find `FPSAimTrainer-Win64-Shipping.exe` in the process list.
 //!   3. `OpenProcess` → `VirtualAllocEx` + `WriteProcessMemory` → `CreateRemoteThread(LoadLibraryW)`.
 //!
-//! Both the server and injector are no-ops on non-Windows / non-ocr builds.
+//! Both the server and injector are no-ops on non-Windows builds.
 
 pub const BRIDGE_EVENT: &str = "bridge-event";
 #[cfg(target_os = "windows")]
@@ -87,6 +87,64 @@ struct BridgeStatsPanelEvent {
     scenario_type: String,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeRunEventCounts {
+    pub shot_fired_events: u32,
+    pub shot_hit_events: u32,
+    pub kill_events: u32,
+    pub challenge_queued_events: u32,
+    pub challenge_start_events: u32,
+    pub challenge_end_events: u32,
+    pub challenge_complete_events: u32,
+    pub challenge_canceled_events: u32,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BridgeRunTimelinePoint {
+    pub t_sec: u32,
+    pub score_per_minute: Option<f64>,
+    pub kills_per_second: Option<f64>,
+    pub accuracy_pct: Option<f64>,
+    pub damage_efficiency: Option<f64>,
+    pub score_total: Option<f64>,
+    pub score_total_derived: Option<f64>,
+    pub kills: Option<f64>,
+    pub shots_fired: Option<f64>,
+    pub shots_hit: Option<f64>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeRunSnapshot {
+    pub duration_secs: Option<f64>,
+    pub score_total: Option<f64>,
+    pub score_total_derived: Option<f64>,
+    pub score_per_minute: Option<f64>,
+    pub shots_fired: Option<f64>,
+    pub shots_hit: Option<f64>,
+    pub kills: Option<f64>,
+    pub kills_per_second: Option<f64>,
+    pub damage_done: Option<f64>,
+    pub damage_possible: Option<f64>,
+    pub damage_efficiency: Option<f64>,
+    pub accuracy_pct: Option<f64>,
+    pub peak_score_per_minute: Option<f64>,
+    pub peak_kills_per_second: Option<f64>,
+    #[serde(default)]
+    pub paired_shot_hits: u32,
+    #[serde(default)]
+    pub avg_fire_to_hit_ms: Option<f64>,
+    #[serde(default)]
+    pub p90_fire_to_hit_ms: Option<f64>,
+    #[serde(default)]
+    pub avg_shots_to_hit: Option<f64>,
+    #[serde(default)]
+    pub corrective_shot_ratio: Option<f64>,
+    pub started_at_unix_ms: Option<u64>,
+    pub ended_at_unix_ms: Option<u64>,
+    pub event_counts: BridgeRunEventCounts,
+    pub timeline: Vec<BridgeRunTimelinePoint>,
+}
+
 #[cfg(target_os = "windows")]
 fn parse_bridge_payload(raw: &str) -> Option<BridgeParsedEvent> {
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
@@ -128,7 +186,10 @@ fn parse_bridge_payload(raw: &str) -> Option<BridgeParsedEvent> {
 }
 
 #[cfg(target_os = "windows")]
-fn parse_payload_number(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<f64> {
+fn parse_payload_number(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<f64> {
     match obj.get(key) {
         Some(serde_json::Value::Number(n)) => n.as_f64(),
         Some(serde_json::Value::String(s)) => s.parse::<f64>().ok(),
@@ -137,7 +198,10 @@ fn parse_payload_number(obj: &serde_json::Map<String, serde_json::Value>, key: &
 }
 
 #[cfg(target_os = "windows")]
-fn parse_payload_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+fn parse_payload_string(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<String> {
     obj.get(key).and_then(|v| v.as_str()).map(|s| s.to_string())
 }
 
@@ -203,36 +267,37 @@ mod imp {
 
     use tauri::{AppHandle, Emitter};
 
-    use windows::core::{BOOL, PCSTR};
     use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
     use windows::Win32::Storage::FileSystem::ReadFile;
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Diagnostics::ToolHelp::{
-        CreateToolhelp32Snapshot, Module32FirstW, Module32NextW, Process32FirstW, Process32NextW,
-        MODULEENTRY32W, PROCESSENTRY32W, TH32CS_SNAPMODULE, TH32CS_SNAPPROCESS,
+        CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
+        Process32FirstW, Process32NextW, TH32CS_SNAPMODULE, TH32CS_SNAPPROCESS,
     };
     use windows::Win32::System::LibraryLoader::{GetModuleHandleW, GetProcAddress};
     use windows::Win32::System::Memory::{
-        VirtualAllocEx, VirtualFreeEx, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
     };
     use windows::Win32::System::Pipes::{
         ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
         PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
-        CreateRemoteThread, OpenProcess, WaitForSingleObject, PROCESS_ALL_ACCESS,
+        CreateRemoteThread, OpenProcess, PROCESS_ALL_ACCESS, WaitForSingleObject,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP,
+        INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
         VIRTUAL_KEY, VK_CONTROL,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SetForegroundWindow,
-        ShowWindow, GW_OWNER, SW_RESTORE,
+        EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
+        SetForegroundWindow, ShowWindow,
     };
+    use windows::core::{BOOL, PCSTR};
 
     static STARTED: AtomicBool = AtomicBool::new(false);
     static LOG_TAILER_STARTED: AtomicBool = AtomicBool::new(false);
+    static SESSION_IDLE_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
     static LOG_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
     const GAME_EXE: &str = "FPSAimTrainer-Win64-Shipping.exe";
     const UE4SS_DLL: &str = "UE4SS.dll";
@@ -244,6 +309,9 @@ mod imp {
     const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
     const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
     const LOG_RING_CAPACITY: usize = 1200;
+    const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
+    const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
+    const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
 
@@ -263,6 +331,9 @@ mod imp {
     struct BridgeSessionState {
         session_active: bool,
         challenge_active: bool,
+        session_started_at: Option<Instant>,
+        tracking_paused_by_idle: bool,
+        last_stats_flow_at: Option<Instant>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -277,6 +348,570 @@ mod imp {
         None,
         Entered,
         Exited,
+    }
+
+    const MAX_RUN_TIMELINE_POINTS: usize = 1800;
+    const MAX_PENDING_SHOT_EVENTS: usize = 4096;
+    const MAX_SHOT_LATENCY_SAMPLES: usize = 8192;
+
+    #[derive(Clone, Debug, Default)]
+    struct RunCaptureMetrics {
+        duration_secs: Option<f64>,
+        score_total: Option<f64>,
+        score_total_derived: Option<f64>,
+        score_per_minute: Option<f64>,
+        shots_fired: Option<f64>,
+        shots_hit: Option<f64>,
+        kills: Option<f64>,
+        kills_per_second: Option<f64>,
+        damage_done: Option<f64>,
+        damage_possible: Option<f64>,
+        damage_efficiency: Option<f64>,
+        accuracy_pct: Option<f64>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct RunCaptureState {
+        started_at: Option<Instant>,
+        started_at_unix_ms: Option<u64>,
+        ended_at_unix_ms: Option<u64>,
+        metrics: RunCaptureMetrics,
+        peak_score_per_minute: Option<f64>,
+        peak_kills_per_second: Option<f64>,
+        pending_shot_times: VecDeque<Instant>,
+        shot_to_hit_latencies_ms: Vec<f64>,
+        paired_shot_hits: u32,
+        shots_since_last_hit: u32,
+        total_shots_to_hit: u64,
+        corrective_hits: u32,
+        event_counts: super::BridgeRunEventCounts,
+        timeline: Vec<super::BridgeRunTimelinePoint>,
+    }
+
+    fn run_capture_state() -> &'static Mutex<RunCaptureState> {
+        static STATE: OnceLock<Mutex<RunCaptureState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(RunCaptureState::default()))
+    }
+
+    fn unix_now_ms() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+
+    fn finite_non_negative(v: Option<f64>) -> Option<f64> {
+        match v {
+            Some(n) if n.is_finite() && n >= 0.0 => Some(n),
+            _ => None,
+        }
+    }
+
+    fn percentile_from_sorted(sorted: &[f64], p: f64) -> Option<f64> {
+        if sorted.is_empty() {
+            return None;
+        }
+        let pp = p.clamp(0.0, 100.0);
+        let idx = ((sorted.len() - 1) as f64 * (pp / 100.0)).round() as usize;
+        sorted.get(idx).copied()
+    }
+
+    fn observe_shot_fired_for_recovery(state: &mut RunCaptureState, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let now = Instant::now();
+        for _ in 0..count {
+            state.pending_shot_times.push_back(now);
+        }
+        state.shots_since_last_hit = state.shots_since_last_hit.saturating_add(count);
+
+        if state.pending_shot_times.len() > MAX_PENDING_SHOT_EVENTS {
+            let trim = state.pending_shot_times.len() - MAX_PENDING_SHOT_EVENTS;
+            for _ in 0..trim {
+                let _ = state.pending_shot_times.pop_front();
+            }
+        }
+    }
+
+    fn observe_shot_hit_for_recovery(state: &mut RunCaptureState, count: u32) {
+        if count == 0 {
+            return;
+        }
+        let now = Instant::now();
+
+        for idx in 0..count {
+            if let Some(fired_at) = state.pending_shot_times.pop_front() {
+                let dt = now.duration_since(fired_at).as_secs_f64() * 1000.0;
+                if dt.is_finite() && dt >= 0.0 {
+                    state.shot_to_hit_latencies_ms.push(dt);
+                }
+            }
+
+            let shots_used = if idx == 0 {
+                state.shots_since_last_hit.max(1)
+            } else {
+                1
+            };
+            if shots_used > 1 {
+                state.corrective_hits = state.corrective_hits.saturating_add(1);
+            }
+            state.total_shots_to_hit = state.total_shots_to_hit.saturating_add(shots_used as u64);
+            state.paired_shot_hits = state.paired_shot_hits.saturating_add(1);
+        }
+
+        state.shots_since_last_hit = 0;
+
+        if state.shot_to_hit_latencies_ms.len() > MAX_SHOT_LATENCY_SAMPLES {
+            let trim = state.shot_to_hit_latencies_ms.len() - MAX_SHOT_LATENCY_SAMPLES;
+            state.shot_to_hit_latencies_ms.drain(0..trim);
+        }
+    }
+
+    fn begin_run_capture_locked(
+        state: &mut RunCaptureState,
+        now: Instant,
+        start_secs: Option<f64>,
+    ) {
+        let start_secs = finite_non_negative(start_secs);
+        let start_instant = start_secs
+            .and_then(|s| now.checked_sub(Duration::from_secs_f64(s)))
+            .unwrap_or(now);
+        let now_ms = unix_now_ms();
+        let start_ms = start_secs
+            .map(|s| now_ms.saturating_sub((s * 1000.0).round().max(0.0) as u64))
+            .unwrap_or(now_ms);
+
+        state.started_at = Some(start_instant);
+        state.started_at_unix_ms = Some(start_ms);
+        state.ended_at_unix_ms = None;
+        state.metrics = RunCaptureMetrics::default();
+        state.peak_score_per_minute = None;
+        state.peak_kills_per_second = None;
+        state.pending_shot_times.clear();
+        state.shot_to_hit_latencies_ms.clear();
+        state.paired_shot_hits = 0;
+        state.shots_since_last_hit = 0;
+        state.total_shots_to_hit = 0;
+        state.corrective_hits = 0;
+        state.event_counts = super::BridgeRunEventCounts::default();
+        state.timeline.clear();
+    }
+
+    fn ensure_run_capture_started_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
+        if state.started_at.is_none() {
+            begin_run_capture_locked(state, Instant::now(), time_hint_secs);
+        }
+    }
+
+    fn run_capture_time_secs(state: &RunCaptureState, time_hint_secs: Option<f64>) -> Option<f64> {
+        if let Some(hint) = finite_non_negative(time_hint_secs) {
+            return Some(hint);
+        }
+        if let Some(d) = finite_non_negative(state.metrics.duration_secs) {
+            return Some(d);
+        }
+        state.started_at.map(|t0| t0.elapsed().as_secs_f64())
+    }
+
+    fn run_capture_has_data(state: &RunCaptureState) -> bool {
+        if !state.timeline.is_empty() {
+            return true;
+        }
+        if state.event_counts.shot_fired_events > 0
+            || state.event_counts.shot_hit_events > 0
+            || state.event_counts.kill_events > 0
+            || state.event_counts.challenge_queued_events > 0
+            || state.event_counts.challenge_start_events > 0
+            || state.event_counts.challenge_end_events > 0
+            || state.event_counts.challenge_complete_events > 0
+            || state.event_counts.challenge_canceled_events > 0
+        {
+            return true;
+        }
+        state.metrics.duration_secs.is_some()
+            || state.metrics.score_total.is_some()
+            || state.metrics.score_total_derived.is_some()
+            || state.metrics.score_per_minute.is_some()
+            || state.metrics.shots_fired.is_some()
+            || state.metrics.shots_hit.is_some()
+            || state.metrics.kills.is_some()
+            || state.metrics.kills_per_second.is_some()
+            || state.metrics.damage_done.is_some()
+            || state.metrics.damage_possible.is_some()
+            || state.metrics.damage_efficiency.is_some()
+            || state.metrics.accuracy_pct.is_some()
+    }
+
+    fn record_run_timeline_point_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
+        ensure_run_capture_started_locked(state, time_hint_secs);
+
+        let Some(t_sec_f64) = run_capture_time_secs(state, time_hint_secs) else {
+            return;
+        };
+        let t_sec = t_sec_f64.max(0.0).floor() as u32;
+
+        let computed_accuracy = match (state.metrics.shots_hit, state.metrics.shots_fired) {
+            (Some(hits), Some(shots)) if shots > 0.0 => Some((hits / shots) * 100.0),
+            _ => None,
+        };
+        let computed_damage_eff = match (state.metrics.damage_done, state.metrics.damage_possible) {
+            (Some(done), Some(possible)) if possible > 0.0 => Some((done / possible) * 100.0),
+            _ => None,
+        };
+
+        let next = super::BridgeRunTimelinePoint {
+            t_sec,
+            score_per_minute: state.metrics.score_per_minute,
+            kills_per_second: state.metrics.kills_per_second,
+            accuracy_pct: state.metrics.accuracy_pct.or(computed_accuracy),
+            damage_efficiency: state.metrics.damage_efficiency.or(computed_damage_eff),
+            score_total: state.metrics.score_total,
+            score_total_derived: state.metrics.score_total_derived,
+            kills: state.metrics.kills,
+            shots_fired: state.metrics.shots_fired,
+            shots_hit: state.metrics.shots_hit,
+        };
+
+        if let Some(last) = state.timeline.last_mut() {
+            if last.t_sec == t_sec {
+                last.score_per_minute = next.score_per_minute.or(last.score_per_minute);
+                last.kills_per_second = next.kills_per_second.or(last.kills_per_second);
+                last.accuracy_pct = next.accuracy_pct.or(last.accuracy_pct);
+                last.damage_efficiency = next.damage_efficiency.or(last.damage_efficiency);
+                last.score_total = next.score_total.or(last.score_total);
+                last.score_total_derived = next.score_total_derived.or(last.score_total_derived);
+                last.kills = next.kills.or(last.kills);
+                last.shots_fired = next.shots_fired.or(last.shots_fired);
+                last.shots_hit = next.shots_hit.or(last.shots_hit);
+                return;
+            }
+        }
+
+        state.timeline.push(next);
+        if state.timeline.len() > MAX_RUN_TIMELINE_POINTS {
+            let trim = state.timeline.len() - MAX_RUN_TIMELINE_POINTS;
+            state.timeline.drain(0..trim);
+        }
+    }
+
+    fn observe_run_stats_snapshot(stats: &BridgeStatsPanelEvent) {
+        let Ok(mut state) = run_capture_state().lock() else {
+            return;
+        };
+
+        state.metrics.duration_secs = finite_non_negative(stats.session_time_secs);
+        state.metrics.kills = stats.kills.map(|v| v as f64);
+        state.metrics.kills_per_second = finite_non_negative(stats.kps);
+        state.metrics.shots_hit = stats.accuracy_hits.map(|v| v as f64);
+        state.metrics.shots_fired = stats.accuracy_shots.map(|v| v as f64);
+        state.metrics.accuracy_pct = finite_non_negative(stats.accuracy_pct);
+        state.metrics.damage_done = finite_non_negative(stats.damage_dealt);
+        state.metrics.damage_possible = finite_non_negative(stats.damage_total);
+        state.metrics.score_per_minute = finite_non_negative(stats.spm);
+
+        if let Some(spm) = state.metrics.score_per_minute {
+            state.peak_score_per_minute = Some(
+                state
+                    .peak_score_per_minute
+                    .map_or(spm, |prev| prev.max(spm)),
+            );
+        }
+        if let Some(kps) = state.metrics.kills_per_second {
+            state.peak_kills_per_second = Some(
+                state
+                    .peak_kills_per_second
+                    .map_or(kps, |prev| prev.max(kps)),
+            );
+        }
+
+        let duration_hint = state.metrics.duration_secs;
+        record_run_timeline_point_locked(&mut state, duration_hint);
+    }
+
+    fn observe_run_metric_event(parsed: &super::BridgeParsedEvent) {
+        let Ok(mut state) = run_capture_state().lock() else {
+            return;
+        };
+
+        let mut should_record = false;
+        let mut time_hint_secs = None;
+
+        match parsed.ev.as_str() {
+            "session_start" | "challenge_start" | "scenario_start" => {
+                begin_run_capture_locked(&mut state, Instant::now(), None);
+                state.event_counts.challenge_start_events =
+                    state.event_counts.challenge_start_events.saturating_add(1);
+                should_record = true;
+            }
+            "challenge_queued" => {
+                let duration_hint = state.metrics.duration_secs;
+                ensure_run_capture_started_locked(&mut state, duration_hint);
+                state.event_counts.challenge_queued_events =
+                    state.event_counts.challenge_queued_events.saturating_add(1);
+            }
+            "challenge_end" | "scenario_end" => {
+                let duration_hint = state.metrics.duration_secs;
+                ensure_run_capture_started_locked(&mut state, duration_hint);
+                state.event_counts.challenge_end_events =
+                    state.event_counts.challenge_end_events.saturating_add(1);
+            }
+            "challenge_complete" | "challenge_completed" | "post_challenge_complete" => {
+                let duration_hint = state.metrics.duration_secs;
+                ensure_run_capture_started_locked(&mut state, duration_hint);
+                state.event_counts.challenge_complete_events = state
+                    .event_counts
+                    .challenge_complete_events
+                    .saturating_add(1);
+            }
+            "challenge_canceled" | "challenge_quit" => {
+                let duration_hint = state.metrics.duration_secs;
+                ensure_run_capture_started_locked(&mut state, duration_hint);
+                state.event_counts.challenge_canceled_events = state
+                    .event_counts
+                    .challenge_canceled_events
+                    .saturating_add(1);
+            }
+            _ => {}
+        }
+
+        if parsed.ev == "shot_fired" {
+            let duration_hint = state.metrics.duration_secs;
+            ensure_run_capture_started_locked(&mut state, duration_hint);
+            let inc = finite_non_negative(parsed.delta)
+                .map(|v| v.round().max(1.0) as u32)
+                .unwrap_or(1);
+            state.event_counts.shot_fired_events =
+                state.event_counts.shot_fired_events.saturating_add(inc);
+            observe_shot_fired_for_recovery(&mut state, inc);
+            should_record = true;
+        } else if parsed.ev == "shot_hit" {
+            let duration_hint = state.metrics.duration_secs;
+            ensure_run_capture_started_locked(&mut state, duration_hint);
+            let inc = finite_non_negative(parsed.delta)
+                .map(|v| v.round().max(1.0) as u32)
+                .unwrap_or(1);
+            state.event_counts.shot_hit_events =
+                state.event_counts.shot_hit_events.saturating_add(inc);
+            observe_shot_hit_for_recovery(&mut state, inc);
+            should_record = true;
+        } else if parsed.ev == "kill" {
+            let duration_hint = state.metrics.duration_secs;
+            ensure_run_capture_started_locked(&mut state, duration_hint);
+            let inc = finite_non_negative(parsed.delta)
+                .map(|v| v.round().max(1.0) as u32)
+                .unwrap_or(1);
+            state.event_counts.kill_events = state.event_counts.kill_events.saturating_add(inc);
+            should_record = true;
+        }
+
+        if let Some(total) = finite_non_negative(parsed.total) {
+            match parsed.ev.as_str() {
+                "shot_fired" => {
+                    state.metrics.shots_fired = Some(total);
+                    should_record = true;
+                }
+                "shot_hit" => {
+                    state.metrics.shots_hit = Some(total);
+                    should_record = true;
+                }
+                "kill" => {
+                    state.metrics.kills = Some(total);
+                    should_record = true;
+                }
+                _ => {}
+            }
+        }
+
+        if let Some(value) = finite_non_negative(parsed.value) {
+            match parsed.ev.as_str() {
+                "pull_shots_fired_total" => {
+                    state.metrics.shots_fired = Some(value);
+                    should_record = true;
+                }
+                "pull_shots_hit_total" => {
+                    state.metrics.shots_hit = Some(value);
+                    should_record = true;
+                }
+                "pull_kills_total" => {
+                    state.metrics.kills = Some(value);
+                    should_record = true;
+                }
+                "pull_seconds_total" => {
+                    state.metrics.duration_secs = Some(value);
+                    time_hint_secs = Some(value);
+                    should_record = true;
+                }
+                "pull_score_per_minute" => {
+                    state.metrics.score_per_minute = Some(value);
+                    state.peak_score_per_minute = Some(
+                        state
+                            .peak_score_per_minute
+                            .map_or(value, |prev| prev.max(value)),
+                    );
+                    should_record = true;
+                }
+                "pull_kills_per_second" => {
+                    state.metrics.kills_per_second = Some(value);
+                    state.peak_kills_per_second = Some(
+                        state
+                            .peak_kills_per_second
+                            .map_or(value, |prev| prev.max(value)),
+                    );
+                    should_record = true;
+                }
+                "pull_damage_done" => {
+                    state.metrics.damage_done = Some(value);
+                    should_record = true;
+                }
+                "pull_damage_possible" => {
+                    state.metrics.damage_possible = Some(value);
+                    should_record = true;
+                }
+                "pull_damage_efficiency" => {
+                    state.metrics.damage_efficiency = Some(value);
+                    should_record = true;
+                }
+                "pull_accuracy" => {
+                    state.metrics.accuracy_pct = Some(value);
+                    should_record = true;
+                }
+                "pull_score_total" => {
+                    state.metrics.score_total = Some(value);
+                    should_record = true;
+                }
+                "pull_score_total_derived" => {
+                    state.metrics.score_total_derived = Some(value);
+                    should_record = true;
+                }
+                _ => {}
+            }
+        }
+
+        if should_record {
+            record_run_timeline_point_locked(&mut state, time_hint_secs);
+        }
+    }
+
+    fn mark_run_capture_end() {
+        if let Ok(mut state) = run_capture_state().lock() {
+            if state.started_at.is_some() {
+                state.ended_at_unix_ms = Some(unix_now_ms());
+            }
+        }
+    }
+
+    fn run_capture_has_progress_for_end_guard() -> bool {
+        let Ok(state) = run_capture_state().lock() else {
+            return false;
+        };
+        state.event_counts.shot_fired_events > 0
+            || state.event_counts.shot_hit_events > 0
+            || state.event_counts.kill_events > 0
+    }
+
+    fn should_guard_early_session_end(reason: &str) -> bool {
+        matches!(
+            reason,
+            "class_hook:IsInChallenge"
+                | "bridge:session_end"
+                | "bridge:challenge_end"
+                | "bridge:challenge_complete"
+                | "bridge:challenge_canceled"
+        )
+    }
+
+    fn restart_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        {
+            let mut state = bridge_session_state().lock().unwrap();
+            let now = Instant::now();
+            state.session_active = true;
+            if challenge_active {
+                state.challenge_active = true;
+            }
+            state.session_started_at = Some(now);
+            state.tracking_paused_by_idle = false;
+            state.last_stats_flow_at = Some(now);
+        }
+        reset_bridge_stats_snapshot();
+        if let Ok(mut run_state) = run_capture_state().lock() {
+            begin_run_capture_locked(&mut run_state, Instant::now(), None);
+        }
+        if challenge_active {
+            let _ = app.emit(super::EVENT_CHALLENGE_START, ());
+        }
+        let _ = app.emit(super::EVENT_SESSION_START, ());
+        let session_start = crate::mouse_hook::start_session_tracking();
+        crate::screen_recorder::start(session_start);
+        log::info!("bridge: session tracking restarted ({reason})");
+    }
+
+    pub fn take_run_snapshot() -> Option<super::BridgeRunSnapshot> {
+        let Ok(mut state) = run_capture_state().lock() else {
+            return None;
+        };
+
+        if !run_capture_has_data(&state) {
+            return None;
+        }
+
+        let duration_secs = finite_non_negative(state.metrics.duration_secs)
+            .or_else(|| state.timeline.last().map(|p| p.t_sec as f64));
+
+        let avg_fire_to_hit_ms = if state.shot_to_hit_latencies_ms.is_empty() {
+            None
+        } else {
+            Some(
+                state.shot_to_hit_latencies_ms.iter().sum::<f64>()
+                    / state.shot_to_hit_latencies_ms.len() as f64,
+            )
+        };
+        let p90_fire_to_hit_ms = if state.shot_to_hit_latencies_ms.is_empty() {
+            None
+        } else {
+            let mut sorted = state.shot_to_hit_latencies_ms.clone();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            percentile_from_sorted(&sorted, 90.0)
+        };
+        let avg_shots_to_hit = if state.paired_shot_hits > 0 {
+            Some(state.total_shots_to_hit as f64 / state.paired_shot_hits as f64)
+        } else {
+            None
+        };
+        let corrective_shot_ratio = if state.paired_shot_hits > 0 {
+            Some(state.corrective_hits as f64 / state.paired_shot_hits as f64)
+        } else {
+            None
+        };
+
+        let snapshot = super::BridgeRunSnapshot {
+            duration_secs,
+            score_total: state.metrics.score_total,
+            score_total_derived: state.metrics.score_total_derived,
+            score_per_minute: state.metrics.score_per_minute,
+            shots_fired: state.metrics.shots_fired,
+            shots_hit: state.metrics.shots_hit,
+            kills: state.metrics.kills,
+            kills_per_second: state.metrics.kills_per_second,
+            damage_done: state.metrics.damage_done,
+            damage_possible: state.metrics.damage_possible,
+            damage_efficiency: state.metrics.damage_efficiency,
+            accuracy_pct: state.metrics.accuracy_pct,
+            peak_score_per_minute: state.peak_score_per_minute,
+            peak_kills_per_second: state.peak_kills_per_second,
+            paired_shot_hits: state.paired_shot_hits,
+            avg_fire_to_hit_ms,
+            p90_fire_to_hit_ms,
+            avg_shots_to_hit,
+            corrective_shot_ratio,
+            started_at_unix_ms: state.started_at_unix_ms,
+            ended_at_unix_ms: state.ended_at_unix_ms.or(Some(unix_now_ms())),
+            event_counts: state.event_counts.clone(),
+            timeline: state.timeline.clone(),
+        };
+
+        *state = RunCaptureState::default();
+        Some(snapshot)
     }
 
     fn bridge_compat_state() -> &'static Mutex<BridgeCompatState> {
@@ -377,14 +1012,18 @@ mod imp {
     fn begin_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
         let (emit_session, emit_challenge) = {
             let mut state = bridge_session_state().lock().unwrap();
+            let now = Instant::now();
             let mut emit_session = false;
             let mut emit_challenge = false;
+            state.last_stats_flow_at = Some(now);
+            state.tracking_paused_by_idle = false;
             if challenge_active && !state.challenge_active {
                 state.challenge_active = true;
                 emit_challenge = true;
             }
             if !state.session_active {
                 state.session_active = true;
+                state.session_started_at = Some(now);
                 emit_session = true;
             }
             (emit_session, emit_challenge)
@@ -412,6 +1051,9 @@ mod imp {
         }
         if emit_session {
             reset_bridge_stats_snapshot();
+            if let Ok(mut run_state) = run_capture_state().lock() {
+                begin_run_capture_locked(&mut run_state, Instant::now(), None);
+            }
             let _ = app.emit(super::EVENT_SESSION_START, ());
             let session_start = crate::mouse_hook::start_session_tracking();
             crate::screen_recorder::start(session_start);
@@ -420,6 +1062,33 @@ mod imp {
     }
 
     fn end_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let (should_debounce, elapsed_ms, has_progress) = {
+            let state = bridge_session_state().lock().unwrap();
+            let (elapsed_ms, has_progress, should_debounce) =
+                if let Some(started_at) = state.session_started_at {
+                    let elapsed = started_at.elapsed();
+                    let elapsed_ms = elapsed.as_millis() as u64;
+                    let has_progress = run_capture_has_progress_for_end_guard();
+                    let should_debounce = state.session_active
+                        && should_guard_early_session_end(reason)
+                        && elapsed < EARLY_SESSION_END_GUARD
+                        && !has_progress;
+                    (elapsed_ms, has_progress, should_debounce)
+                } else {
+                    (0_u64, false, false)
+                };
+            (should_debounce, elapsed_ms, has_progress)
+        };
+        if should_debounce {
+            log::warn!(
+                "bridge: debounced early session end reason={} elapsed_ms={} has_progress={}",
+                reason,
+                elapsed_ms,
+                has_progress
+            );
+            return;
+        }
+
         let (emit_session, emit_challenge) = {
             let mut state = bridge_session_state().lock().unwrap();
             let mut emit_challenge = false;
@@ -429,6 +1098,9 @@ mod imp {
             state.challenge_active = false;
             let emit_session = state.session_active;
             state.session_active = false;
+            state.session_started_at = None;
+            state.tracking_paused_by_idle = false;
+            state.last_stats_flow_at = None;
             (emit_session, emit_challenge)
         };
 
@@ -457,13 +1129,111 @@ mod imp {
         }
         if emit_session {
             let _ = app.emit(super::EVENT_SESSION_END, ());
+            mark_run_capture_end();
             crate::mouse_hook::stop_session_tracking();
             crate::screen_recorder::stop();
             log::info!("bridge: session tracking stopped ({reason})");
         }
     }
 
-    fn parse_class_hook_from_raw(raw: &str) -> Option<(String, Option<u64>, Option<i64>, Option<f64>)> {
+    fn mark_stats_flow_activity(source: &str) {
+        let should_resume = {
+            let mut state = bridge_session_state().lock().unwrap();
+            if !state.session_active {
+                return;
+            }
+            state.last_stats_flow_at = Some(Instant::now());
+            if state.tracking_paused_by_idle {
+                state.tracking_paused_by_idle = false;
+                true
+            } else {
+                false
+            }
+        };
+
+        if should_resume {
+            crate::mouse_hook::resume_session_tracking();
+            crate::screen_recorder::resume();
+            log::info!("bridge: resumed tracking after stats flow resumed ({source})");
+        }
+    }
+
+    fn pause_tracking_if_stats_idle() {
+        let should_pause = {
+            let mut state = bridge_session_state().lock().unwrap();
+            if !state.session_active || state.tracking_paused_by_idle {
+                return;
+            }
+
+            let Some(last_flow) = state.last_stats_flow_at else {
+                return;
+            };
+
+            if Instant::now().duration_since(last_flow) < SESSION_IDLE_PAUSE_AFTER {
+                return;
+            }
+
+            state.tracking_paused_by_idle = true;
+            true
+        };
+
+        if should_pause {
+            crate::mouse_hook::pause_session_tracking();
+            crate::screen_recorder::pause();
+            log::info!("bridge: paused tracking due to stats-flow silence");
+        }
+    }
+
+    fn start_session_idle_watchdog() {
+        if SESSION_IDLE_WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
+            return;
+        }
+
+        std::thread::Builder::new()
+            .name("bridge-session-idle-watchdog".into())
+            .spawn(move || {
+                loop {
+                    pause_tracking_if_stats_idle();
+                    std::thread::sleep(SESSION_IDLE_WATCHDOG_TICK);
+                }
+            })
+            .ok();
+    }
+
+    fn is_stats_flow_event(parsed: &super::BridgeParsedEvent) -> bool {
+        if super::is_metric_event_name(&parsed.ev)
+            || parsed.ev.starts_with("pull_")
+            || parsed.value.is_some()
+            || parsed.total.is_some()
+            || parsed.delta.is_some()
+        {
+            return true;
+        }
+
+        matches!(
+            parsed.ev.as_str(),
+            "session_start"
+                | "session_end"
+                | "challenge_start"
+                | "challenge_restart"
+                | "challenge_end"
+                | "challenge_complete"
+                | "challenge_completed"
+                | "challenge_canceled"
+                | "challenge_quit"
+                | "scenario_start"
+                | "scenario_restart"
+                | "scenario_restarted"
+                | "scenario_end"
+                | "shot_fired"
+                | "shot_hit"
+                | "kill"
+        )
+    }
+
+    fn parse_class_hook_from_raw(
+        raw: &str,
+    ) -> Option<(String, Option<u64>, Option<i64>, Option<f64>)> {
         let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
         let obj = parsed.as_object()?;
         if obj.get("ev")?.as_str()?.trim() != "class_hook_probe" {
@@ -637,7 +1407,11 @@ mod imp {
             }
         }
         if changed {
-            log::info!("bridge: scenario_name resolved source={} name={}", source, name);
+            log::info!(
+                "bridge: scenario_name resolved source={} name={}",
+                source,
+                name
+            );
             let synthetic = super::BridgeParsedEvent {
                 ev: "scenario_name".to_string(),
                 value: None,
@@ -712,9 +1486,9 @@ mod imp {
                         ChallengeTransition::Entered => {
                             begin_session_tracking(app, "class_hook:IsInChallenge", true);
                         }
-                        ChallengeTransition::Exited => {
-                            end_session_tracking(app, "class_hook:IsInChallenge", true);
-                        }
+                        // Avoid ending sessions directly from class-hook samples:
+                        // explicit lifecycle events are less jitter-prone for terminal transitions.
+                        ChallengeTransition::Exited => {}
                         ChallengeTransition::None => {}
                     }
                     emit_class_bool_metric("pull_is_in_challenge", in_challenge);
@@ -782,6 +1556,10 @@ mod imp {
             }
             "challenge_start" | "scenario_start" => {
                 begin_session_tracking(app, "bridge:challenge_start", true);
+                challenge_transition_active = Some(true);
+            }
+            "challenge_restart" | "scenario_restart" | "scenario_restarted" => {
+                restart_session_tracking(app, "bridge:challenge_restart", true);
                 challenge_transition_active = Some(true);
             }
             "challenge_end" | "scenario_end" => {
@@ -864,7 +1642,8 @@ mod imp {
             if let Some(name) = parse_state_manager_scenario_name_from_metadata(&parsed.raw) {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
             }
-            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw) {
+            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw)
+            {
                 let mut queue_changed = false;
                 if let Ok(mut state) = bridge_compat_state().lock() {
                     if !state
@@ -908,14 +1687,31 @@ mod imp {
             if !is_state_manager_source {
                 return;
             }
-            if let Some(name) = parsed
-                .field
-                .as_deref()
-                .and_then(normalize_scenario_name)
-            {
+            if let Some(name) = parsed.field.as_deref().and_then(normalize_scenario_name) {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
             }
             return;
+        }
+
+        if parsed.ev == "shot_fired" {
+            let session_already_active = bridge_session_state()
+                .lock()
+                .map(|state| state.session_active)
+                .unwrap_or(false);
+            if !session_already_active {
+                let should_fallback_start = bridge_compat_state()
+                    .lock()
+                    .map(|state| {
+                        state.stats.is_in_challenge == Some(true)
+                            || state.stats.is_in_scenario == Some(true)
+                            || state.stats.time_remaining.map_or(false, |v| v > 0.25)
+                            || state.stats.queue_time_remaining.map_or(false, |v| v > 0.25)
+                    })
+                    .unwrap_or(false);
+                if should_fallback_start {
+                    begin_session_tracking(app, "bridge:shot_fired_fallback", true);
+                }
+            }
         }
 
         let is_compat_metric = parsed.ev.starts_with("pull_")
@@ -929,18 +1725,9 @@ mod imp {
         }
 
         let has_none_marker = |s: &str| s.contains("None.None") || s.starts_with("Function None.");
-        let stale_runtime_source = parsed
-            .fn_name
-            .as_deref()
-            .map_or(false, has_none_marker)
-            || parsed
-                .receiver
-                .as_deref()
-                .map_or(false, has_none_marker)
-            || parsed
-                .source
-                .as_deref()
-                .map_or(false, has_none_marker);
+        let stale_runtime_source = parsed.fn_name.as_deref().map_or(false, has_none_marker)
+            || parsed.receiver.as_deref().map_or(false, has_none_marker)
+            || parsed.source.as_deref().map_or(false, has_none_marker);
         if stale_runtime_source {
             return;
         }
@@ -967,7 +1754,6 @@ mod imp {
 
         let now = Instant::now();
         let mut should_emit_stats = false;
-        let mut fallback_session_start_reason: Option<&'static str> = None;
         let mut emit_alias_qrem: Option<f64> = None;
         let mut emit_alias_ch: Option<f64> = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
@@ -979,9 +1765,6 @@ mod imp {
                         state.stats.is_in_scenario = Some(next);
                         should_emit_stats = true;
                     }
-                    if value >= 0.5 {
-                        fallback_session_start_reason = Some("bridge:pull_is_in_scenario");
-                    }
                 }
                 "pull_is_in_challenge" | "is_in_challenge" => {
                     let next = value >= 0.5;
@@ -989,9 +1772,6 @@ mod imp {
                         state.stats.is_in_challenge = Some(next);
                         should_emit_stats = true;
                         emit_alias_ch = Some(if next { 1.0 } else { 0.0 });
-                    }
-                    if next {
-                        fallback_session_start_reason = Some("bridge:pull_is_in_challenge");
                     }
                 }
                 "pull_is_in_scenario_editor" => {
@@ -1051,16 +1831,12 @@ mod imp {
                 }
                 "pull_kills_total" => {
                     let next = value.max(0.0).round() as u32;
-                    let prev = state.stats.kills.unwrap_or(0);
                     let suppress = low_confidence_zero
                         && next == 0
                         && state.stats.kills.map_or(false, |prev| prev > 0);
                     if !suppress && state.stats.kills != Some(next) {
                         state.stats.kills = Some(next);
                         should_emit_stats = true;
-                        if next > prev && next > 0 {
-                            fallback_session_start_reason = Some("bridge:pull_kills_total");
-                        }
                     }
                 }
                 "pull_kills_per_second" => {
@@ -1068,7 +1844,10 @@ mod imp {
                         && value <= 0.000001
                         && state.stats.kps.map_or(false, |prev| prev > 0.0);
                     if !suppress
-                        && !state.stats.kps.map_or(false, |prev| (prev - value).abs() <= 0.0001)
+                        && !state
+                            .stats
+                            .kps
+                            .map_or(false, |prev| (prev - value).abs() <= 0.0001)
                     {
                         state.stats.kps = Some(value);
                         should_emit_stats = true;
@@ -1239,7 +2018,9 @@ mod imp {
                         should_emit_stats = true;
                     }
                 }
-                "pull_queue_time_remaining" | "challenge_queue_time_remaining" | "queue_time_remaining" => {
+                "pull_queue_time_remaining"
+                | "challenge_queue_time_remaining"
+                | "queue_time_remaining" => {
                     let suppress = low_confidence_zero
                         && value <= 0.000001
                         && state
@@ -1258,7 +2039,6 @@ mod imp {
                     }
                 }
                 "pull_score_total" | "pull_score_total_derived" => {
-                    let prev_score = state.live_score_total;
                     if let Some(next_last_nonzero) = accept_float_with_zero_suppress(
                         state.live_score_total,
                         value,
@@ -1269,27 +2049,22 @@ mod imp {
                     ) {
                         state.last_nonzero_score_total = next_last_nonzero;
                         state.live_score_total = Some(value);
-                        if value > 0.0001
-                            && prev_score.map_or(true, |prev| value > prev + 0.0001)
-                        {
-                            fallback_session_start_reason = Some("bridge:pull_score_total");
-                        }
                     }
                 }
                 _ => {}
             }
 
-            if let (Some(hits), Some(shots)) = (state.stats.accuracy_hits, state.stats.accuracy_shots) {
+            if let (Some(hits), Some(shots)) =
+                (state.stats.accuracy_hits, state.stats.accuracy_shots)
+            {
                 let next_pct = if shots > 0 {
                     Some((hits as f64 / shots as f64) * 100.0)
                 } else {
                     Some(0.0)
                 };
-                if state
-                    .stats
-                    .accuracy_pct
-                    .map_or(true, |prev| next_pct.map_or(true, |n| (prev - n).abs() > 0.0001))
-                {
+                if state.stats.accuracy_pct.map_or(true, |prev| {
+                    next_pct.map_or(true, |n| (prev - n).abs() > 0.0001)
+                }) {
                     state.stats.accuracy_pct = next_pct;
                     should_emit_stats = true;
                 }
@@ -1308,6 +2083,7 @@ mod imp {
             }
 
             if should_emit_stats {
+                observe_run_stats_snapshot(&state.stats);
                 let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
             }
 
@@ -1376,10 +2152,6 @@ mod imp {
             };
             let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
         }
-
-        if let Some(reason) = fallback_session_start_reason {
-            begin_session_tracking(app, reason, false);
-        }
     }
 
     fn log_ring() -> &'static Mutex<VecDeque<String>> {
@@ -1425,6 +2197,7 @@ mod imp {
         if STARTED.swap(true, Ordering::SeqCst) {
             return;
         }
+        start_session_idle_watchdog();
         std::thread::Builder::new()
             .name("bridge-pipe".into())
             .spawn(move || pipe_server_loop(app))
@@ -1513,14 +2286,21 @@ mod imp {
                                 let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
                             }
                             if let Some(parsed) = parsed_event {
+                                observe_run_metric_event(&parsed);
+                                // Always run compat handlers, even for noisy events
+                                // (e.g. class_hook_probe) because they can drive
+                                // lifecycle/state normalization.
+                                emit_bridge_compat_events(app, &parsed);
                                 if is_noisy_bridge_event(&parsed.ev) {
                                     continue;
+                                }
+                                if is_stats_flow_event(&parsed) {
+                                    mark_stats_flow_activity(parsed.ev.as_str());
                                 }
                                 let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
                                 if super::is_metric_event_name(&parsed.ev) {
                                     let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
                                 }
-                                emit_bridge_compat_events(app, &parsed);
                             }
                         }
                     }
@@ -1532,17 +2312,17 @@ mod imp {
     }
 
     fn files_identical(a: &Path, b: &Path) -> Result<bool, String> {
-        let ma = std::fs::metadata(a)
-            .map_err(|e| format!("Failed to stat {}: {}", a.display(), e))?;
-        let mb = std::fs::metadata(b)
-            .map_err(|e| format!("Failed to stat {}: {}", b.display(), e))?;
+        let ma =
+            std::fs::metadata(a).map_err(|e| format!("Failed to stat {}: {}", a.display(), e))?;
+        let mb =
+            std::fs::metadata(b).map_err(|e| format!("Failed to stat {}: {}", b.display(), e))?;
         if ma.len() != mb.len() {
             return Ok(false);
         }
-        let mut fa = std::fs::File::open(a)
-            .map_err(|e| format!("Failed to open {}: {}", a.display(), e))?;
-        let mut fb = std::fs::File::open(b)
-            .map_err(|e| format!("Failed to open {}: {}", b.display(), e))?;
+        let mut fa =
+            std::fs::File::open(a).map_err(|e| format!("Failed to open {}: {}", a.display(), e))?;
+        let mut fb =
+            std::fs::File::open(b).map_err(|e| format!("Failed to open {}: {}", b.display(), e))?;
         let mut ba = [0u8; 64 * 1024];
         let mut bb = [0u8; 64 * 1024];
         loop {
@@ -1699,8 +2479,7 @@ mod imp {
             );
             emit_bridge_log_line(format!(
                 "[bridge] runtime flags changed by sync before={:?} after={:?}",
-                flags_before_sync,
-                flags_after_sync
+                flags_before_sync, flags_after_sync
             ));
         } else {
             emit_bridge_log_line(format!(
@@ -2100,7 +2879,9 @@ mod imp {
         let detour_callbacks = game_bin_dir
             .join("kovaaks_enable_detour_callbacks.flag")
             .is_file();
-        let hook_process_event_legacy = game_bin_dir.join("kovaaks_hook_process_event.flag").is_file();
+        let hook_process_event_legacy = game_bin_dir
+            .join("kovaaks_hook_process_event.flag")
+            .is_file();
         super::RuntimeFlagState {
             profile,
             enable_pe_hook: game_bin_dir.join("kovaaks_enable_pe_hook.flag").is_file(),
@@ -2111,18 +2892,30 @@ mod imp {
             log_all_events: game_bin_dir.join("kovaaks_log_all_events.flag").is_file(),
             object_debug: game_bin_dir.join("kovaaks_object_debug.flag").is_file(),
             non_ui_probe: game_bin_dir.join("kovaaks_non_ui_probe.flag").is_file(),
-            ui_counter_fallback: game_bin_dir.join("kovaaks_ui_counter_fallback.flag").is_file(),
-            score_ui_fallback: game_bin_dir.join("kovaaks_score_ui_fallback.flag").is_file(),
-            hook_process_internal: game_bin_dir.join("kovaaks_hook_process_internal.flag").is_file(),
+            ui_counter_fallback: game_bin_dir
+                .join("kovaaks_ui_counter_fallback.flag")
+                .is_file(),
+            score_ui_fallback: game_bin_dir
+                .join("kovaaks_score_ui_fallback.flag")
+                .is_file(),
+            hook_process_internal: game_bin_dir
+                .join("kovaaks_hook_process_internal.flag")
+                .is_file(),
             hook_process_local_script: game_bin_dir
                 .join("kovaaks_hook_process_local_script.flag")
                 .is_file(),
-            class_probe_hooks: game_bin_dir.join("kovaaks_class_probe_hooks.flag").is_file(),
+            class_probe_hooks: game_bin_dir
+                .join("kovaaks_class_probe_hooks.flag")
+                .is_file(),
             class_probe_scalar_reads: game_bin_dir
                 .join("kovaaks_class_probe_scalar_reads.flag")
                 .is_file(),
-            class_probe_scan_all: game_bin_dir.join("kovaaks_class_probe_scan_all.flag").is_file(),
-            allow_unsafe_hooks: game_bin_dir.join("kovaaks_allow_unsafe_hooks.flag").is_file(),
+            class_probe_scan_all: game_bin_dir
+                .join("kovaaks_class_probe_scan_all.flag")
+                .is_file(),
+            allow_unsafe_hooks: game_bin_dir
+                .join("kovaaks_allow_unsafe_hooks.flag")
+                .is_file(),
             native_hooks: game_bin_dir.join("kovaaks_native_hooks.flag").is_file(),
             hook_process_event: detour_callbacks || hook_process_event_legacy,
             detour_callbacks,
@@ -2185,14 +2978,22 @@ mod imp {
         }
 
         if touched_any {
-            log::info!("bridge: set runtime flag {}={} (updated)", key, if enabled { 1 } else { 0 });
+            log::info!(
+                "bridge: set runtime flag {}={} (updated)",
+                key,
+                if enabled { 1 } else { 0 }
+            );
             emit_bridge_log_line(format!(
                 "[bridge] runtime flag set {}={} (updated)",
                 key,
                 if enabled { 1 } else { 0 }
             ));
         } else {
-            log::info!("bridge: runtime flag {} already {}", key, if enabled { 1 } else { 0 });
+            log::info!(
+                "bridge: runtime flag {} already {}",
+                key,
+                if enabled { 1 } else { 0 }
+            );
             emit_bridge_log_line(format!(
                 "[bridge] runtime flag already {}={}",
                 key,
@@ -2427,7 +3228,10 @@ mod imp {
         format!("file://{encoded}")
     }
 
-    fn write_in_game_overlay_url(game_bin_dir: &Path, overlay_index: &Path) -> Result<String, String> {
+    fn write_in_game_overlay_url(
+        game_bin_dir: &Path,
+        overlay_index: &Path,
+    ) -> Result<String, String> {
         if !overlay_index.is_file() {
             return Err(format!(
                 "In-game browser index file not found: {}",
@@ -3219,6 +4023,16 @@ pub fn recent_logs(limit: usize) -> Vec<String> {
 #[cfg(not(target_os = "windows"))]
 pub fn recent_logs(_limit: usize) -> Vec<String> {
     Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
+    imp::take_run_snapshot()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
+    None
 }
 
 #[cfg(target_os = "windows")]

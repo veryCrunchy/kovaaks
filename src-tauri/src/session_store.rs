@@ -73,6 +73,26 @@ pub struct StatsPanelSnapshot {
     pub accuracy_trend: Option<f32>,
 }
 
+/// Per-session shot recovery snapshot derived from bridge shot_fired/shot_hit events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ShotTimingSnapshot {
+    /// Number of hits paired to a preceding shot.
+    #[serde(default)]
+    pub paired_shot_hits: u32,
+    /// Average time from shot fired to corresponding hit event.
+    #[serde(default)]
+    pub avg_fire_to_hit_ms: Option<f32>,
+    /// 90th percentile fired->hit latency (tail of correction delays).
+    #[serde(default)]
+    pub p90_fire_to_hit_ms: Option<f32>,
+    /// Average number of shots needed per hit (1.0 ideal for one-shot).
+    #[serde(default)]
+    pub avg_shots_to_hit: Option<f32>,
+    /// Fraction of hits that required >1 shot before landing.
+    #[serde(default)]
+    pub corrective_shot_ratio: Option<f32>,
+}
+
 /// One completed session record.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionRecord {
@@ -93,6 +113,9 @@ pub struct SessionRecord {
     /// Session stats panel snapshot (None if stats-panel OCR not configured)
     #[serde(default)]
     pub stats_panel: Option<StatsPanelSnapshot>,
+    /// Shot recovery quality snapshot from bridge fired->hit timing.
+    #[serde(default)]
+    pub shot_timing: Option<ShotTimingSnapshot>,
     /// True if a replay file (mouse path + per-second metrics) was saved.
     #[serde(default)]
     pub has_replay: bool,

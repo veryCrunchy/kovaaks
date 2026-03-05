@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use tauri::Manager;
 
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -37,11 +37,15 @@ static WATCHER: Lazy<Mutex<Option<RecommendedWatcher>>> = Lazy::new(|| Mutex::ne
 /// fs-events (Create then Modify for the same file) are silently ignored.
 /// The same file must not be reprocessed within 10 seconds.
 static PROCESSED: Lazy<Mutex<HashMap<PathBuf, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
+static WATCHER_STARTED_AT: Lazy<Mutex<Option<SystemTime>>> = Lazy::new(|| Mutex::new(None));
 
 const DEDUP_WINDOW: Duration = Duration::from_secs(10);
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 pub fn start(app: AppHandle, stats_dir: &str) {
+    if let Ok(mut started) = WATCHER_STARTED_AT.lock() {
+        *started = Some(SystemTime::now());
+    }
     let path = PathBuf::from(stats_dir);
     if !path.exists() {
         log::warn!("Stats dir does not exist: {stats_dir}");
@@ -95,6 +99,22 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
         EventKind::Create(_) | EventKind::Modify(_) => {
             for path in &event.paths {
                 if path.extension().and_then(|e| e.to_str()) == Some("csv") {
+                    // Ignore stale files that predate watcher startup; only react
+                    // to files written/updated during this runtime.
+                    let watcher_started_at = WATCHER_STARTED_AT.lock().ok().and_then(|g| *g);
+                    if let (Some(started_at), Ok(meta)) =
+                        (watcher_started_at, std::fs::metadata(path))
+                    {
+                        if let Ok(modified_at) = meta.modified() {
+                            if modified_at + Duration::from_secs(1) < started_at {
+                                log::debug!(
+                                    "Ignoring stale stats csv event (modified before watcher start): {}",
+                                    path.display()
+                                );
+                                continue;
+                            }
+                        }
+                    }
                     // ── Deduplication ─────────────────────────────────────────
                     // notify fires both Create and Modify (and sometimes two
                     // Modify events) for the same file within milliseconds.
@@ -126,13 +146,26 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             let smoothness = crate::mouse_hook::session_summary();
                             // OCR-based stats snapshot is disabled; rely on direct bridge/memory data.
                             let stats_panel = None;
+                            // Seal session tracking first so no new samples/frames are
+                            // appended while we are draining buffers for persistence.
+                            crate::mouse_hook::stop_session_tracking();
+                            crate::screen_recorder::stop();
                             // Drain path + metric + video buffers for replay persistence
                             let raw_positions = crate::mouse_hook::drain_raw_positions();
                             let metric_points = crate::mouse_hook::drain_session_buffer();
                             let screen_frames = crate::screen_recorder::drain_frames_for_replay();
-                            // Stop smoothness tracking and screen recording session state
-                            crate::mouse_hook::stop_session_tracking();
-                            crate::screen_recorder::stop();
+                            let run_snapshot = crate::bridge::take_run_snapshot();
+                            let shot_timing = run_snapshot.as_ref().map(|snap| {
+                                crate::session_store::ShotTimingSnapshot {
+                                    paired_shot_hits: snap.paired_shot_hits,
+                                    avg_fire_to_hit_ms: snap.avg_fire_to_hit_ms.map(|v| v as f32),
+                                    p90_fire_to_hit_ms: snap.p90_fire_to_hit_ms.map(|v| v as f32),
+                                    avg_shots_to_hit: snap.avg_shots_to_hit.map(|v| v as f32),
+                                    corrective_shot_ratio: snap
+                                        .corrective_shot_ratio
+                                        .map(|v| v as f32),
+                                }
+                            });
                             // Build session id and save replay file
                             let session_id = format!(
                                 "{}-{}",
@@ -146,6 +179,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                     positions: raw_positions,
                                     metrics: metric_points,
                                     frames: screen_frames,
+                                    run_snapshot,
                                 },
                             );
                             // Persist to session history
@@ -162,6 +196,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 timestamp: result.timestamp.clone(),
                                 smoothness,
                                 stats_panel,
+                                shot_timing,
                                 has_replay,
                             };
                             crate::session_store::add_session(app, record);

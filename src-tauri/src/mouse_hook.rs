@@ -132,9 +132,6 @@ struct SharedState {
     raw_positions: Vec<RawPositionPoint>,
     /// When the last raw-position sample was taken (used for rate-limiting).
     last_raw_sample: Option<Instant>,
-    /// Most-recent absolute cursor position — used to compute deltas.
-    last_x: f64,
-    last_y: f64,
     /// Integrated delta-space cursor position.  Starts at (0, 0) each session
     /// and accumulates raw dx/dy so the path represents actual camera movement.
     cursor_x: f64,
@@ -151,8 +148,6 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         hold_durations: VecDeque::with_capacity(500),
         raw_positions: Vec::with_capacity(20_000),
         last_raw_sample: None,
-        last_x: 0.0,
-        last_y: 0.0,
         cursor_x: 0.0,
         cursor_y: 0.0,
     })
@@ -180,7 +175,7 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
     // FPS games perform every frame.  This thread owns cursor_x/cursor_y and the
     // raw_positions buffer.  The rdev thread below continues for hotkeys, click
     // detection, and the per-second smoothness metrics engine.
-    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    #[cfg(target_os = "windows")]
     start_raw_input_thread();
 
     // Spawn the rdev listener thread (blocks, so must be its own thread)
@@ -343,7 +338,7 @@ pub fn set_feedback_verbosity(level: u8) {
 // recentering.  We use it exclusively to track cursor_x/cursor_y and build the
 // raw_positions buffer.  rdev continues for hotkeys, click detection and metrics.
 
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 fn start_raw_input_thread() {
     std::thread::Builder::new()
         .name("raw-input-mouse".into())
@@ -351,7 +346,7 @@ fn start_raw_input_thread() {
         .expect("failed to spawn raw input thread");
 }
 
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 fn raw_input_loop() {
     use std::mem::size_of;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -422,7 +417,7 @@ fn raw_input_loop() {
     }
 }
 
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 unsafe extern "system" fn raw_input_wnd_proc(
     hwnd: windows::Win32::Foundation::HWND,
     msg: u32,
@@ -522,49 +517,11 @@ fn mouse_event_callback(event: Event) {
     }
 
     match event.event_type {
-        // On Windows+ocr the raw-input thread owns all mouse events and
+        // On Windows the raw-input thread owns all mouse movement and
         // raw_positions; the rdev callback is only used for hotkeys and clicks.
-        #[cfg(not(all(target_os = "windows", feature = "ocr")))]
-        EventType::MouseMove { x, y } => {
-            if TRACKING_ACTIVE.load(Ordering::Relaxed) {
-                let now = Instant::now();
-                if let Ok(mut s) = STATE.lock() {
-                    s.events.push(RawMouseEvent { x, y, time: now });
-                    if s.events.len() > 50_000 {
-                        s.events.drain(..10_000);
-                    }
-                    let dx = x - s.last_x;
-                    let dy = y - s.last_y;
-                    if s.last_x != 0.0 || s.last_y != 0.0 {
-                        s.cursor_x += dx;
-                        s.cursor_y += dy;
-                    }
-                    s.last_x = x;
-                    s.last_y = y;
-                    let sample = match s.last_raw_sample {
-                        None => true,
-                        Some(last) => now.duration_since(last) >= Duration::from_millis(16),
-                    };
-                    if sample {
-                        let ts_ms =
-                            now.saturating_duration_since(s.session_start).as_millis() as u64;
-                        let cx = s.cursor_x;
-                        let cy = s.cursor_y;
-                        s.raw_positions.push(RawPositionPoint {
-                            x: cx,
-                            y: cy,
-                            timestamp_ms: ts_ms,
-                            is_click: false,
-                        });
-                        s.last_raw_sample = Some(now);
-                        if s.raw_positions.len() > 30_000 {
-                            s.raw_positions.drain(..5_000);
-                        }
-                    }
-                }
-            }
-        }
-        #[cfg(all(target_os = "windows", feature = "ocr"))]
+        // Mouse movement is captured via WM_INPUT hardware deltas in the raw
+        // input thread; ignore rdev absolute cursor moves to avoid edge clamp
+        // and SetCursorPos recenter artifacts.
         EventType::MouseMove { .. } => {}
         EventType::ButtonPress(rdev::Button::Left) => {
             if TRACKING_ACTIVE.load(Ordering::Relaxed) {
@@ -789,11 +746,11 @@ fn maybe_emit_feedback(
     let overshoot_thresh = if is_clicking { 0.35 } else { 0.45 };
     if streak_tick(streaks, "overshoot", m.overshoot_rate > overshoot_thresh) >= 3 {
         let msg = if is_tracking {
-            "Overshooting — ease up and let the cursor settle onto the target"
+            "Overshooting — reduce speed slightly and let the cursor settle before correcting"
         } else if is_clicking {
-            "Overshooting your clicks — shorten your flick slightly so you land on the target, not past it"
+            "Overshooting clicks — shorten the flick so you land on target instead of past it"
         } else {
-            "Overshooting — slow down in the last stretch before the target"
+            "Overshooting — slow down in the final stretch before the target"
         };
         maybe_emit(app, "overshoot", msg, "warning", cooldowns);
         streaks.insert("overshoot", 0);
@@ -806,9 +763,9 @@ fn maybe_emit_feedback(
         let msg = if is_clicking {
             "Precision streak! Flicks are landing clean"
         } else if is_tracking {
-            "Smooth tracking — you're locked in, keep that flow!"
+            "Smooth tracking — strong control, keep this rhythm"
         } else {
-            "Smooth streak — aim is clean, keep it up!"
+            "Smooth streak — aim is clean, keep it up"
         };
         maybe_emit(app, "smooth_streak", msg, "positive", cooldowns);
         streaks.insert("smooth_streak", 0);
@@ -828,7 +785,7 @@ fn maybe_emit_feedback(
         maybe_emit(
             app,
             "click_timing",
-            "Click timing is uneven — try to find a steady rhythm between shots",
+            "Click timing is uneven — hold a steadier rhythm between shots",
             "tip",
             cooldowns,
         );
@@ -840,11 +797,11 @@ fn maybe_emit_feedback(
     // Over-correcting: applies to all scenarios, message varies
     if streak_tick(streaks, "correction", m.correction_ratio > 0.55) >= 3 {
         let msg = if is_clicking {
-            "Too many micro-corrections — trust your first flick and commit to the shot"
+            "Too many micro-corrections — trust your first flick and commit earlier"
         } else if is_tracking {
-            "Over-steering on the target — apply steady pressure instead of chasing every movement"
+            "Over-steering on target — apply steadier pressure instead of chasing"
         } else {
-            "Over-correcting — commit to your first move and stop fidgeting"
+            "Over-correcting — commit to your first move and reduce extra adjustments"
         };
         maybe_emit(app, "correction", msg, "tip", cooldowns);
         streaks.insert("correction", 0);
@@ -855,7 +812,7 @@ fn maybe_emit_feedback(
         maybe_emit(
             app,
             "velocity_std",
-            "Speed is too choppy — try to match the target's pace and keep a steady flow",
+            "Speed is choppy — match target pace and keep a steadier flow",
             "warning",
             cooldowns,
         );
@@ -869,9 +826,9 @@ fn maybe_emit_feedback(
         && streak_tick(streaks, "path_eff", m.path_efficiency < 0.72) >= 3
     {
         let msg = if is_clicking {
-            "Curved flick paths — go straight to the target, don't curve in"
+            "Curved flick paths — take a straighter line to target"
         } else {
-            "Curved paths to targets — commit to a straight line when snapping"
+            "Curved paths to targets — commit to a straighter snap line"
         };
         maybe_emit(app, "path_eff", msg, "tip", cooldowns);
         streaks.insert("path_eff", 0);
@@ -888,9 +845,9 @@ fn maybe_emit_feedback(
     // Directional bias: applies to all
     if m.directional_bias > 0.0 && streak_tick(streaks, "bias", m.directional_bias > 0.55) >= 3 {
         let msg = if is_clicking {
-            "Consistently drifting one direction — try repositioning your arm or centering your mouse"
+            "Consistent one-side drift — re-center your arm and mouse position"
         } else {
-            "Aim is drifting to one side — check if your mouse is angled or try re-centering your arm"
+            "Aim is drifting to one side — check mouse angle and re-center your arm"
         };
         maybe_emit(app, "bias", msg, "tip", cooldowns);
         streaks.insert("bias", 0);
@@ -903,7 +860,7 @@ fn maybe_emit_feedback(
         maybe_emit(
             app,
             "jitter",
-            "Too much wobble — relax your grip and let your arm do the work instead of your wrist",
+            "Too much wobble — relax grip pressure and let your arm drive the motion",
             "tip",
             cooldowns,
         );
@@ -917,7 +874,7 @@ fn maybe_emit_feedback(
         maybe_emit(
             app,
             "path_eff_track",
-            "Drifting off target — keep your cursor glued to it rather than chasing it",
+            "Drifting off target — stay on the target path instead of chasing after it",
             "tip",
             cooldowns,
         );

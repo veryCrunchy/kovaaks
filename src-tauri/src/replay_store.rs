@@ -26,6 +26,10 @@ pub struct ReplayData {
     /// Absent in replays saved before this field was added.
     #[serde(default)]
     pub frames: Vec<crate::screen_recorder::ScreenFrame>,
+    /// Bridge-derived run snapshot with timeline and event counts.
+    /// Absent in replays saved before this field was added.
+    #[serde(default)]
+    pub run_snapshot: Option<crate::bridge::BridgeRunSnapshot>,
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -91,6 +95,7 @@ pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool 
         positions: downsampled_positions,
         metrics: data.metrics,
         frames: data.frames,
+        run_snapshot: data.run_snapshot,
     };
 
     let path = dir.join(format!("{}.json", session_id));
@@ -101,11 +106,12 @@ pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool 
                 return false;
             }
             log::info!(
-                "replay_store: saved {} ({} positions, {} metrics, {} frames)",
+                "replay_store: saved {} ({} positions, {} metrics, {} frames, run_snapshot={})",
                 session_id,
                 stored.positions.len(),
                 stored.metrics.len(),
                 stored.frames.len(),
+                stored.run_snapshot.is_some(),
             );
             true
         }

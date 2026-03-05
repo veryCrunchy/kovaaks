@@ -1,10 +1,9 @@
+use std::collections::VecDeque;
 use std::sync::Mutex;
 /// Screen recorder: captures a low-resolution JPEG snapshot of the game's centre
 /// region at 5 fps during active sessions, for post-session mouse-path underlay.
 ///
-/// Only performs actual capture with the `ocr` feature on Windows (shares GDI
-/// infrastructure with `ocr.rs`).  On other platforms all functions are no-ops
-/// that return empty Vecs so the frontend degrades gracefully.
+/// Performs capture on Windows using GDI/PrintWindow.
 ///
 /// Storage: 15 fps × 640×(aspect) px × JPEG quality 65 ≈ 15–25 KB/frame.
 /// A 60-second session produces ~900 frames ≈ 15–22 MB in RAM — kept only until
@@ -36,6 +35,9 @@ pub struct ScreenFrame {
 const FPS: u64 = 15;
 /// Cap at 2 700 frames ≈ 3-minute session at 15 fps.
 const MAX_FRAMES: usize = 2_700;
+/// Keep a short queue of completed session frame buffers so a fast restart does
+/// not erase frames before the file-watcher persists the previous run.
+const MAX_COMPLETED_SESSIONS: usize = 8;
 /// Output width after downscaling; height is preserved from the source aspect ratio.
 /// 480 px is the replay target size, so we encode at that width directly during
 /// recording — this eliminates the decode→resize→re-encode pass in
@@ -47,12 +49,15 @@ const JPEG_QUALITY: u8 = 65;
 // ─── State ─────────────────────────────────────────────────────────────────────
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
+static PAUSED: AtomicBool = AtomicBool::new(false);
 /// Incremented on every `start()` call.  Each spawned thread captures its own
 /// generation ID and exits as soon as it sees a newer generation — guaranteeing
 /// that only one recording thread is ever active at a time.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
 static FRAMES: Lazy<Mutex<Vec<ScreenFrame>>> = Lazy::new(|| Mutex::new(Vec::new()));
+static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<Vec<ScreenFrame>>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
 static SESSION_START: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Public API ────────────────────────────────────────────────────────────────
@@ -100,6 +105,7 @@ pub fn start(session_start: Instant) {
         FRAMES.lock().unwrap().clear();
         *SESSION_START.lock().unwrap() = Some(session_start);
     }
+    PAUSED.store(false, Ordering::SeqCst);
     RECORDING.store(true, Ordering::SeqCst);
     std::thread::Builder::new()
         .name(format!("screen-recorder-{generation}"))
@@ -110,20 +116,62 @@ pub fn start(session_start: Instant) {
 
 /// Stop frame capture.
 pub fn stop() {
+    PAUSED.store(false, Ordering::SeqCst);
     if RECORDING.swap(false, Ordering::SeqCst) {
-        log::info!("Screen recorder stopped");
+        let drained = std::mem::take(&mut *FRAMES.lock().unwrap());
+        let captured_frames = drained.len();
+        let mut queued_sessions = 0usize;
+        if !drained.is_empty() {
+            let mut completed = COMPLETED_FRAMES.lock().unwrap();
+            completed.push_back(drained);
+            while completed.len() > MAX_COMPLETED_SESSIONS {
+                let _ = completed.pop_front();
+            }
+            queued_sessions = completed.len();
+        }
+        log::info!(
+            "Screen recorder stopped (frames={}, queued_sessions={})",
+            captured_frames,
+            queued_sessions
+        );
+    }
+}
+
+/// Pause frame capture mid-session without clearing buffered frames.
+pub fn pause() {
+    if RECORDING.load(Ordering::SeqCst) && !PAUSED.swap(true, Ordering::SeqCst) {
+        log::info!("Screen recorder paused");
+    }
+}
+
+/// Resume frame capture after a mid-session pause.
+pub fn resume() {
+    if RECORDING.load(Ordering::SeqCst) && PAUSED.swap(false, Ordering::SeqCst) {
+        log::info!("Screen recorder resumed");
     }
 }
 
 /// Drain all recorded frames and clear the internal buffer.
 pub fn drain_frames() -> Vec<ScreenFrame> {
+    if let Some(frames) = COMPLETED_FRAMES.lock().unwrap().pop_front() {
+        return frames;
+    }
     std::mem::take(&mut *FRAMES.lock().unwrap())
 }
 
 /// Return all recorded frames without removing them.
 /// The buffer is cleared automatically when the next session starts.
 pub fn get_frames() -> Vec<ScreenFrame> {
-    FRAMES.lock().unwrap().clone()
+    let live = FRAMES.lock().unwrap().clone();
+    if !live.is_empty() {
+        return live;
+    }
+    COMPLETED_FRAMES
+        .lock()
+        .unwrap()
+        .back()
+        .cloned()
+        .unwrap_or_default()
 }
 
 /// Drain frames and return a replay-quality subset for persistent storage.
@@ -132,7 +180,6 @@ pub fn get_frames() -> Vec<ScreenFrame> {
 /// replay storage.  Frames are already encoded at OUT_W (480 px) and
 /// JPEG_QUALITY during recording, so no re-encoding is required here.
 /// A typical 60-second session produces ~300 frames ≈ 3 MB on disk.
-/// On non-Windows / without `ocr` the buffer is always empty; returns `[]`.
 pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
     drain_frames()
         .into_iter()
@@ -217,9 +264,13 @@ fn record_loop(my_gen: u64) {
     // Exit if recording was stopped *or* a newer generation has been started
     // (i.e. a new session/scenario started while we were still running).
     while RECORDING.load(Ordering::Relaxed) && GENERATION.load(Ordering::Relaxed) == my_gen {
+        if PAUSED.load(Ordering::Relaxed) {
+            std::thread::sleep(interval);
+            continue;
+        }
         let t0 = Instant::now();
 
-        #[cfg(all(target_os = "windows", feature = "ocr"))]
+        #[cfg(target_os = "windows")]
         capture_one_frame();
 
         let elapsed = t0.elapsed();
@@ -230,15 +281,8 @@ fn record_loop(my_gen: u64) {
     log::debug!("Screen recorder thread exited (gen {my_gen})");
 }
 
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 fn capture_one_frame() {
-    // Only capture while KovaaKs is the foreground window.  If the user has
-    // alt-tabbed or another window is on top, skip this frame entirely — the
-    // session clock keeps running so sync with mouse data is preserved, and no
-    // non-game footage ends up in the replay.
-    if !crate::window_tracker::is_game_focused() {
-        return;
-    }
     let rect = match *CAPTURE_RECT.lock().unwrap() {
         Some(r) => r,
         None => return,
@@ -263,7 +307,7 @@ fn capture_one_frame() {
 
 // ─── Capture + encode ─────────────────────────────────────────────────────────
 
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
     use image::codecs::jpeg::JpegEncoder;
 
@@ -310,7 +354,7 @@ fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
 /// compositor — layered/transparent windows on top (our overlay, etc.) are
 /// never included.  `screen_rect` is in screen coordinates; we translate to
 /// client coordinates so the crop is correct for non-(0,0) game windows too.
-#[cfg(all(target_os = "windows", feature = "ocr"))]
+#[cfg(target_os = "windows")]
 fn capture_game_window_region(
     hwnd: windows::Win32::Foundation::HWND,
     screen_rect: &RegionRect,

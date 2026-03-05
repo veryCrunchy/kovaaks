@@ -115,6 +115,84 @@ fn deploy_and_inject_ue4ss(app: &AppHandle, stats_dir: &str) -> Result<(), Strin
         .map_err(|_| "Could not get resource directory")?;
     bridge::deploy_and_inject(resource_dir.as_path(), stats_dir)
 }
+
+#[cfg(target_os = "windows")]
+fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
+    std::thread::Builder::new()
+        .name("ue4ss-reinject-monitor".into())
+        .spawn(move || {
+            let poll_interval = std::time::Duration::from_secs(2);
+            let reinject_cooldown = std::time::Duration::from_secs(8);
+            let mut last_pid: Option<u32> = None;
+            let mut last_attempt: Option<(u32, std::time::Instant)> = None;
+
+            loop {
+                let current_pid = bridge::current_game_pid();
+
+                if current_pid != last_pid {
+                    match (last_pid, current_pid) {
+                        (None, Some(pid)) => {
+                            log::info!("Detected {pid} for KovaaK process; monitoring UE4SS load state");
+                        }
+                        (Some(old), Some(new)) if old != new => {
+                            log::warn!(
+                                "Detected KovaaK restart (pid {old} -> {new}); scheduling UE4SS reinjection"
+                            );
+                        }
+                        (Some(old), None) => {
+                            log::info!("KovaaK process exited (pid {old})");
+                        }
+                        _ => {}
+                    }
+                    last_pid = current_pid;
+                }
+
+                match current_pid {
+                    Some(pid) => {
+                        if bridge::is_ue4ss_loaded_for_pid(pid) {
+                            last_attempt = None;
+                        } else {
+                            let can_attempt = match last_attempt {
+                                Some((attempt_pid, at)) if attempt_pid == pid => {
+                                    at.elapsed() >= reinject_cooldown
+                                }
+                                _ => true,
+                            };
+
+                            if can_attempt {
+                                log::warn!(
+                                    "UE4SS not loaded for KovaaK pid {pid}; attempting deploy/inject"
+                                );
+                                match deploy_and_inject_ue4ss(&app, &stats_dir) {
+                                    Ok(()) => {
+                                        log::info!(
+                                            "UE4SS deploy/inject attempt finished for KovaaK pid {pid}"
+                                        );
+                                    }
+                                    Err(e) => {
+                                        log::warn!(
+                                            "UE4SS deploy/inject attempt failed for KovaaK pid {pid}: {e}"
+                                        );
+                                    }
+                                }
+                                last_attempt = Some((pid, std::time::Instant::now()));
+                            }
+                        }
+                    }
+                    None => {
+                        last_attempt = None;
+                    }
+                }
+
+                std::thread::sleep(poll_interval);
+            }
+        })
+        .ok();
+}
+
+#[cfg(not(target_os = "windows"))]
+fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
+
 mod bridge;
 mod file_watcher;
 mod kovaaks_api;
@@ -903,7 +981,7 @@ struct CursorPos {
 /// Used by the frontend to implement cursor-proximity passthrough toggling.
 #[tauri::command]
 fn get_cursor_pos() -> CursorPos {
-    #[cfg(all(target_os = "windows", feature = "ocr"))]
+    #[cfg(target_os = "windows")]
     {
         use windows::Win32::Foundation::POINT;
         use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
@@ -1128,6 +1206,7 @@ pub fn run() {
             if let Err(e) = deploy_and_inject_ue4ss(app.handle(), &loaded.stats_dir) {
                 log::error!("Failed to deploy/inject UE4SS runtime: {e}");
             }
+            start_ue4ss_reinject_monitor(app.handle().clone(), loaded.stats_dir.clone());
 
             // Build system tray (Windows only)
             #[cfg(not(target_os = "linux"))]
@@ -1141,6 +1220,9 @@ pub fn run() {
                 let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 let _ = win.show();
             }
+            // Ensure monitor placement + screen recorder capture rect are initialized
+            // on startup from persisted settings (without requiring manual monitor re-select).
+            apply_monitor(app.handle(), loaded.monitor_index);
             window_tracker::set_force_show(false);
             window_tracker::start(app.handle().clone());
             let initial_game_focus = window_tracker::is_game_focused();
@@ -1221,8 +1303,7 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
                 button_state: MouseButtonState::Up,
                 ..
             } = event
-            {
-            }
+            {}
         })
         .build(app)?;
 
