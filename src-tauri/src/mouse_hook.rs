@@ -6,6 +6,7 @@
 ///
 /// Hotkeys (F8+ are free; below F8 used by KovaaK's):
 ///   F8  → toggle-settings        (open/close settings panel)
+///   F9  → toggle-debug-state-overlay (show/hide bridge state debug HUD)
 ///   F10 → toggle-layout-huds     (enter/exit HUD drag-to-reposition mode)
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
@@ -562,6 +563,13 @@ fn mouse_event_callback(event: Event) {
             if let Ok(guard) = APP_HANDLE.lock() {
                 if let Some(app) = guard.as_ref() {
                     let _ = app.emit("toggle-settings", ());
+                }
+            }
+        }
+        EventType::KeyPress(Key::F9) => {
+            if let Ok(guard) = APP_HANDLE.lock() {
+                if let Some(app) = guard.as_ref() {
+                    let _ = app.emit("toggle-debug-state-overlay", ());
                 }
             }
         }

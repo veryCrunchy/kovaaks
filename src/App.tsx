@@ -7,6 +7,7 @@ import { StatsHUD } from "./overlay/StatsHUD";
 import { LiveFeedbackToast } from "./overlay/LiveFeedbackToast";
 import { DraggableHUD } from "./overlay/DraggableHUD";
 import { PostSessionOverview } from "./overlay/PostSessionOverview";
+import { BridgeStateDebugHUD } from "./overlay/BridgeStateDebugHUD";
 import type { StatsPanelReading } from "./types/overlay";
 import type { AppSettings } from "./types/settings";
 import "./index.css";
@@ -26,6 +27,13 @@ export default function App() {
   const [mode, setMode] = useState<Mode>("overlay");
   const [currentScenario, setCurrentScenario] = useState<string | null>(null);
   const [returnMode, setReturnMode] = useState<"overlay" | "settings">("overlay");
+  const [debugHudVisible, setDebugHudVisible] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem("hud-debug-state-visible") === "1";
+    } catch {
+      return false;
+    }
+  });
   // HUD visibility — null until loaded from settings (prevents flash of wrong state on startup)
   const [hudVis, setHudVis] = useState<{
     vsmode: boolean;
@@ -75,6 +83,20 @@ export default function App() {
         if (prev === "layout") return "overlay";
         setReturnMode("overlay");
         return "layout";
+      });
+    });
+    return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  // F9 — toggle bridge state debug HUD
+  useEffect(() => {
+    const unlisten = listen<void>("toggle-debug-state-overlay", () => {
+      setDebugHudVisible((prev) => {
+        const next = !prev;
+        try {
+          localStorage.setItem("hud-debug-state-visible", next ? "1" : "0");
+        } catch {}
+        return next;
       });
     });
     return () => { unlisten.then(fn => fn()); };
@@ -167,6 +189,11 @@ export default function App() {
           {hudVis.postSession && (
             <DraggableHUD storageKey="post-session" defaultPos={{ x: Math.round(window.innerWidth / 2) - 150, y: Math.round(window.innerHeight / 2) - 200 }} layoutMode={mode === "layout"}>
               <PostSessionOverview preview={mode === "layout"} />
+            </DraggableHUD>
+          )}
+          {debugHudVisible && (
+            <DraggableHUD storageKey="bridge-state-debug" defaultPos={{ x: 16, y: Math.round(window.innerHeight - 280) }} layoutMode={mode === "layout"}>
+              <BridgeStateDebugHUD />
             </DraggableHUD>
           )}
         </>

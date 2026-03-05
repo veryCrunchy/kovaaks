@@ -1251,6 +1251,13 @@ pub fn run() {
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {
     let open_settings =
         MenuItem::with_id(app, "open_settings", "Settings  (F8)", true, None::<&str>)?;
+    let toggle_debug_state_hud = MenuItem::with_id(
+        app,
+        "toggle_debug_state_hud",
+        "Toggle Debug State HUD  (F9)",
+        true,
+        None::<&str>,
+    )?;
     let open_stats = MenuItem::with_id(app, "open_stats", "Session Stats", true, None::<&str>)?;
     let toggle_overlay =
         MenuItem::with_id(app, "toggle_overlay", "Toggle AimMod", true, None::<&str>)?;
@@ -1261,6 +1268,7 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
         app,
         &[
             &open_settings,
+            &toggle_debug_state_hud,
             &open_stats,
             &toggle_overlay,
             &separator,
@@ -1278,6 +1286,9 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open_settings" => {
                 let _ = app.emit("toggle-settings", ());
+            }
+            "toggle_debug_state_hud" => {
+                let _ = app.emit("toggle-debug-state-overlay", ());
             }
             "open_stats" => {
                 if let Some(win) = app.get_webview_window("stats") {
