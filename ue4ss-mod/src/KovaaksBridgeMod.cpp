@@ -309,7 +309,19 @@ bool consume_reload_flags_request() {
     return true;
 }
 
-#include "kmod/state_sync_request.inl"
+bool is_likely_readable_region(const void* ptr, size_t bytes);
+bool is_likely_valid_object_ptr(const void* ptr);
+void* safe_property_value_ptr(RC::Unreal::FProperty* property, void* container, int32_t array_index = 0);
+std::string utf8_from_wide(const std::wstring& input);
+
+#include "kmod/replay/replay_types.inl"
+#include "kmod/replay/replay_state_machine.inl"
+#include "kmod/replay/replay_sources.inl"
+#include "kmod/replay/replay_sampler.inl"
+#include "kmod/replay/replay_delta_codec.inl"
+#include "kmod/replay/replay_emit.inl"
+#include "kmod/replay/replay_ingame_playback.inl"
+#include "kmod/replay/bridge_command_bus.inl"
 
 bool is_likely_readable_region(const void* ptr, size_t bytes) {
     if (!ptr || bytes == 0) {
@@ -352,7 +364,7 @@ bool is_likely_valid_object_ptr(const void* ptr) {
     return is_likely_readable_region(reinterpret_cast<const void*>(vtable), sizeof(void*));
 }
 
-void* safe_property_value_ptr(RC::Unreal::FProperty* property, void* container, int32_t array_index = 0) {
+void* safe_property_value_ptr(RC::Unreal::FProperty* property, void* container, int32_t array_index) {
     if (!property || !container || !is_likely_valid_object_ptr(property)) {
         return nullptr;
     }
@@ -881,6 +893,117 @@ public:
     }
 
     auto on_ui_init() -> void override {}
+    auto process_bridge_commands(uint64_t now_ms, bool bridge_connected) -> void {
+        if (!bridge_connected) {
+            return;
+        }
+
+        kmod_replay::BridgeCommand command{};
+        while (kmod_replay::poll_bridge_command(command)) {
+            if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
+                const auto request_reason = command.reason.empty() ? std::string{"unknown"} : command.reason;
+                emit_requested_state_snapshot(now_ms, request_reason);
+                std::array<char, 256> sbuf{};
+                std::snprintf(
+                    sbuf.data(),
+                    sbuf.size(),
+                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                    request_reason.c_str(),
+                    static_cast<unsigned long long>(now_ms)
+                );
+                runtime_log_line(sbuf.data());
+                if (s_log_all_events || s_non_ui_probe_enabled || s_object_debug_enabled) {
+                    events_log_line(sbuf.data());
+                }
+            } else {
+                kmod_replay::replay_ingame_playback_handle_command(command, now_ms);
+            }
+        }
+    }
+
+    auto tick_replay_capture(uint64_t now_ms, bool bridge_connected) -> void {
+        kmod_replay::replay_ingame_playback_tick(now_ms);
+
+        kmod_replay::ReplayTickInput replay_input{};
+        replay_input.now_ms = now_ms;
+        replay_input.bridge_connected = bridge_connected;
+        {
+            std::lock_guard<std::mutex> guard(s_state_mutex);
+            replay_input.context.run_id = s_run_sequence;
+            replay_input.context.scenario_name = s_last_run_scenario_name;
+            replay_input.context.scenario_id = s_last_run_scenario_id;
+            replay_input.context.scenario_manager_id = s_last_run_scenario_manager_id;
+            replay_input.context.scenario_play_type = s_last_pull_scenario_play_type;
+            replay_input.context.is_replay = kmod_replay::replay_ingame_playback_is_active() ? 1 : 0;
+
+            replay_input.scalars.is_in_challenge = s_last_pull_is_in_challenge;
+            replay_input.scalars.is_in_scenario = s_last_pull_is_in_scenario;
+            replay_input.scalars.is_in_scenario_editor = s_last_pull_is_in_scenario_editor;
+            replay_input.scalars.is_in_trainer = s_last_pull_is_in_trainer;
+            replay_input.scalars.scenario_is_paused = s_last_pull_scenario_is_paused;
+            replay_input.scalars.scenario_is_enabled = s_last_pull_scenario_is_enabled;
+            replay_input.scalars.challenge_seconds_total = s_last_pull_challenge_seconds;
+            replay_input.scalars.session_seconds_total = s_last_pull_seconds;
+            replay_input.scalars.time_remaining = s_last_pull_time_remaining;
+            replay_input.scalars.queue_time_remaining = s_last_pull_queue_time_remaining;
+            replay_input.scalars.score_metric_total = s_last_pull_score;
+            replay_input.scalars.score_total_derived = s_last_pull_score_derived;
+            replay_input.scalars.score_source = s_last_pull_score_source;
+        }
+        if (!kmod_replay::replay_ingame_playback_is_active()) {
+            kmod_replay::replay_tick(replay_input);
+        }
+    }
+
+    auto poll_state_receiver_values_guarded() -> void {
+        set_direct_fault_context("poll_state_receiver_values", nullptr, nullptr);
+#if defined(_MSC_VER)
+        __try {
+            poll_state_receiver_values();
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            const auto faults = s_direct_invoke_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+            s_direct_poll_errors.fetch_add(1, std::memory_order_relaxed);
+            const uint64_t fault_now_ms = GetTickCount64();
+            s_direct_invoke_last_fault_ms.store(fault_now_ms, std::memory_order_release);
+            const bool has_fn_context = s_direct_fault_fn != nullptr;
+            const bool quarantined = has_fn_context
+                || should_quarantine_invoke_fault(s_direct_fault_source, s_direct_fault_fn);
+            uint32_t fn_hits = 0;
+            if (quarantined) {
+                fn_hits = quarantine_faulted_function(s_direct_fault_fn, fault_now_ms);
+            } else {
+                s_disable_direct_invoke_path.store(true, std::memory_order_release);
+            }
+            const char* context = direct_fault_context_summary_cstr();
+            std::array<char, 1400> fbuf{};
+            std::snprintf(
+                fbuf.data(),
+                fbuf.size(),
+                "[KovaaksBridgeMod] direct pull tick fault trapped faults=%llu mode=%s fn_hits=%u %s",
+                static_cast<unsigned long long>(faults),
+                quarantined ? "quarantine_fn" : "disable_global_tick",
+                static_cast<unsigned>(fn_hits),
+                context
+            );
+            runtime_log_line(fbuf.data());
+            std::array<char, 1400> ebuf{};
+            std::snprintf(
+                ebuf.data(),
+                ebuf.size(),
+                "[direct_invoke_fault] poll_state_receiver_values fault trapped faults=%llu mode=%s fn_hits=%u %s",
+                static_cast<unsigned long long>(faults),
+                quarantined ? "quarantine_fn" : "disable_global_tick",
+                static_cast<unsigned>(fn_hits),
+                context
+            );
+            events_log_line(ebuf.data());
+            poll_non_invoke_fallback_values(fault_now_ms);
+        }
+#else
+        poll_state_receiver_values();
+#endif
+    }
+
     auto on_update() -> void override {
         static std::atomic<bool> s_first_update_logged{false};
         if (!s_first_update_logged.exchange(true, std::memory_order_acq_rel)) {
@@ -943,52 +1066,7 @@ public:
         }
         if (s_enable_direct_pull_invoke) {
             if (!s_disable_direct_invoke_path.load(std::memory_order_acquire)) {
-                set_direct_fault_context("poll_state_receiver_values", nullptr, nullptr);
-#if defined(_MSC_VER)
-                __try {
-                    poll_state_receiver_values();
-                } __except(EXCEPTION_EXECUTE_HANDLER) {
-                    const auto faults = s_direct_invoke_faults.fetch_add(1, std::memory_order_relaxed) + 1;
-                    s_direct_poll_errors.fetch_add(1, std::memory_order_relaxed);
-                    const uint64_t fault_now_ms = GetTickCount64();
-                    s_direct_invoke_last_fault_ms.store(fault_now_ms, std::memory_order_release);
-                    const bool has_fn_context = s_direct_fault_fn != nullptr;
-                    const bool quarantined = has_fn_context
-                        || should_quarantine_invoke_fault(s_direct_fault_source, s_direct_fault_fn);
-                    uint32_t fn_hits = 0;
-                    if (quarantined) {
-                        fn_hits = quarantine_faulted_function(s_direct_fault_fn, fault_now_ms);
-                    } else {
-                        s_disable_direct_invoke_path.store(true, std::memory_order_release);
-                    }
-                    const char* context = direct_fault_context_summary_cstr();
-                    std::array<char, 1400> fbuf{};
-                    std::snprintf(
-                        fbuf.data(),
-                        fbuf.size(),
-                        "[KovaaksBridgeMod] direct pull tick fault trapped faults=%llu mode=%s fn_hits=%u %s",
-                        static_cast<unsigned long long>(faults),
-                        quarantined ? "quarantine_fn" : "disable_global_tick",
-                        static_cast<unsigned>(fn_hits),
-                        context
-                    );
-                    runtime_log_line(fbuf.data());
-                    std::array<char, 1400> ebuf{};
-                    std::snprintf(
-                        ebuf.data(),
-                        ebuf.size(),
-                        "[direct_invoke_fault] poll_state_receiver_values fault trapped faults=%llu mode=%s fn_hits=%u %s",
-                        static_cast<unsigned long long>(faults),
-                        quarantined ? "quarantine_fn" : "disable_global_tick",
-                        static_cast<unsigned>(fn_hits),
-                        context
-                    );
-                    events_log_line(ebuf.data());
-                    poll_non_invoke_fallback_values(fault_now_ms);
-                }
-#else
-                poll_state_receiver_values();
-#endif
+                poll_state_receiver_values_guarded();
             } else {
                 static std::atomic<uint64_t> s_last_direct_disable_log_ms{0};
                 const uint64_t now = GetTickCount64();
@@ -1055,25 +1133,8 @@ public:
                 events_log_line(sbuf.data());
             }
         }
-        if (bridge_connected) {
-            std::string request_reason{};
-            if (consume_state_snapshot_request(request_reason)) {
-                const uint64_t now_ms = GetTickCount64();
-                emit_requested_state_snapshot(now_ms, request_reason);
-                std::array<char, 256> sbuf{};
-                std::snprintf(
-                    sbuf.data(),
-                    sbuf.size(),
-                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
-                    request_reason.c_str(),
-                    static_cast<unsigned long long>(now_ms)
-                );
-                runtime_log_line(sbuf.data());
-                if (s_log_all_events || s_non_ui_probe_enabled || s_object_debug_enabled) {
-                    events_log_line(sbuf.data());
-                }
-            }
-        }
+        process_bridge_commands(GetTickCount64(), bridge_connected);
+        tick_replay_capture(GetTickCount64(), bridge_connected);
         s_last_bridge_connected = bridge_connected;
 
         if (!s_log_all_events && !s_object_debug_enabled && !s_non_ui_probe_enabled) {
@@ -3201,7 +3262,19 @@ private:
             pull_challenge_average_fps = s_last_pull_challenge_average_fps;
         }
 
-        const auto reason = sanitize_state_request_reason(request_reason);
+        const auto game_state_code = kmod_replay::derive_game_state_code(
+            pull_is_in_scenario_editor,
+            pull_scenario_is_paused,
+            pull_is_in_challenge,
+            pull_is_in_scenario,
+            pull_is_in_trainer,
+            pull_queue_time_remaining,
+            pull_time_remaining,
+            0
+        );
+        const auto game_state = kmod_replay::game_state_code_to_string(game_state_code);
+
+        const auto reason = kmod_replay::sanitize_state_request_reason(request_reason);
         const auto trigger = "state_request:" + reason;
         emit_scenario_metadata_event(
             trigger.c_str(),
@@ -3249,6 +3322,7 @@ private:
         emit_i32_if_valid("pull_shots_hit_total", pull_shots_hit_total);
         emit_i32_if_valid("pull_kills_total", pull_kills_total);
         emit_i32_if_valid("pull_challenge_tick_count_total", pull_challenge_tick_count_total);
+        emit_i32_if_valid("pull_game_state_code", static_cast<int32_t>(game_state_code));
 
         emit_f32_if_valid("pull_time_remaining", pull_time_remaining);
         emit_f32_if_valid("pull_queue_time_remaining", pull_queue_time_remaining);
@@ -3264,6 +3338,16 @@ private:
         emit_f32_if_valid("pull_damage_efficiency", pull_damage_efficiency);
         emit_f32_if_valid("pull_kills_per_second", pull_kills_per_second);
         emit_f32_if_valid("pull_challenge_average_fps", pull_challenge_average_fps);
+
+        std::array<char, 256> gs_msg{};
+        std::snprintf(
+            gs_msg.data(),
+            gs_msg.size(),
+            "{\"ev\":\"pull_game_state\",\"field\":\"%s\",\"value\":%d}",
+            game_state,
+            static_cast<int>(game_state_code)
+        );
+        kovaaks::RustBridge::emit_json(gs_msg.data());
 
         const auto reason_escaped = escape_json(reason);
         std::array<char, 512> ack_msg{};

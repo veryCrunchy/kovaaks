@@ -94,8 +94,6 @@ std::wstring game_bin_dir() {
     return path.substr(0, pos + 1);
 }
 
-#include "kmod/state_sync_request.inl"
-
 bool env_flag_enabled(const char* name) {
     char value[16] = {};
     const auto len = GetEnvironmentVariableA(name, value, static_cast<DWORD>(sizeof(value)));
@@ -531,6 +529,15 @@ void collect_objects_by_class(RC::Unreal::UClass* target_class, std::vector<RC::
     RC::Unreal::UObjectGlobals::FindAllOf(class_name, out);
 }
 
+#include "kmod/replay/replay_types.inl"
+#include "kmod/replay/replay_state_machine.inl"
+#include "kmod/replay/replay_sources.inl"
+#include "kmod/replay/replay_sampler.inl"
+#include "kmod/replay/replay_delta_codec.inl"
+#include "kmod/replay/replay_emit.inl"
+#include "kmod/replay/replay_ingame_playback.inl"
+#include "kmod/replay/bridge_command_bus.inl"
+
 } // namespace
 
 class KovaaksBridgeModProduction final : public RC::CppUserModBase {
@@ -891,7 +898,7 @@ private:
     }
 
     auto emit_requested_state_snapshot(uint64_t now_ms, const std::string& request_reason) -> void {
-        const auto reason = sanitize_state_request_reason(request_reason);
+        const auto reason = kmod_replay::sanitize_state_request_reason(request_reason);
         std::string scenario_name{};
         std::string scenario_id{};
         std::string scenario_manager_id{};
@@ -920,6 +927,18 @@ private:
             s_last_run_scenario_manager_id = scenario_manager_id;
         }
 
+        const auto game_state_code = kmod_replay::derive_game_state_code(
+            last_is_in_scenario_editor_,
+            -1,
+            last_is_in_challenge_,
+            last_is_in_scenario_,
+            last_is_in_trainer_,
+            s_last_pull_queue_time_remaining,
+            s_last_pull_time_remaining,
+            0
+        );
+        const auto game_state = kmod_replay::game_state_code_to_string(game_state_code);
+
         const auto scenario_name_escaped = escape_json_ascii(scenario_name);
         const auto scenario_id_escaped = escape_json_ascii(scenario_id);
         const auto scenario_manager_escaped = escape_json_ascii(scenario_manager_id);
@@ -927,7 +946,7 @@ private:
         std::snprintf(
             metadata.data(),
             metadata.size(),
-            "{\"ev\":\"scenario_metadata\",\"trigger\":\"state_request:%s\",\"run_id\":0,\"ts_ms\":%llu,\"scenario_name\":\"%s\",\"scenario_id\":\"%s\",\"scenario_manager\":\"%s\",\"scenario_play_type\":-1,\"is_in_trainer\":%d,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_currently_in_benchmark\":%d,\"challenge_time_length\":-1.0,\"queue_time_remaining\":%.6f,\"game_seconds\":-1.0,\"source\":\"production_state_sync\"}",
+            "{\"ev\":\"scenario_metadata\",\"trigger\":\"state_request:%s\",\"run_id\":0,\"ts_ms\":%llu,\"scenario_name\":\"%s\",\"scenario_id\":\"%s\",\"scenario_manager\":\"%s\",\"scenario_play_type\":-1,\"is_in_trainer\":%d,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_currently_in_benchmark\":%d,\"challenge_time_length\":-1.0,\"queue_time_remaining\":%.6f,\"game_seconds\":-1.0,\"game_state_code\":%d,\"game_state\":\"%s\",\"source\":\"production_state_sync\"}",
             reason.c_str(),
             static_cast<unsigned long long>(now_ms),
             scenario_name_escaped.c_str(),
@@ -938,7 +957,9 @@ private:
             last_is_in_scenario_,
             last_is_in_scenario_editor_,
             last_is_currently_in_benchmark_,
-            static_cast<double>(s_last_pull_queue_time_remaining)
+            static_cast<double>(s_last_pull_queue_time_remaining),
+            static_cast<int>(game_state_code),
+            game_state
         );
         kovaaks::RustBridge::emit_json(metadata.data());
 
@@ -973,6 +994,7 @@ private:
         emit_i32_if_valid("pull_shots_hit_total", last_shots_hit_);
         emit_i32_if_valid("pull_kills_total", last_kills_total_);
         emit_i32_if_valid("pull_challenge_tick_count_total", last_challenge_tick_count_);
+        emit_i32_if_valid("pull_game_state_code", static_cast<int32_t>(game_state_code));
 
         emit_f32_if_valid("pull_seconds_total", last_seconds_);
         emit_f32_if_valid("pull_challenge_seconds_total", last_challenge_seconds_total_);
@@ -987,6 +1009,16 @@ private:
         emit_f32_if_valid("pull_time_remaining", last_time_remaining_);
         emit_f32_if_valid("pull_queue_time_remaining", last_queue_time_remaining_);
         emit_f32_if_valid("pull_challenge_average_fps", last_challenge_average_fps_);
+
+        std::array<char, 256> gs_msg{};
+        std::snprintf(
+            gs_msg.data(),
+            gs_msg.size(),
+            "{\"ev\":\"pull_game_state\",\"field\":\"%s\",\"value\":%d}",
+            game_state,
+            static_cast<int>(game_state_code)
+        );
+        kovaaks::RustBridge::emit_json(gs_msg.data());
 
         std::array<char, 320> ack{};
         std::snprintf(
@@ -1398,21 +1430,58 @@ private:
             }
         }
         if (bridge_connected) {
-            std::string request_reason{};
-            if (consume_state_snapshot_request(request_reason)) {
-                emit_requested_state_snapshot(now, request_reason);
-                std::array<char, 256> sbuf{};
-                std::snprintf(
-                    sbuf.data(),
-                    sbuf.size(),
-                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
-                    request_reason.c_str(),
-                    static_cast<unsigned long long>(now)
-                );
-                runtime_log_line(sbuf.data());
-                if (verbose_logs_) {
-                    events_log_line(sbuf.data());
+            kmod_replay::BridgeCommand command{};
+            while (kmod_replay::poll_bridge_command(command)) {
+                if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
+                    const auto request_reason = command.reason.empty() ? std::string{"unknown"} : command.reason;
+                    emit_requested_state_snapshot(now, request_reason);
+                    std::array<char, 256> sbuf{};
+                    std::snprintf(
+                        sbuf.data(),
+                        sbuf.size(),
+                        "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                        request_reason.c_str(),
+                        static_cast<unsigned long long>(now)
+                    );
+                    runtime_log_line(sbuf.data());
+                    if (verbose_logs_) {
+                        events_log_line(sbuf.data());
+                    }
+                } else {
+                    kmod_replay::replay_ingame_playback_handle_command(command, now);
                 }
+            }
+        }
+
+        kmod_replay::replay_ingame_playback_tick(now);
+
+        {
+            kmod_replay::ReplayTickInput replay_input{};
+            replay_input.now_ms = now;
+            replay_input.bridge_connected = bridge_connected;
+            replay_input.context.run_id = 0;
+            replay_input.context.scenario_name = !last_scenario_name_.empty() ? last_scenario_name_ : s_last_run_scenario_name;
+            replay_input.context.scenario_id = s_last_run_scenario_id;
+            replay_input.context.scenario_manager_id = s_last_run_scenario_manager_id;
+            replay_input.context.scenario_play_type = -1;
+            replay_input.context.is_replay = 0;
+
+            replay_input.scalars.is_in_challenge = s_last_pull_is_in_challenge;
+            replay_input.scalars.is_in_scenario = s_last_pull_is_in_scenario;
+            replay_input.scalars.is_in_scenario_editor = s_last_pull_is_in_scenario_editor;
+            replay_input.scalars.is_in_trainer = last_is_in_trainer_;
+            replay_input.scalars.scenario_is_paused = -1;
+            replay_input.scalars.scenario_is_enabled = -1;
+            replay_input.scalars.challenge_seconds_total = s_last_pull_challenge_seconds;
+            replay_input.scalars.session_seconds_total = last_seconds_;
+            replay_input.scalars.time_remaining = s_last_pull_time_remaining;
+            replay_input.scalars.queue_time_remaining = s_last_pull_queue_time_remaining;
+            replay_input.scalars.score_metric_total = last_score_total_;
+            replay_input.scalars.score_total_derived = last_score_total_derived_;
+            replay_input.scalars.score_source = std::string{};
+
+            if (!kmod_replay::replay_ingame_playback_is_active()) {
+                kmod_replay::replay_tick(replay_input);
             }
         }
         last_bridge_connected_ = bridge_connected;
