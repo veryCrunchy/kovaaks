@@ -389,9 +389,14 @@ function Invoke-RobocopyMirror([string]$SourceDir, [string]$DestinationDir, [str
     "/W:1"
   ) + $ExtraArgs
   & robocopy @args | Out-Null
-  if ($LASTEXITCODE -gt 7) {
-    throw "robocopy failed while mirroring '$SourceDir' to '$DestinationDir' (exit code $LASTEXITCODE)."
+  $robocopyExitCode = $LASTEXITCODE
+  if ($robocopyExitCode -gt 7) {
+    throw "robocopy failed while mirroring '$SourceDir' to '$DestinationDir' (exit code $robocopyExitCode)."
   }
+
+  # Robocopy uses non-zero codes (0-7) for successful copy states.
+  # Reset process exit code so CI pwsh wrapper doesn't treat success as failure.
+  $global:LASTEXITCODE = 0
 }
 
 function Sync-Ue4ssPayloadToTauriTargets([string]$RepoRoot, [string]$TargetTriple) {
@@ -1083,3 +1088,4 @@ if (-not $SkipOverlayBuild) {
 }
 
 Write-Host "==> Pipeline complete"
+$global:LASTEXITCODE = 0
