@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace kovaaks {
 
@@ -18,6 +19,7 @@ public:
     static bool emit_i32(const char* ev, int32_t value);
     static bool emit_f32(const char* ev, float value);
     static bool emit_json(const char* json_line);
+    static bool poll_command(std::string& out_json);
 
 private:
     RustBridge() = delete;

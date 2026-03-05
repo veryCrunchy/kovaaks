@@ -1,5 +1,6 @@
 #include "rust_bridge.hpp"
 
+#include <array>
 #include <atomic>
 #include <string>
 
@@ -14,6 +15,7 @@ using bridge_last_error_fn = uint32_t (*)();
 using bridge_emit_i32_fn = bool (*)(const char*, int32_t);
 using bridge_emit_f32_fn = bool (*)(const char*, float);
 using bridge_emit_json_fn = bool (*)(const char*);
+using bridge_poll_command_fn = int32_t (*)(char*, uint32_t);
 
 struct RustApi {
     HMODULE module = nullptr;
@@ -24,6 +26,7 @@ struct RustApi {
     bridge_emit_i32_fn emit_i32 = nullptr;
     bridge_emit_f32_fn emit_f32 = nullptr;
     bridge_emit_json_fn emit_json = nullptr;
+    bridge_poll_command_fn poll_command = nullptr;
 };
 
 RustApi g_api{};
@@ -119,6 +122,7 @@ bool load_api() {
     g_api.emit_i32 = reinterpret_cast<bridge_emit_i32_fn>(GetProcAddress(mod, "bridge_emit_i32"));
     g_api.emit_f32 = reinterpret_cast<bridge_emit_f32_fn>(GetProcAddress(mod, "bridge_emit_f32"));
     g_api.emit_json = reinterpret_cast<bridge_emit_json_fn>(GetProcAddress(mod, "bridge_emit_json"));
+    g_api.poll_command = reinterpret_cast<bridge_poll_command_fn>(GetProcAddress(mod, "bridge_poll_command"));
 
     if (!g_api.init || !g_api.shutdown || !g_api.emit_i32 || !g_api.emit_f32 || !g_api.emit_json) {
         g_last_win32_error.store(ERROR_PROC_NOT_FOUND, std::memory_order_relaxed);
@@ -283,6 +287,30 @@ bool RustBridge::emit_json(const char* json_line) {
     }
     refresh_transport_error();
     return false;
+}
+
+bool RustBridge::poll_command(std::string& out_json) {
+    out_json.clear();
+    if (!g_api.poll_command) {
+        return false;
+    }
+    if (!module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.poll_command))) {
+        invalidate_api();
+        return false;
+    }
+
+    std::array<char, 8192> buffer{};
+    const int32_t n = g_api.poll_command(buffer.data(), static_cast<uint32_t>(buffer.size()));
+    if (n <= 0) {
+        return false;
+    }
+
+    const size_t len = static_cast<size_t>(n);
+    if (len >= buffer.size()) {
+        return false;
+    }
+    out_json.assign(buffer.data(), buffer.data() + len);
+    return !out_json.empty();
 }
 
 } // namespace kovaaks
