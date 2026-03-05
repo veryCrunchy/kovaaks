@@ -95,7 +95,7 @@ jobs:
           releaseDraft: false
           prerelease: true
           # Do not overwrite the stable updater JSON with dev builds
-          uploadUpdaterJson: false
+          includeUpdaterJson: false
           args: --target x86_64-pc-windows-msvc
 
       - name: Stage stripped production AimMod runtime payload
@@ -155,5 +155,5 @@ jobs:
           releaseDraft: false
           prerelease: true
           # Do not overwrite the stable updater JSON with main pre-releases
-          uploadUpdaterJson: false
+          includeUpdaterJson: false
           args: --target x86_64-pc-windows-msvc
