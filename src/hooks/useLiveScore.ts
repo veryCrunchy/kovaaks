@@ -1,10 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { LiveScorePayload, SessionResult } from "../types/overlay";
+import type { SessionResult } from "../types/overlay";
 
-const LIVE_SCORE_EVENT = "live-score";
+const BRIDGE_METRIC_EVENT = "bridge-metric";
 const SESSION_COMPLETE_EVENT = "session-complete";
 const SESSION_START_EVENT = "session-start";
+const SCORE_TOTAL_STALE_MS = 1500;
+
+interface BridgeMetricPayload {
+  ev: string;
+  value?: number | null;
+}
 
 export interface UseLiveScoreReturn {
   liveScore: number | null;
@@ -22,6 +28,8 @@ export function useLiveScore(): UseLiveScoreReturn {
 
   const inactivityTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const elapsedTickInterval = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastScoreTotal = useRef<number | null>(null);
+  const lastScoreTotalAtMs = useRef<number>(0);
 
   const sessionStartTime = useRef<number>(0); // ms timestamp; 0 = no active session
 
@@ -41,46 +49,95 @@ export function useLiveScore(): UseLiveScoreReturn {
   };
 
   useEffect(() => {
+    const touchSessionActive = (nowMs: number) => {
+      if (sessionStartTime.current === 0) {
+        sessionStartTime.current = nowMs;
+        setElapsedSeconds(0);
+        startElapsedTicker();
+      } else {
+        setElapsedSeconds(Math.round((nowMs - sessionStartTime.current) / 1000));
+      }
+      setIsSessionActive(true);
+      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
+      inactivityTimer.current = setTimeout(() => {
+        setIsSessionActive(false);
+        stopElapsedTicker();
+      }, 3000);
+    };
+
     const unlistenStart = listen<void>(SESSION_START_EVENT, () => {
       sessionStartTime.current = Date.now();
+      lastScoreTotal.current = null;
+      lastScoreTotalAtMs.current = 0;
       setLiveScore(0);
       setElapsedSeconds(0);
       setIsSessionActive(true);
       startElapsedTicker();
     });
 
-    const unlistenLive = listen<LiveScorePayload>(LIVE_SCORE_EVENT, (event) => {
+    const unlistenBridgeMetric = listen<BridgeMetricPayload>(BRIDGE_METRIC_EVENT, (event) => {
       const now = Date.now();
-      const { score, kind } = event.payload;
+      const payload = event.payload;
 
-      // Only trust authoritative totals from mod/bridge.
-      if (kind && kind !== "score_total") {
-        return;
-      }
-      if (!Number.isFinite(score) || score < 0) {
-        return;
-      }
-
-      // Mid-session attach fallback when session-start wasn't observed.
-      if (sessionStartTime.current === 0) {
+      if (
+        payload.ev === "challenge_start"
+        || payload.ev === "scenario_start"
+        || payload.ev === "challenge_restart"
+        || payload.ev === "scenario_restart"
+        || payload.ev === "scenario_restarted"
+      ) {
         sessionStartTime.current = now;
+        lastScoreTotal.current = null;
+        lastScoreTotalAtMs.current = 0;
+        setElapsedSeconds(0);
+        setLiveScore(0);
+        setIsSessionActive(true);
         startElapsedTicker();
+        return;
       }
 
-      setLiveScore(Math.round(score));
-      setElapsedSeconds(Math.round((now - sessionStartTime.current) / 1000));
-      setIsSessionActive(true);
-
-      if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
-      inactivityTimer.current = setTimeout(() => {
+      if (
+        payload.ev === "challenge_end"
+        || payload.ev === "scenario_end"
+        || payload.ev === "challenge_complete"
+        || payload.ev === "challenge_completed"
+        || payload.ev === "post_challenge_complete"
+        || payload.ev === "challenge_canceled"
+        || payload.ev === "challenge_quit"
+      ) {
         setIsSessionActive(false);
         stopElapsedTicker();
-      }, 3000);
+        return;
+      }
+
+      if (payload.ev !== "pull_score_total" && payload.ev !== "pull_score_total_derived") {
+        return;
+      }
+
+      const value = payload.value;
+      if (value == null || !Number.isFinite(value) || value < 0) {
+        return;
+      }
+
+      if (payload.ev === "pull_score_total") {
+        lastScoreTotal.current = value;
+        lastScoreTotalAtMs.current = now;
+        setLiveScore(Math.round(value));
+      } else {
+        const hasFreshTotal = lastScoreTotal.current != null
+          && (now - lastScoreTotalAtMs.current) <= SCORE_TOTAL_STALE_MS;
+        if (!hasFreshTotal) {
+          setLiveScore(Math.round(value));
+        }
+      }
+      touchSessionActive(now);
     });
 
     const unlistenSession = listen<SessionResult>(SESSION_COMPLETE_EVENT, (event) => {
       stopElapsedTicker();
       sessionStartTime.current = 0;
+      lastScoreTotal.current = null;
+      lastScoreTotalAtMs.current = 0;
       setElapsedSeconds(0);
       setSessionResult(event.payload);
       setLiveScore(event.payload.score);
@@ -91,7 +148,7 @@ export function useLiveScore(): UseLiveScoreReturn {
 
     return () => {
       unlistenStart.then((fn) => fn());
-      unlistenLive.then((fn) => fn());
+      unlistenBridgeMetric.then((fn) => fn());
       unlistenSession.then((fn) => fn());
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
       stopElapsedTicker();

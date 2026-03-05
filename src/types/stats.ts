@@ -9,5 +9,4 @@
 export type { RegionRect, AppSettings, MonitorInfo } from "./settings";
 export type { FriendProfile, MostPlayedEntry, FriendScore } from "./friends";
 export type { MouseMetrics, MetricPoint, RawPositionPoint, ScreenFrame } from "./mouse";
-export type { LiveScorePayload, SessionResult, StatsPanelReading, ShotEvent, LiveFeedback } from "./overlay";
-
+export type { SessionResult, StatsPanelReading, ShotEvent, LiveFeedback } from "./overlay";

@@ -13,15 +13,6 @@ export interface SessionResult {
   csv_path: string;
 }
 
-// ─── Live score payload (legacy feed) ────────────────────────────────────────
-
-export interface LiveScorePayload {
-  /** score_total = authoritative/derived live score; spm = legacy score-per-minute feed */
-  kind?: "score_total" | "spm";
-  score: number;
-  raw_text: string;
-}
-
 // ─── Stats panel live payload ────────────────────────────────────────────────
 
 /**

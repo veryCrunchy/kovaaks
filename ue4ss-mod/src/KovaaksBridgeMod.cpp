@@ -1038,7 +1038,24 @@ public:
             }
         }
 
-        if (s_rust_enabled && kovaaks::RustBridge::is_connected()) {
+        const bool bridge_connected = s_rust_enabled && kovaaks::RustBridge::is_connected();
+        if (bridge_connected && !s_last_bridge_connected) {
+            const uint64_t now_ms = GetTickCount64();
+            emit_requested_state_snapshot(now_ms, "bridge_connected");
+            std::array<char, 256> sbuf{};
+            std::snprintf(
+                sbuf.data(),
+                sbuf.size(),
+                "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                "bridge_connected",
+                static_cast<unsigned long long>(now_ms)
+            );
+            runtime_log_line(sbuf.data());
+            if (s_log_all_events || s_non_ui_probe_enabled || s_object_debug_enabled) {
+                events_log_line(sbuf.data());
+            }
+        }
+        if (bridge_connected) {
             std::string request_reason{};
             if (consume_state_snapshot_request(request_reason)) {
                 const uint64_t now_ms = GetTickCount64();
@@ -1057,6 +1074,7 @@ public:
                 }
             }
         }
+        s_last_bridge_connected = bridge_connected;
 
         if (!s_log_all_events && !s_object_debug_enabled && !s_non_ui_probe_enabled) {
             return;
@@ -1819,6 +1837,7 @@ private:
     static inline std::string s_last_run_scenario_name{};
     static inline std::string s_last_run_scenario_id{};
     static inline std::string s_last_run_scenario_manager_id{};
+    static inline bool s_last_bridge_connected{};
     static inline std::unordered_map<RC::Unreal::UClass*, RC::Unreal::FTextProperty*> s_textblock_text_property_cache{};
     static inline uint64_t s_next_ui_poll_ms{};
     static inline RC::Unreal::UClass* s_meta_game_instance_class{};
@@ -3108,6 +3127,7 @@ private:
         float pull_challenge_seconds_total = -1.0f;
         float pull_seconds_total = -1.0f;
         float pull_score_total = -1.0f;
+        float pull_score_total_derived = -1.0f;
         float pull_score_per_minute = -1.0f;
         float pull_accuracy = -1.0f;
         float pull_damage_done = -1.0f;
@@ -3171,6 +3191,7 @@ private:
             pull_challenge_seconds_total = s_last_pull_challenge_seconds;
             pull_seconds_total = s_last_pull_seconds;
             pull_score_total = s_last_pull_score;
+            pull_score_total_derived = s_last_pull_score_derived;
             pull_score_per_minute = s_last_pull_spm;
             pull_accuracy = s_last_pull_accuracy;
             pull_damage_done = s_last_pull_damage_done;
@@ -3235,6 +3256,7 @@ private:
         emit_f32_if_valid("pull_challenge_seconds_total", pull_challenge_seconds_total);
         emit_f32_if_valid("pull_seconds_total", pull_seconds_total);
         emit_f32_if_valid("pull_score_total", pull_score_total);
+        emit_f32_if_valid("pull_score_total_derived", pull_score_total_derived);
         emit_f32_if_valid("pull_score_per_minute", pull_score_per_minute);
         emit_f32_if_valid("pull_accuracy", pull_accuracy);
         emit_f32_if_valid("pull_damage_done", pull_damage_done);
@@ -9080,6 +9102,17 @@ private:
             s_last_pull_success_ms = now;
         } else if ((now - s_last_pull_success_ms) > 5000) {
             reset_pull_runtime_state("[direct_pull] stale values detected, forcing receiver reselect");
+            if (!live_session_active) {
+                // Prevent stale scenario/menu state in frontend when pull reads
+                // go silent outside of an active run.
+                emit_pull_i32("pull_is_in_challenge", s_last_pull_is_in_challenge, 0);
+                emit_pull_i32("pull_is_in_scenario", s_last_pull_is_in_scenario, 0);
+                emit_pull_i32("pull_is_in_scenario_editor", s_last_pull_is_in_scenario_editor, 0);
+                emit_pull_i32("pull_is_currently_in_benchmark", s_last_pull_is_currently_in_benchmark, 0);
+                emit_pull_i32("pull_is_in_trainer", s_last_pull_is_in_trainer, 0);
+                emit_pull_f32("pull_time_remaining", s_last_pull_time_remaining, 0.0f);
+                emit_pull_f32("pull_queue_time_remaining", s_last_pull_queue_time_remaining, 0.0f);
+            }
         }
 
         if ((s_log_all_events || s_non_ui_probe_enabled) && now >= s_next_pull_debug_ms) {

@@ -18,8 +18,6 @@ pub const BRIDGE_PARSED_EVENT: &str = "bridge-parsed-event";
 pub const BRIDGE_METRIC_EVENT: &str = "bridge-metric";
 pub const UE4SS_LOG_EVENT: &str = "ue4ss-log-line";
 #[cfg(target_os = "windows")]
-const EVENT_LIVE_SCORE: &str = "live-score";
-#[cfg(target_os = "windows")]
 const EVENT_STATS_PANEL_UPDATE: &str = "stats-panel-update";
 #[cfg(target_os = "windows")]
 const EVENT_SESSION_START: &str = "session-start";
@@ -45,14 +43,6 @@ pub struct BridgeParsedEvent {
     pub fn_name: Option<String>,
     pub receiver: Option<String>,
     pub raw: String,
-}
-
-#[cfg(target_os = "windows")]
-#[derive(Clone, Debug, serde::Serialize, PartialEq)]
-struct BridgeLiveScoreEvent {
-    kind: String,
-    score: f64,
-    raw_text: String,
 }
 
 #[cfg(target_os = "windows")]
@@ -388,7 +378,6 @@ mod imp {
         last_nonzero_seconds: Option<Instant>,
         last_nonzero_score_total: Option<Instant>,
         live_score_total: Option<f64>,
-        last_emitted_live_score: Option<f64>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -418,6 +407,7 @@ mod imp {
     const MAX_RUN_TIMELINE_POINTS: usize = 1800;
     const MAX_PENDING_SHOT_EVENTS: usize = 4096;
     const MAX_SHOT_LATENCY_SAMPLES: usize = 8192;
+    const RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS: f64 = 1.25;
 
     #[derive(Clone, Debug, Default)]
     struct RunCaptureMetrics {
@@ -440,6 +430,7 @@ mod imp {
         started_at: Option<Instant>,
         started_at_unix_ms: Option<u64>,
         ended_at_unix_ms: Option<u64>,
+        duration_from_challenge_secs: bool,
         metrics: RunCaptureMetrics,
         peak_score_per_minute: Option<f64>,
         peak_kills_per_second: Option<f64>,
@@ -550,6 +541,7 @@ mod imp {
         state.started_at = Some(start_instant);
         state.started_at_unix_ms = Some(start_ms);
         state.ended_at_unix_ms = None;
+        state.duration_from_challenge_secs = false;
         state.metrics = RunCaptureMetrics::default();
         state.peak_score_per_minute = None;
         state.peak_kills_per_second = None;
@@ -563,9 +555,40 @@ mod imp {
         state.timeline.clear();
     }
 
+    fn align_run_capture_start_with_hint_locked(
+        state: &mut RunCaptureState,
+        now: Instant,
+        time_hint_secs: Option<f64>,
+    ) {
+        let Some(hint_secs) = finite_non_negative(time_hint_secs) else {
+            return;
+        };
+        let hinted_start = now
+            .checked_sub(Duration::from_secs_f64(hint_secs))
+            .unwrap_or(now);
+        let hinted_start_ms = unix_now_ms().saturating_sub((hint_secs * 1000.0).round() as u64);
+
+        match state.started_at {
+            None => {
+                state.started_at = Some(hinted_start);
+                state.started_at_unix_ms = Some(hinted_start_ms);
+            }
+            Some(started_at) => {
+                let elapsed_secs = now.duration_since(started_at).as_secs_f64();
+                if (elapsed_secs - hint_secs).abs() > RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS {
+                    state.started_at = Some(hinted_start);
+                    state.started_at_unix_ms = Some(hinted_start_ms);
+                }
+            }
+        }
+    }
+
     fn ensure_run_capture_started_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
+        let now = Instant::now();
         if state.started_at.is_none() {
-            begin_run_capture_locked(state, Instant::now(), time_hint_secs);
+            begin_run_capture_locked(state, now, time_hint_secs);
+        } else {
+            align_run_capture_start_with_hint_locked(state, now, time_hint_secs);
         }
     }
 
@@ -665,7 +688,14 @@ mod imp {
             return;
         };
 
-        state.metrics.duration_secs = finite_non_negative(stats.session_time_secs);
+        let challenge_secs = finite_non_negative(stats.challenge_seconds_total);
+        let session_secs = finite_non_negative(stats.session_time_secs);
+        if let Some(value) = challenge_secs {
+            state.metrics.duration_secs = Some(value);
+            state.duration_from_challenge_secs = true;
+        } else if !state.duration_from_challenge_secs {
+            state.metrics.duration_secs = session_secs;
+        }
         state.metrics.kills = stats.kills.map(|v| v as f64);
         state.metrics.kills_per_second = finite_non_negative(stats.kps);
         state.metrics.shots_hit = stats.accuracy_hits.map(|v| v as f64);
@@ -704,10 +734,10 @@ mod imp {
 
         match parsed.ev.as_str() {
             "session_start" | "challenge_start" | "scenario_start" => {
-                begin_run_capture_locked(&mut state, Instant::now(), None);
+                let duration_hint = state.metrics.duration_secs;
+                ensure_run_capture_started_locked(&mut state, duration_hint);
                 state.event_counts.challenge_start_events =
                     state.event_counts.challenge_start_events.saturating_add(1);
-                should_record = true;
             }
             "challenge_queued" => {
                 let duration_hint = state.metrics.duration_secs;
@@ -803,7 +833,15 @@ mod imp {
                     should_record = true;
                 }
                 "pull_seconds_total" => {
+                    if !state.duration_from_challenge_secs {
+                        state.metrics.duration_secs = Some(value);
+                        time_hint_secs = Some(value);
+                    }
+                    should_record = true;
+                }
+                "pull_challenge_seconds_total" => {
                     state.metrics.duration_secs = Some(value);
+                    state.duration_from_challenge_secs = true;
                     time_hint_secs = Some(value);
                     should_record = true;
                 }
@@ -858,10 +896,24 @@ mod imp {
         }
     }
 
-    fn mark_run_capture_end() {
+    fn run_capture_duration_hint_locked(state: &RunCaptureState) -> Option<f64> {
+        finite_non_negative(state.metrics.duration_secs)
+            .or_else(|| state.timeline.last().map(|p| p.t_sec as f64))
+    }
+
+    fn mark_run_capture_end(time_hint_secs: Option<f64>) {
         if let Ok(mut state) = run_capture_state().lock() {
             if state.started_at.is_some() {
-                state.ended_at_unix_ms = Some(unix_now_ms());
+                let now_ms = unix_now_ms();
+                let effective_hint = finite_non_negative(time_hint_secs)
+                    .or_else(|| run_capture_duration_hint_locked(&state));
+                let ended_ms = match (state.started_at_unix_ms, effective_hint) {
+                    (Some(start_ms), Some(hint_secs)) => {
+                        start_ms.saturating_add((hint_secs * 1000.0).round() as u64)
+                    }
+                    _ => now_ms,
+                };
+                state.ended_at_unix_ms = Some(ended_ms.min(now_ms));
             }
         }
     }
@@ -1031,7 +1083,6 @@ mod imp {
                 last_nonzero_seconds: None,
                 last_nonzero_score_total: None,
                 live_score_total: None,
-                last_emitted_live_score: None,
             })
         })
     }
@@ -1083,11 +1134,23 @@ mod imp {
             state.last_nonzero_seconds = None;
             state.last_nonzero_score_total = None;
             state.live_score_total = None;
-            state.last_emitted_live_score = None;
         }
     }
 
+    fn authoritative_run_time_hint_from_stats(stats: &BridgeStatsPanelEvent) -> Option<f64> {
+        finite_non_negative(stats.challenge_seconds_total)
+            .or_else(|| finite_non_negative(stats.session_time_secs))
+    }
+
+    fn authoritative_run_time_hint() -> Option<f64> {
+        bridge_compat_state()
+            .lock()
+            .ok()
+            .and_then(|state| authoritative_run_time_hint_from_stats(&state.stats))
+    }
+
     fn begin_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let run_time_hint = authoritative_run_time_hint();
         let (emit_session, emit_challenge) = {
             let mut state = bridge_session_state().lock().unwrap();
             let now = Instant::now();
@@ -1131,7 +1194,7 @@ mod imp {
         if emit_session {
             reset_bridge_stats_snapshot();
             if let Ok(mut run_state) = run_capture_state().lock() {
-                begin_run_capture_locked(&mut run_state, Instant::now(), None);
+                begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
             }
             let _ = app.emit(super::EVENT_SESSION_START, ());
             let session_start = crate::mouse_hook::start_session_tracking();
@@ -1141,6 +1204,7 @@ mod imp {
     }
 
     fn end_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let run_time_hint = authoritative_run_time_hint();
         let (should_debounce, elapsed_ms, has_progress) = {
             let state = bridge_session_state().lock().unwrap();
             let (elapsed_ms, has_progress, should_debounce) =
@@ -1209,7 +1273,7 @@ mod imp {
         }
         if emit_session {
             let _ = app.emit(super::EVENT_SESSION_END, ());
-            mark_run_capture_end();
+            mark_run_capture_end(run_time_hint);
             crate::mouse_hook::stop_session_tracking();
             crate::screen_recorder::stop();
             log::info!("bridge: session tracking stopped ({reason})");
@@ -1402,20 +1466,29 @@ mod imp {
         if stats.scenario_is_paused == Some(true) {
             return "paused";
         }
-        if stats.is_in_challenge == Some(true) {
+        let in_challenge = stats.is_in_challenge == Some(true);
+        let in_scenario = stats.is_in_scenario == Some(true);
+        let in_trainer = stats.is_in_trainer == Some(true);
+        let has_queue_timer = stats.queue_time_remaining.map_or(false, |v| v > 0.0001);
+        let has_challenge_timer = stats.time_remaining.map_or(false, |v| v > 0.0001);
+
+        if in_challenge || has_challenge_timer {
             return "challenge";
         }
-        if stats.is_in_scenario == Some(true) {
-            if stats.queue_time_remaining.map_or(false, |v| v > 0.0001) {
+        if in_scenario {
+            if has_queue_timer {
                 return "queued";
             }
-            return "scenario";
+            return "freeplay";
         }
-        if stats.queue_time_remaining.map_or(false, |v| v > 0.0001) {
+        if in_trainer {
+            if has_queue_timer {
+                return "queued";
+            }
+            return "trainer_menu";
+        }
+        if has_queue_timer {
             return "queued";
-        }
-        if stats.time_remaining.map_or(false, |v| v > 0.0001) {
-            return "challenge";
         }
         "menu"
     }
@@ -1477,6 +1550,43 @@ mod imp {
             Some(value)
         } else {
             None
+        }
+    }
+
+    fn parse_state_manager_bool_from_metadata(raw: &str, key: &str) -> Option<bool> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+        match obj.get(key) {
+            Some(serde_json::Value::Bool(v)) => Some(*v),
+            Some(serde_json::Value::Number(n)) => {
+                if let Some(v) = n.as_i64() {
+                    return match v {
+                        0 => Some(false),
+                        1 => Some(true),
+                        _ => None,
+                    };
+                }
+                n.as_f64().and_then(|v| {
+                    if (v - 0.0).abs() <= 0.000001 {
+                        Some(false)
+                    } else if (v - 1.0).abs() <= 0.000001 {
+                        Some(true)
+                    } else {
+                        None
+                    }
+                })
+            }
+            Some(serde_json::Value::String(s)) => {
+                let normalized = s.trim().to_ascii_lowercase();
+                if normalized == "1" || normalized == "true" {
+                    Some(true)
+                } else if normalized == "0" || normalized == "false" {
+                    Some(false)
+                } else {
+                    None
+                }
+            }
+            _ => None,
         }
     }
 
@@ -1725,6 +1835,77 @@ mod imp {
             if let Some(name) = parse_state_manager_scenario_name_from_metadata(&parsed.raw) {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
             }
+            let metadata_is_in_challenge =
+                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_challenge");
+            let metadata_is_in_scenario =
+                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_scenario");
+            let metadata_is_in_scenario_editor =
+                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_scenario_editor");
+            let metadata_is_in_trainer =
+                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_trainer");
+            let mut state_changed = false;
+            if let Ok(mut state) = bridge_compat_state().lock() {
+                if let Some(next) = metadata_is_in_challenge {
+                    if state.stats.is_in_challenge != Some(next) {
+                        state.stats.is_in_challenge = Some(next);
+                        state_changed = true;
+                    }
+                }
+                if let Some(next) = metadata_is_in_scenario {
+                    if state.stats.is_in_scenario != Some(next) {
+                        state.stats.is_in_scenario = Some(next);
+                        state_changed = true;
+                    }
+                }
+                if let Some(next) = metadata_is_in_scenario_editor {
+                    if state.stats.is_in_scenario_editor != Some(next) {
+                        state.stats.is_in_scenario_editor = Some(next);
+                        state_changed = true;
+                    }
+                }
+                if let Some(next) = metadata_is_in_trainer {
+                    if state.stats.is_in_trainer != Some(next) {
+                        state.stats.is_in_trainer = Some(next);
+                        state_changed = true;
+                    }
+                }
+                if state_changed {
+                    let next_game_state = derive_game_state(&state.stats).to_string();
+                    if state.stats.game_state != next_game_state {
+                        state.stats.game_state = next_game_state;
+                    }
+                    let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                }
+            }
+            let emit_state_manager_bool_metric = |ev: &str, value: bool| {
+                let synthetic = super::BridgeParsedEvent {
+                    ev: ev.to_string(),
+                    value: Some(if value { 1.0 } else { 0.0 }),
+                    total: None,
+                    delta: None,
+                    field: None,
+                    source: Some("state_manager".to_string()),
+                    method: Some("scenario_metadata".to_string()),
+                    origin: Some("scenario_metadata".to_string()),
+                    origin_flag: Some("state_manager".to_string()),
+                    fn_name: None,
+                    receiver: None,
+                    raw: parsed.raw.clone(),
+                };
+                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+            };
+            if let Some(value) = metadata_is_in_challenge {
+                emit_state_manager_bool_metric("pull_is_in_challenge", value);
+            }
+            if let Some(value) = metadata_is_in_scenario {
+                emit_state_manager_bool_metric("pull_is_in_scenario", value);
+            }
+            if let Some(value) = metadata_is_in_scenario_editor {
+                emit_state_manager_bool_metric("pull_is_in_scenario_editor", value);
+            }
+            if let Some(value) = metadata_is_in_trainer {
+                emit_state_manager_bool_metric("pull_is_in_trainer", value);
+            }
             if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw)
             {
                 let mut queue_changed = false;
@@ -1774,27 +1955,6 @@ mod imp {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
             }
             return;
-        }
-
-        if parsed.ev == "shot_fired" {
-            let session_already_active = bridge_session_state()
-                .lock()
-                .map(|state| state.session_active)
-                .unwrap_or(false);
-            if !session_already_active {
-                let should_fallback_start = bridge_compat_state()
-                    .lock()
-                    .map(|state| {
-                        state.stats.is_in_challenge == Some(true)
-                            || state.stats.is_in_scenario == Some(true)
-                            || state.stats.time_remaining.map_or(false, |v| v > 0.25)
-                            || state.stats.queue_time_remaining.map_or(false, |v| v > 0.25)
-                    })
-                    .unwrap_or(false);
-                if should_fallback_start {
-                    begin_session_tracking(app, "bridge:shot_fired_fallback", true);
-                }
-            }
         }
 
         let is_compat_metric = parsed.ev.starts_with("pull_")
@@ -2171,35 +2331,6 @@ mod imp {
                 let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
             }
 
-            // Authoritative score must come from the mod side (`pull_score_total`
-            // or `pull_score_total_derived`). Do not recompute it in Tauri.
-            let mut live_score = state.live_score_total;
-            if let Some(score) = live_score {
-                if !score.is_finite() || score < 0.0 {
-                    live_score = None;
-                }
-            }
-            if let Some(mut score) = live_score {
-                if let Some(prev) = state.last_emitted_live_score {
-                    // Guard against transient regressions from mixed direct/UI pulls.
-                    if score + 0.0001 < prev {
-                        score = prev;
-                    }
-                }
-                if !state
-                    .last_emitted_live_score
-                    .map_or(false, |prev| (prev - score).abs() <= 0.0001)
-                {
-                    state.last_emitted_live_score = Some(score);
-                    let payload = super::BridgeLiveScoreEvent {
-                        kind: "score_total".to_string(),
-                        score,
-                        raw_text: parsed.raw.clone(),
-                    };
-                    let _ = app.emit(super::EVENT_LIVE_SCORE, &payload);
-                }
-            }
-
             let has_active_session_metrics = state.stats.is_in_challenge == Some(true)
                 || state
                     .stats
@@ -2365,7 +2496,6 @@ mod imp {
             }
 
             log::info!("bridge: DLL connected — reading events");
-            request_mod_state_sync("bridge_pipe_connected");
             read_events(pipe, &app);
             log::info!("bridge: pipe disconnected — waiting for next connection");
 
@@ -2382,9 +2512,8 @@ mod imp {
     fn read_events(pipe: HANDLE, app: &AppHandle) {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut tmp = [0u8; 512];
-        let mut nread: u32 = 0;
         loop {
-            nread = 0;
+            let mut nread: u32 = 0;
             match unsafe { ReadFile(pipe, Some(&mut tmp), Some(&mut nread), None) } {
                 Ok(_) if nread > 0 => {
                     buf.extend_from_slice(&tmp[..nread as usize]);
@@ -2629,9 +2758,6 @@ mod imp {
             "bridge: UE4SS payload deployed to {}",
             game_bin_dir.display()
         );
-        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, "deploy_and_inject") {
-            log::warn!("bridge: unable to queue state sync request after deploy: {e}");
-        }
         start_log_tailer_for_bin_dir(game_bin_dir.clone(), None);
 
         let ue4ss_path = game_bin_dir.join(UE4SS_DLL);
@@ -2696,9 +2822,6 @@ mod imp {
 
     pub fn start_log_tailer(app: AppHandle, stats_dir: &str) -> Result<(), String> {
         let game_bin_dir = resolve_game_bin_dir(stats_dir)?;
-        if let Err(e) = request_mod_state_sync_for_dir(&game_bin_dir, "start_log_tailer") {
-            log::warn!("bridge: unable to queue state sync request for log tailer: {e}");
-        }
         start_log_tailer_for_bin_dir(game_bin_dir, Some(app));
         Ok(())
     }

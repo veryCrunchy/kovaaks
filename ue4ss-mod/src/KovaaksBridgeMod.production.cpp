@@ -404,6 +404,26 @@ bool looks_like_real_scenario_name(const std::string& value) {
     return true;
 }
 
+std::string derive_scenario_name_from_id(const std::string& scenario_id) {
+    if (scenario_id.empty()) {
+        return {};
+    }
+    size_t start = scenario_id.find_last_of('/');
+    if (start == std::string::npos) {
+        start = 0;
+    } else {
+        ++start;
+    }
+    size_t end = scenario_id.find_last_of('.');
+    if (end == std::string::npos || end <= start) {
+        end = scenario_id.size();
+    }
+    if (start >= scenario_id.size() || end <= start) {
+        return {};
+    }
+    return scenario_id.substr(start, end - start);
+}
+
 std::string escape_json_ascii(std::string_view value) {
     std::string out;
     out.reserve(value.size() + 8);
@@ -742,6 +762,7 @@ private:
         int32_t current_is_in_scenario_editor,
         float current_queue_time_remaining,
         float current_score_total,
+        float current_score_total_derived,
         int32_t current_kills_total,
         float current_score_per_minute,
         float current_seconds,
@@ -776,6 +797,7 @@ private:
 
         s_last_pull_queue_time_remaining = sanitize_metric(current_queue_time_remaining, last_queue_time_remaining_);
         s_last_pull_score = sanitize_metric(current_score_total, last_score_total_);
+        s_last_pull_score_derived = sanitize_metric(current_score_total_derived, last_score_total_derived_);
         s_last_pull_kills = sanitize_state(current_kills_total, last_kills_total_);
         s_last_pull_spm = sanitize_metric(current_score_per_minute, last_score_per_minute_);
         s_last_pull_challenge_seconds = sanitize_metric(current_seconds, last_challenge_seconds_total_);
@@ -785,24 +807,132 @@ private:
         s_last_run_scenario_name = last_scenario_name_;
     }
 
+    auto try_resolve_current_scenario_identity(
+        uint64_t now_ms,
+        std::string& out_scenario_name,
+        std::string& out_scenario_id,
+        std::string& out_scenario_manager_id
+    ) -> bool {
+        out_scenario_name.clear();
+        out_scenario_id.clear();
+        out_scenario_manager_id.clear();
+
+        auto* scenario_manager = resolve_scenario_manager_instance(now_ms);
+        if (!scenario_manager || !is_likely_valid_object_ptr(scenario_manager)) {
+            return false;
+        }
+
+        out_scenario_manager_id = utf8_from_wide(object_path_from_full_name(scenario_manager->GetFullName()));
+        auto* owner_class = *reinterpret_cast<RC::Unreal::UClass**>(
+            reinterpret_cast<uint8_t*>(scenario_manager) + 0x10
+        );
+        if (!owner_class || !is_likely_valid_object_ptr(owner_class)) {
+            return !out_scenario_manager_id.empty();
+        }
+
+        auto read_object_property_by_name = [&](const char* wanted_name) -> RC::Unreal::UObject* {
+            if (!wanted_name || !*wanted_name) {
+                return nullptr;
+            }
+            for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner_class)) {
+                if (!property || !is_likely_valid_object_ptr(property)) {
+                    continue;
+                }
+                auto* object_property = RC::Unreal::CastField<RC::Unreal::FObjectPropertyBase>(property);
+                if (!object_property || !is_likely_valid_object_ptr(object_property)) {
+                    continue;
+                }
+                if (normalize_ascii(property->GetName()) != wanted_name) {
+                    continue;
+                }
+                void* value_ptr = safe_property_value_ptr(property, scenario_manager);
+                if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(void*))) {
+                    continue;
+                }
+                auto* value = object_property->GetObjectPropertyValue(value_ptr);
+                if (!value || !is_likely_valid_object_ptr(value)) {
+                    continue;
+                }
+                const auto full_name = value->GetFullName();
+                if (is_rejected_runtime_object_name(full_name)) {
+                    continue;
+                }
+                return value;
+            }
+            return nullptr;
+        };
+
+        RC::Unreal::UObject* current_scenario = nullptr;
+        current_scenario = read_object_property_by_name("currentscenario");
+        if (!current_scenario) {
+            current_scenario = read_object_property_by_name("selectedscenario");
+        }
+        if (!current_scenario) {
+            current_scenario = read_object_property_by_name("activescenario");
+        }
+        if (!current_scenario) {
+            current_scenario = read_object_property_by_name("currentchallenge");
+        }
+
+        if (current_scenario && is_likely_valid_object_ptr(current_scenario)) {
+            const auto full_name = current_scenario->GetFullName();
+            if (!is_rejected_runtime_object_name(full_name)) {
+                out_scenario_id = utf8_from_wide(object_path_from_full_name(full_name));
+            }
+            out_scenario_name = utf8_from_wide(current_scenario->GetName());
+            if (!looks_like_real_scenario_name(out_scenario_name)) {
+                out_scenario_name.clear();
+            }
+        }
+        if (out_scenario_name.empty() && !out_scenario_id.empty()) {
+            out_scenario_name = derive_scenario_name_from_id(out_scenario_id);
+        }
+        return !out_scenario_name.empty() || !out_scenario_id.empty() || !out_scenario_manager_id.empty();
+    }
+
     auto emit_requested_state_snapshot(uint64_t now_ms, const std::string& request_reason) -> void {
         const auto reason = sanitize_state_request_reason(request_reason);
-        std::string scenario_name = last_scenario_name_;
+        std::string scenario_name{};
+        std::string scenario_id{};
+        std::string scenario_manager_id{};
+        (void)try_resolve_current_scenario_identity(now_ms, scenario_name, scenario_id, scenario_manager_id);
+
+        if (scenario_name.empty()) {
+            scenario_name = last_scenario_name_;
+        }
         if (scenario_name.empty()) {
             scenario_name = s_last_run_scenario_name;
-        } else {
+        }
+        if (scenario_name.empty() && !scenario_id.empty()) {
+            scenario_name = derive_scenario_name_from_id(scenario_id);
+        }
+        if (!scenario_name.empty()) {
             s_last_run_scenario_name = scenario_name;
+        }
+        if (scenario_id.empty()) {
+            scenario_id = s_last_run_scenario_id;
+        } else {
+            s_last_run_scenario_id = scenario_id;
+        }
+        if (scenario_manager_id.empty()) {
+            scenario_manager_id = s_last_run_scenario_manager_id;
+        } else {
+            s_last_run_scenario_manager_id = scenario_manager_id;
         }
 
         const auto scenario_name_escaped = escape_json_ascii(scenario_name);
+        const auto scenario_id_escaped = escape_json_ascii(scenario_id);
+        const auto scenario_manager_escaped = escape_json_ascii(scenario_manager_id);
         std::array<char, 1024> metadata{};
         std::snprintf(
             metadata.data(),
             metadata.size(),
-            "{\"ev\":\"scenario_metadata\",\"trigger\":\"state_request:%s\",\"run_id\":0,\"ts_ms\":%llu,\"scenario_name\":\"%s\",\"scenario_id\":\"\",\"scenario_manager\":\"\",\"scenario_play_type\":-1,\"is_in_trainer\":%d,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_currently_in_benchmark\":%d,\"challenge_time_length\":-1.0,\"queue_time_remaining\":%.6f,\"game_seconds\":-1.0,\"source\":\"production_state_sync\"}",
+            "{\"ev\":\"scenario_metadata\",\"trigger\":\"state_request:%s\",\"run_id\":0,\"ts_ms\":%llu,\"scenario_name\":\"%s\",\"scenario_id\":\"%s\",\"scenario_manager\":\"%s\",\"scenario_play_type\":-1,\"is_in_trainer\":%d,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_currently_in_benchmark\":%d,\"challenge_time_length\":-1.0,\"queue_time_remaining\":%.6f,\"game_seconds\":-1.0,\"source\":\"production_state_sync\"}",
             reason.c_str(),
             static_cast<unsigned long long>(now_ms),
             scenario_name_escaped.c_str(),
+            scenario_id_escaped.c_str(),
+            scenario_manager_escaped.c_str(),
             last_is_in_trainer_,
             last_is_in_challenge_,
             last_is_in_scenario_,
@@ -847,6 +977,7 @@ private:
         emit_f32_if_valid("pull_seconds_total", last_seconds_);
         emit_f32_if_valid("pull_challenge_seconds_total", last_challenge_seconds_total_);
         emit_f32_if_valid("pull_score_total", last_score_total_);
+        emit_f32_if_valid("pull_score_total_derived", last_score_total_derived_);
         emit_f32_if_valid("pull_score_per_minute", last_score_per_minute_);
         emit_f32_if_valid("pull_kills_per_second", last_kills_per_second_);
         emit_f32_if_valid("pull_accuracy", last_accuracy_);
@@ -913,6 +1044,7 @@ private:
         int32_t current_is_in_trainer = -1;
         float current_seconds = -1.0f;
         float current_score_total = -1.0f;
+        float current_score_total_derived = -1.0f;
         float current_score_per_minute = -1.0f;
         float current_kills_per_second = -1.0f;
         float current_accuracy = -1.0f;
@@ -1200,12 +1332,22 @@ private:
                 / static_cast<float>(current_shots_fired);
             emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
         }
-        if ((current_score_total < 0.0f || current_score_total <= 0.0001f)
-            && std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
+        if (std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
             && std::isfinite(current_seconds) && current_seconds > 0.0f) {
             const float derived_score_total = (current_score_per_minute * current_seconds) / 60.0f;
-            current_score_total = derived_score_total;
-            emit_pull_f32("pull_score_total_derived", last_score_total_, derived_score_total, last_nonzero_score_total_ms_, now);
+            if (std::isfinite(derived_score_total) && derived_score_total >= 0.0f) {
+                current_score_total_derived = derived_score_total;
+                emit_pull_f32(
+                    "pull_score_total_derived",
+                    last_score_total_derived_,
+                    derived_score_total,
+                    last_nonzero_score_total_derived_ms_,
+                    now
+                );
+                if (current_score_total < 0.0f || current_score_total <= 0.0001f) {
+                    current_score_total = derived_score_total;
+                }
+            }
         }
         }
 
@@ -1215,6 +1357,7 @@ private:
             current_is_in_scenario_editor,
             current_queue_time_remaining,
             current_score_total,
+            current_score_total_derived,
             current_kills_total,
             current_score_per_minute,
             current_seconds,
@@ -1238,7 +1381,23 @@ private:
             current_queue_time_remaining
         );
 
-        if (kovaaks::RustBridge::is_connected()) {
+        const bool bridge_connected = kovaaks::RustBridge::is_connected();
+        if (bridge_connected && !last_bridge_connected_) {
+            emit_requested_state_snapshot(now, "bridge_connected");
+            std::array<char, 256> sbuf{};
+            std::snprintf(
+                sbuf.data(),
+                sbuf.size(),
+                "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                "bridge_connected",
+                static_cast<unsigned long long>(now)
+            );
+            runtime_log_line(sbuf.data());
+            if (verbose_logs_) {
+                events_log_line(sbuf.data());
+            }
+        }
+        if (bridge_connected) {
             std::string request_reason{};
             if (consume_state_snapshot_request(request_reason)) {
                 emit_requested_state_snapshot(now, request_reason);
@@ -1256,6 +1415,7 @@ private:
                 }
             }
         }
+        last_bridge_connected_ = bridge_connected;
 
         const bool has_state_signal =
             current_is_in_challenge >= 0
@@ -1278,13 +1438,27 @@ private:
             || (std::isfinite(current_damage_efficiency) && current_damage_efficiency > 0.0001f)
             || (std::isfinite(current_time_remaining) && current_time_remaining > 0.0001f)
             || (std::isfinite(current_queue_time_remaining) && current_queue_time_remaining > 0.0001f);
-        const bool had_any_source =
-            (receiver != nullptr)
-            || (scenario_manager != nullptr)
-            || (meta != nullptr);
-        if (has_nonzero_signal || has_state_signal || !had_any_source) {
+        if (has_nonzero_signal || has_state_signal) {
             zero_signal_streak_ = 0;
         } else if (++zero_signal_streak_ >= 90) { // ~3s at 30Hz
+            {
+                // If state sources go silent for a sustained period, emit an
+                // explicit idle reset so frontend state doesn't stay latched.
+                EmitTagScope idle_scope(*this, "idle_fallback", "state_inferred");
+                emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, 0);
+                emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, 0);
+                emit_state_i32("pull_is_in_scenario_editor", last_is_in_scenario_editor_, 0);
+                emit_state_i32("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_, 0);
+                emit_state_i32("pull_is_in_trainer", last_is_in_trainer_, 0);
+                emit_pull_f32("pull_time_remaining", last_time_remaining_, 0.0f, last_nonzero_time_remaining_ms_, now);
+                emit_pull_f32(
+                    "pull_queue_time_remaining",
+                    last_queue_time_remaining_,
+                    0.0f,
+                    last_nonzero_queue_time_remaining_ms_,
+                    now
+                );
+            }
             reset_runtime_resolvers();
             zero_signal_streak_ = 0;
             fault_backoff_until_ms_ = now + 100;
@@ -1490,6 +1664,7 @@ private:
     static inline int32_t s_last_pull_scenario_is_paused{-1};
     static inline float s_last_pull_queue_time_remaining{-1.0f};
     static inline float s_last_pull_score{-1.0f};
+    static inline float s_last_pull_score_derived{-1.0f};
     static inline int32_t s_last_pull_kills{-1};
     static inline float s_last_pull_spm{-1.0f};
     static inline float s_last_pull_challenge_seconds{-1.0f};
@@ -1497,6 +1672,8 @@ private:
     static inline int32_t s_last_pull_challenge_tick_count{-1};
     static inline float s_last_pull_time_remaining{-1.0f};
     static inline std::string s_last_run_scenario_name{};
+    static inline std::string s_last_run_scenario_id{};
+    static inline std::string s_last_run_scenario_manager_id{};
 
     bool rust_ready_{false};
     Targets targets_{};
@@ -1536,6 +1713,7 @@ private:
     int32_t last_is_in_trainer_{std::numeric_limits<int32_t>::min()};
     float last_seconds_{std::numeric_limits<float>::quiet_NaN()};
     float last_score_total_{std::numeric_limits<float>::quiet_NaN()};
+    float last_score_total_derived_{std::numeric_limits<float>::quiet_NaN()};
     float last_score_per_minute_{std::numeric_limits<float>::quiet_NaN()};
     float last_kills_per_second_{std::numeric_limits<float>::quiet_NaN()};
     float last_accuracy_{std::numeric_limits<float>::quiet_NaN()};
@@ -1554,6 +1732,7 @@ private:
     uint64_t last_nonzero_shots_hit_ms_{0};
     uint64_t last_nonzero_seconds_ms_{0};
     uint64_t last_nonzero_score_total_ms_{0};
+    uint64_t last_nonzero_score_total_derived_ms_{0};
     uint64_t last_nonzero_spm_ms_{0};
     uint64_t last_nonzero_kills_per_second_ms_{0};
     uint64_t last_nonzero_accuracy_ms_{0};
@@ -1574,6 +1753,7 @@ private:
     uint64_t next_diag_log_ms_{0};
     bool updates_disabled_{false};
     uint32_t fault_count_{0};
+    bool last_bridge_connected_{false};
     const char* emit_method_{"unknown"};
     const char* emit_origin_flag_{"unknown"};
 
