@@ -1629,64 +1629,75 @@ function PerformanceTab({
   records: SessionRecord[];
   sorted: SessionRecord[];
 }) {
+  const perfRecords = records
+    .map((r) => {
+      const fallbackKps =
+        r.duration_secs > 0 && Number.isFinite(r.duration_secs) ? r.kills / r.duration_secs : null;
+      const fallbackAcc = Number.isFinite(r.accuracy) ? r.accuracy : null;
+      return {
+        ...r,
+        perf_kps: r.stats_panel?.avg_kps ?? fallbackKps,
+        perf_acc: r.stats_panel?.accuracy_pct ?? fallbackAcc,
+        perf_ttk: r.stats_panel?.avg_ttk_ms ?? null,
+        perf_ttk_std: r.stats_panel?.ttk_std_ms ?? null,
+        perf_trend: r.stats_panel?.accuracy_trend ?? null,
+        perf_scenario_type: r.stats_panel?.scenario_type ?? null,
+      };
+    })
+    .filter((r) => r.perf_kps != null || r.perf_acc != null || r.perf_ttk != null);
 
-  const panelRecords = records.filter((r) => r.stats_panel !== null);
-
-  if (panelRecords.length === 0) {
+  if (perfRecords.length === 0) {
     return (
       <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
-        No in-game stats data recorded for this scenario.
+        No performance data recorded for this scenario.
         <br />
-        Run a scenario with AimMod active to capture kill count,
-        accuracy, and TTK.
+        Run a scenario with AimMod active to capture detailed
+        kill-speed, accuracy, and TTK metrics.
       </div>
     );
   }
 
-  const panelSorted = sorted.filter((r) => r.stats_panel !== null);
+  const perfSorted = sorted
+    .map((r) => {
+      const fallbackKps =
+        r.duration_secs > 0 && Number.isFinite(r.duration_secs) ? r.kills / r.duration_secs : null;
+      const fallbackAcc = Number.isFinite(r.accuracy) ? r.accuracy : null;
+      return {
+        ...r,
+        perf_kps: r.stats_panel?.avg_kps ?? fallbackKps,
+        perf_acc: r.stats_panel?.accuracy_pct ?? fallbackAcc,
+        perf_ttk: r.stats_panel?.avg_ttk_ms ?? null,
+        perf_ttk_std: r.stats_panel?.ttk_std_ms ?? null,
+        perf_trend: r.stats_panel?.accuracy_trend ?? null,
+        perf_scenario_type: r.stats_panel?.scenario_type ?? null,
+      };
+    })
+    .filter((r) => r.perf_kps != null || r.perf_acc != null || r.perf_ttk != null);
 
-  const withKps = panelRecords.filter((r) => r.stats_panel!.avg_kps != null);
-  const withAcc = panelRecords.filter((r) => r.stats_panel!.accuracy_pct != null);
-  const withTtk = panelRecords.filter((r) => r.stats_panel!.avg_ttk_ms != null);
-  const withBestTtk = panelRecords.filter((r) => r.stats_panel!.best_ttk_ms != null);
-  const withTrend = panelRecords.filter(
-    (r) => r.stats_panel!.accuracy_trend != null,
-  );
+  const withKps = perfRecords.filter((r) => r.perf_kps != null);
+  const withAcc = perfRecords.filter((r) => r.perf_acc != null);
+  const withTtk = perfRecords.filter((r) => r.perf_ttk != null);
+  const withBestTtk = perfRecords.filter((r) => r.stats_panel?.best_ttk_ms != null);
+  const withTrend = perfRecords.filter((r) => r.perf_trend != null);
 
-  const avgKps = withKps.length ? mean(withKps.map((r) => r.stats_panel!.avg_kps!)) : null;
-  const avgAccPct = withAcc.length
-    ? mean(withAcc.map((r) => r.stats_panel!.accuracy_pct!))
-    : null;
-  const avgTtk = withTtk.length ? mean(withTtk.map((r) => r.stats_panel!.avg_ttk_ms!)) : null;
+  const avgKps = withKps.length ? mean(withKps.map((r) => r.perf_kps!)) : null;
+  const avgAccPct = withAcc.length ? mean(withAcc.map((r) => r.perf_acc!)) : null;
+  const avgTtk = withTtk.length ? mean(withTtk.map((r) => r.perf_ttk!)) : null;
   const bestTtk = withBestTtk.length
     ? Math.min(...withBestTtk.map((r) => r.stats_panel!.best_ttk_ms!))
     : null;
-  const avgTrend = withTrend.length
-    ? mean(withTrend.map((r) => r.stats_panel!.accuracy_trend!))
-    : null;
+  const avgTrend = withTrend.length ? mean(withTrend.map((r) => r.perf_trend!)) : null;
 
   const scenarioType =
-    panelRecords[panelRecords.length - 1]?.stats_panel?.scenario_type ?? "Unknown";
+    perfRecords[perfRecords.length - 1]?.perf_scenario_type ?? "Unknown";
 
-  const chartData = panelSorted.map((r, i) => ({
+  const chartData = perfSorted.map((r, i) => ({
     i: i + 1,
-    kps: r.stats_panel!.avg_kps != null ? +r.stats_panel!.avg_kps!.toFixed(2) : null,
-    acc:
-      r.stats_panel!.accuracy_pct != null
-        ? +r.stats_panel!.accuracy_pct!.toFixed(1)
-        : null,
-    ttk:
-      r.stats_panel!.avg_ttk_ms != null
-        ? +r.stats_panel!.avg_ttk_ms!.toFixed(0)
-        : null,
-    ttk_std:
-      r.stats_panel!.ttk_std_ms != null
-        ? +r.stats_panel!.ttk_std_ms!.toFixed(0)
-        : null,
-    trend:
-      r.stats_panel!.accuracy_trend != null
-        ? +r.stats_panel!.accuracy_trend!.toFixed(1)
-        : null,
+    kps: r.perf_kps != null ? +r.perf_kps.toFixed(2) : null,
+    acc: r.perf_acc != null ? +r.perf_acc.toFixed(1) : null,
+    ttk: r.perf_ttk != null ? +r.perf_ttk.toFixed(0) : null,
+    ttk_std: r.perf_ttk_std != null ? +r.perf_ttk_std.toFixed(0) : null,
+    trend: r.perf_trend != null ? +r.perf_trend.toFixed(1) : null,
     dateLabel: formatDateTime(r.timestamp),
   }));
 
@@ -1997,10 +2008,6 @@ function ReplayTab({
       ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
       : null
     );
-  const replayCapturedSecs = replayData?.positions.length
-    ? Math.max(0, replayData.positions[replayData.positions.length - 1].timestamp_ms / 1000)
-    : 0;
-
   // Worst-moment clips removed — full interactive viewer is shown instead
 
   if (replayRecords.length === 0) {
@@ -2210,12 +2217,6 @@ function ReplayTab({
                   />
                 </LineChart>
               </ResponsiveContainer>
-            </div>
-          )}
-
-          {(runDurationSecs != null && replayCapturedSecs > 0 && runDurationSecs - replayCapturedSecs > 8) && (
-            <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.62)", fontSize: 12, lineHeight: 1.6 }}>
-              Replay capture started late for this run ({Math.round(replayCapturedSecs)}s captured of {Math.round(runDurationSecs)}s total). This can happen if session tracking started after initial combat events.
             </div>
           )}
 

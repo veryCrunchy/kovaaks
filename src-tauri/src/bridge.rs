@@ -939,6 +939,7 @@ mod imp {
     }
 
     fn restart_session_tracking(app: &AppHandle, reason: &str, challenge_active: bool) {
+        let run_time_hint = authoritative_run_time_hint();
         {
             let mut state = bridge_session_state().lock().unwrap();
             let now = Instant::now();
@@ -953,7 +954,7 @@ mod imp {
         }
         reset_bridge_stats_snapshot();
         if let Ok(mut run_state) = run_capture_state().lock() {
-            begin_run_capture_locked(&mut run_state, Instant::now(), None);
+            begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
         }
         if challenge_active {
             let _ = app.emit(super::EVENT_CHALLENGE_START, ());
@@ -2332,6 +2333,7 @@ mod imp {
             }
 
             let has_active_session_metrics = state.stats.is_in_challenge == Some(true)
+                || state.stats.is_in_scenario == Some(true)
                 || state
                     .stats
                     .challenge_seconds_total
