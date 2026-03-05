@@ -784,7 +784,7 @@ public:
         runtime_log_line("[KovaaksBridgeMod] on_program_start");
     }
 
-    auto on_cpp_mods_loaded() -> void override {
+    auto on_cpp_mods_loaded() -> void {
         bootstrap_log_line("on_cpp_mods_loaded: callback enter");
         runtime_log_line("[KovaaksBridgeMod] on_cpp_mods_loaded callback enter");
         RC::Output::send<RC::LogLevel::Warning>(
@@ -799,7 +799,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_start(
@@ -807,7 +807,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_stop(
@@ -816,7 +816,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_stop(
@@ -824,7 +824,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto start_rust_bridge_if_enabled(const char* source) -> void {

@@ -5,6 +5,7 @@
 #include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/Property/FObjectProperty.hpp>
+#include <Unreal/Property/FStrProperty.hpp>
 #include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UClass.hpp>
 #include <Unreal/UFunction.hpp>
@@ -12,12 +13,15 @@
 #include <Unreal/UObjectGlobals.hpp>
 
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <limits>
 #include <mutex>
@@ -75,6 +79,105 @@ bool is_likely_valid_object_ptr(const void* ptr) {
         return false;
     }
     return is_likely_readable_region(reinterpret_cast<const void*>(vtable), sizeof(void*));
+}
+
+std::wstring game_bin_dir() {
+    wchar_t buffer[MAX_PATH] = {};
+    if (!GetModuleFileNameW(nullptr, buffer, MAX_PATH)) {
+        return L".\\";
+    }
+    std::wstring path(buffer);
+    const auto pos = path.find_last_of(L"\\/");
+    if (pos == std::wstring::npos) {
+        return L".\\";
+    }
+    return path.substr(0, pos + 1);
+}
+
+bool env_flag_enabled(const char* name) {
+    char value[16] = {};
+    const auto len = GetEnvironmentVariableA(name, value, static_cast<DWORD>(sizeof(value)));
+    if (len == 0 || len >= sizeof(value)) {
+        return false;
+    }
+    return value[0] == '1' || value[0] == 'y' || value[0] == 'Y' || value[0] == 't' || value[0] == 'T';
+}
+
+std::string utf8_from_wide(const std::wstring& input) {
+    if (input.empty()) {
+        return {};
+    }
+    const int required = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        input.c_str(),
+        static_cast<int>(input.size()),
+        nullptr,
+        0,
+        nullptr,
+        nullptr
+    );
+    if (required <= 0) {
+        return {};
+    }
+
+    std::string output(static_cast<size_t>(required), '\0');
+    const int written = WideCharToMultiByte(
+        CP_UTF8,
+        0,
+        input.c_str(),
+        static_cast<int>(input.size()),
+        output.data(),
+        required,
+        nullptr,
+        nullptr
+    );
+    if (written <= 0) {
+        return {};
+    }
+    return output;
+}
+
+RC::StringType string_type_from_utf8(const char* input) {
+    if (!input || !*input) {
+        return RC::StringType{};
+    }
+
+    int required = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input, -1, nullptr, 0);
+    UINT code_page = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (required <= 0) {
+        code_page = CP_ACP;
+        flags = 0;
+        required = MultiByteToWideChar(code_page, flags, input, -1, nullptr, 0);
+        if (required <= 0) {
+            return RC::StringType{};
+        }
+    }
+
+    std::wstring wide(static_cast<size_t>(required), L'\0');
+    const int written = MultiByteToWideChar(code_page, flags, input, -1, wide.data(), required);
+    if (written <= 0) {
+        return RC::StringType{};
+    }
+    if (!wide.empty() && wide.back() == L'\0') {
+        wide.pop_back();
+    }
+    return RC::StringType(wide);
+}
+
+void runtime_log_line(const char* line) {
+    RC::Output::send<RC::LogLevel::Warning>(
+        STR("[kmod-prod] {}\n"),
+        string_type_from_utf8(line)
+    );
+}
+
+void events_log_line(const char* line) {
+    RC::Output::send<RC::LogLevel::Warning>(
+        STR("[kmod-prod-ev] {}\n"),
+        string_type_from_utf8(line)
+    );
 }
 
 void* safe_property_value_ptr(RC::Unreal::FProperty* property, void* container, int32_t array_index = 0) {
@@ -471,7 +574,7 @@ public:
 
     auto on_ui_init() -> void override {}
 
-    auto on_cpp_mods_loaded() -> void override {
+    auto on_cpp_mods_loaded() -> void {
     }
 
     auto on_lua_start(
@@ -480,7 +583,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_start(
@@ -488,7 +591,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_stop(
@@ -497,7 +600,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_lua_stop(
@@ -505,7 +608,7 @@ public:
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua&,
         RC::LuaMadeSimple::Lua*
-    ) -> void override {
+    ) -> void {
     }
 
     auto on_update() -> void override {
@@ -580,6 +683,105 @@ private:
         const auto wanted = static_cast<uint64_t>(flags);
         return (current & wanted) != 0;
     }
+
+    static auto is_runtime_object_usable(RC::Unreal::UObject* obj) -> bool {
+        if (!obj || !is_likely_valid_object_ptr(obj)) {
+            return false;
+        }
+        return !is_rejected_runtime_object_name(obj->GetFullName());
+    }
+
+    static auto is_runtime_function_usable(RC::Unreal::UFunction* fn) -> bool {
+        if (!fn || !is_likely_valid_object_ptr(fn)) {
+            return false;
+        }
+        return !is_rejected_runtime_function_name(fn->GetFullName());
+    }
+
+    static auto ui_widget_probe_object_usable(RC::Unreal::UObject* obj) -> bool {
+        if (!is_runtime_object_usable(obj)) {
+            return false;
+        }
+        const auto full_name = obj->GetFullName();
+        return full_name.find(STR("None.None:None.None")) == RC::StringType::npos;
+    }
+
+    static auto set_direct_fault_context(
+        const char*,
+        RC::Unreal::UObject*,
+        RC::Unreal::UFunction*
+    ) -> void {
+    }
+
+    static auto should_quarantine_invoke_fault(
+        const char*,
+        RC::Unreal::UFunction*
+    ) -> bool {
+        return false;
+    }
+
+    static auto quarantine_faulted_function(
+        RC::Unreal::UFunction*,
+        uint64_t
+    ) -> uint32_t {
+        return 0;
+    }
+
+    static auto is_function_quarantined(
+        RC::Unreal::UFunction*,
+        uint64_t
+    ) -> bool {
+        return false;
+    }
+
+    auto sync_in_game_overlay_pull_cache(
+        int32_t current_is_in_challenge,
+        int32_t current_is_in_scenario,
+        int32_t current_is_in_scenario_editor,
+        float current_queue_time_remaining,
+        float current_score_total,
+        int32_t current_kills_total,
+        float current_score_per_minute,
+        float current_seconds,
+        float current_time_remaining
+    ) -> void {
+        const auto sanitize_state = [](int32_t current, int32_t fallback) -> int32_t {
+            if (current >= 0) {
+                return current;
+            }
+            if (fallback != std::numeric_limits<int32_t>::min()) {
+                return fallback;
+            }
+            return -1;
+        };
+        const auto sanitize_metric = [](float current, float fallback) -> float {
+            if (std::isfinite(current) && current >= 0.0f) {
+                return current;
+            }
+            if (std::isfinite(fallback) && fallback >= 0.0f) {
+                return fallback;
+            }
+            return -1.0f;
+        };
+
+        s_last_pull_is_in_challenge = sanitize_state(current_is_in_challenge, last_is_in_challenge_);
+        s_last_pull_is_in_scenario = sanitize_state(current_is_in_scenario, last_is_in_scenario_);
+        s_last_pull_is_in_scenario_editor = sanitize_state(current_is_in_scenario_editor, last_is_in_scenario_editor_);
+        s_last_pull_scenario_is_in_editor = s_last_pull_is_in_scenario_editor;
+        s_last_pull_scenario_is_paused = -1;
+
+        s_last_pull_queue_time_remaining = sanitize_metric(current_queue_time_remaining, last_queue_time_remaining_);
+        s_last_pull_score = sanitize_metric(current_score_total, last_score_total_);
+        s_last_pull_kills = sanitize_state(current_kills_total, last_kills_total_);
+        s_last_pull_spm = sanitize_metric(current_score_per_minute, last_score_per_minute_);
+        s_last_pull_challenge_seconds = sanitize_metric(current_seconds, last_seconds_);
+        s_last_pull_challenge_average_fps = -1.0f;
+        s_last_pull_challenge_tick_count = -1;
+        s_last_pull_time_remaining = sanitize_metric(current_time_remaining, last_time_remaining_);
+        s_last_run_scenario_name = last_scenario_name_;
+    }
+
+    #include "kmod/in_game_overlay.inl"
 
     struct EmitTagScope {
         KovaaksBridgeModProduction& self;
@@ -894,6 +1096,19 @@ private:
         }
         }
 
+        sync_in_game_overlay_pull_cache(
+            current_is_in_challenge,
+            current_is_in_scenario,
+            current_is_in_scenario_editor,
+            current_queue_time_remaining,
+            current_score_total,
+            current_kills_total,
+            current_score_per_minute,
+            current_seconds,
+            current_time_remaining
+        );
+        in_game_overlay_tick(now);
+
         update_lifecycle_events(
             now,
             current_is_in_challenge,
@@ -1116,6 +1331,26 @@ private:
         bool valid{false};
         bool value{false};
     };
+
+    static inline std::atomic<bool> s_disable_direct_invoke_path{false};
+    static inline std::atomic<uint64_t> s_direct_invoke_faults{0};
+    static inline std::atomic<uint64_t> s_direct_poll_errors{0};
+    static inline std::atomic<uint64_t> s_direct_invoke_last_fault_ms{0};
+
+    static inline int32_t s_last_pull_is_in_challenge{-1};
+    static inline int32_t s_last_pull_is_in_scenario{-1};
+    static inline int32_t s_last_pull_is_in_scenario_editor{-1};
+    static inline int32_t s_last_pull_scenario_is_in_editor{-1};
+    static inline int32_t s_last_pull_scenario_is_paused{-1};
+    static inline float s_last_pull_queue_time_remaining{-1.0f};
+    static inline float s_last_pull_score{-1.0f};
+    static inline int32_t s_last_pull_kills{-1};
+    static inline float s_last_pull_spm{-1.0f};
+    static inline float s_last_pull_challenge_seconds{-1.0f};
+    static inline float s_last_pull_challenge_average_fps{-1.0f};
+    static inline int32_t s_last_pull_challenge_tick_count{-1};
+    static inline float s_last_pull_time_remaining{-1.0f};
+    static inline std::string s_last_run_scenario_name{};
 
     bool rust_ready_{false};
     Targets targets_{};

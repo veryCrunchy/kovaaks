@@ -1,6 +1,14 @@
     static auto in_game_overlay_enabled() -> bool {
-        return env_flag_enabled("KOVAAKS_IN_GAME_OVERLAY")
-            || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_in_game_overlay.flag"));
+        if (env_flag_enabled("KOVAAKS_DISABLE_IN_GAME_OVERLAY")
+            || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_disable_in_game_overlay.flag"))) {
+            return false;
+        }
+        if (env_flag_enabled("KOVAAKS_ENABLE_IN_GAME_OVERLAY")
+            || env_flag_enabled("KOVAAKS_IN_GAME_OVERLAY")
+            || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_in_game_overlay.flag"))) {
+            return true;
+        }
+        return false;
     }
 
     static auto in_game_overlay_find_controller() -> RC::Unreal::UObject* {
@@ -32,6 +40,304 @@
             return nullptr;
         }
         return best;
+    }
+
+    static auto in_game_overlay_trim_ascii(const std::string& input) -> std::string {
+        if (input.empty()) {
+            return {};
+        }
+        size_t start = 0;
+        while (start < input.size() && std::isspace(static_cast<unsigned char>(input[start]))) {
+            ++start;
+        }
+        size_t end = input.size();
+        while (end > start && std::isspace(static_cast<unsigned char>(input[end - 1]))) {
+            --end;
+        }
+        return input.substr(start, end - start);
+    }
+
+    static auto in_game_overlay_read_env_utf8(const char* name) -> std::string {
+        if (!name || !*name) {
+            return {};
+        }
+        std::array<char, 4096> buf{};
+        const auto len = GetEnvironmentVariableA(name, buf.data(), static_cast<DWORD>(buf.size()));
+        if (len == 0 || len >= buf.size()) {
+            return {};
+        }
+        return in_game_overlay_trim_ascii(std::string(buf.data(), static_cast<size_t>(len)));
+    }
+
+    static auto in_game_overlay_read_url_file_utf8(const std::filesystem::path& path) -> std::string {
+        std::ifstream in{path};
+        if (!in.is_open()) {
+            return {};
+        }
+        std::string line{};
+        std::getline(in, line);
+        return in_game_overlay_trim_ascii(line);
+    }
+
+    static auto in_game_overlay_file_url_from_path(const std::filesystem::path& path) -> std::string {
+        if (path.empty()) {
+            return {};
+        }
+        auto resolved = path;
+        if (!resolved.is_absolute()) {
+            resolved = std::filesystem::path(game_bin_dir()) / resolved;
+        }
+        resolved = resolved.lexically_normal();
+        auto wide = resolved.wstring();
+        if (wide.empty()) {
+            return {};
+        }
+        for (auto& ch : wide) {
+            if (ch == L'\\') {
+                ch = L'/';
+            }
+        }
+        std::wstring prefixed = L"file:///";
+        prefixed += wide;
+        auto as_utf8 = utf8_from_wide(prefixed);
+        if (as_utf8.empty()) {
+            return {};
+        }
+        std::string encoded{};
+        encoded.reserve(as_utf8.size() + 16);
+        for (char ch : as_utf8) {
+            if (ch == ' ') {
+                encoded += "%20";
+            } else {
+                encoded.push_back(ch);
+            }
+        }
+        return encoded;
+    }
+
+    static auto in_game_overlay_resolve_browser_url_utf8() -> std::string {
+        if (auto env_url = in_game_overlay_read_env_utf8("KOVAAKS_IN_GAME_OVERLAY_URL"); !env_url.empty()) {
+            return env_url;
+        }
+
+        const auto explicit_file = std::filesystem::path(game_bin_dir() + L"kovaaks_in_game_overlay_url.txt");
+        if (std::filesystem::exists(explicit_file)) {
+            if (auto file_url = in_game_overlay_read_url_file_utf8(explicit_file); !file_url.empty()) {
+                return file_url;
+            }
+        }
+
+        const auto local_html = std::filesystem::path(game_bin_dir() + L"aimmod_in_game_overlay.html");
+        if (std::filesystem::exists(local_html)) {
+            return in_game_overlay_file_url_from_path(local_html);
+        }
+
+        const auto bundled_html = std::filesystem::path(game_bin_dir()) / L"aimmod_overlay" / L"index.html";
+        if (std::filesystem::exists(bundled_html)) {
+            return in_game_overlay_file_url_from_path(bundled_html);
+        }
+
+        const auto staged_html = std::filesystem::path(game_bin_dir()) / L"dist" / L"index.html";
+        if (std::filesystem::exists(staged_html)) {
+            return in_game_overlay_file_url_from_path(staged_html);
+        }
+
+        return {};
+    }
+
+    static auto in_game_overlay_wide_from_utf8(const std::string& input) -> RC::StringType {
+        if (input.empty()) {
+            return {};
+        }
+
+        const int required = MultiByteToWideChar(
+            CP_UTF8,
+            MB_ERR_INVALID_CHARS,
+            input.c_str(),
+            static_cast<int>(input.size()),
+            nullptr,
+            0
+        );
+        if (required > 0) {
+            std::wstring wide(static_cast<size_t>(required), L'\0');
+            const int written = MultiByteToWideChar(
+                CP_UTF8,
+                0,
+                input.c_str(),
+                static_cast<int>(input.size()),
+                wide.data(),
+                required
+            );
+            if (written > 0) {
+                return RC::StringType(wide.begin(), wide.end());
+            }
+        }
+
+        RC::StringType fallback{};
+        fallback.reserve(input.size());
+        for (unsigned char ch : input) {
+            fallback.push_back(static_cast<wchar_t>(ch));
+        }
+        return fallback;
+    }
+
+    static auto in_game_overlay_try_get_object_property(
+        RC::Unreal::UObject* owner,
+        const char* normalized_property_name,
+        std::string* out_detail = nullptr
+    ) -> RC::Unreal::UObject* {
+        if (out_detail) {
+            out_detail->clear();
+        }
+        if (!owner || !normalized_property_name || !*normalized_property_name) {
+            if (out_detail) {
+                *out_detail = "invalid_owner_or_property_name";
+            }
+            return nullptr;
+        }
+
+        auto try_direct_chain = [&](const wchar_t* chain_name, const char* chain_tag) -> RC::Unreal::UObject* {
+            auto** value_ptr = owner->GetValuePtrByPropertyNameInChain<RC::Unreal::UObject*>(chain_name);
+            if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(void*))) {
+                return nullptr;
+            }
+            auto* value = *value_ptr;
+            if (!value) {
+                return nullptr;
+            }
+            if (ui_widget_probe_object_usable(value) || is_runtime_object_usable(value)) {
+                if (out_detail) {
+                    *out_detail = std::string{"direct_chain:"} + chain_tag;
+                }
+                return value;
+            }
+            if (is_likely_readable_region(value, sizeof(void*))) {
+                if (out_detail) {
+                    *out_detail = std::string{"direct_chain_readable:"} + chain_tag;
+                }
+                return value;
+            }
+            return nullptr;
+        };
+
+        if (std::strcmp(normalized_property_name, "crosshairhud") == 0) {
+            if (auto* direct = try_direct_chain(STR("CrosshairHUD"), "CrosshairHUD")) {
+                return direct;
+            }
+        } else if (std::strcmp(normalized_property_name, "hudwidget") == 0) {
+            if (auto* direct = try_direct_chain(STR("HudWidget"), "HudWidget")) {
+                return direct;
+            }
+        } else if (std::strcmp(normalized_property_name, "xsollabrowserwidget") == 0) {
+            if (auto* direct = try_direct_chain(STR("XsollaBrowserWidget"), "XsollaBrowserWidget")) {
+                return direct;
+            }
+        }
+
+        auto* owner_class = owner->GetClassPrivate();
+        if (!owner_class || !is_likely_valid_object_ptr(owner_class)) {
+            if (out_detail) {
+                *out_detail = "owner_class_unavailable";
+            }
+            return nullptr;
+        }
+
+        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner_class)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            auto* object_property = RC::Unreal::CastField<RC::Unreal::FObjectPropertyBase>(property);
+            if (!object_property || !is_likely_valid_object_ptr(object_property)) {
+                continue;
+            }
+            if (normalize_ascii(property->GetName()) != normalized_property_name) {
+                continue;
+            }
+
+            void* value_ptr = safe_property_value_ptr(object_property, reinterpret_cast<void*>(owner));
+            if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(void*))) {
+                continue;
+            }
+
+            auto* value = object_property->GetObjectPropertyValue(value_ptr);
+            if (!value) {
+                continue;
+            }
+
+            if (ui_widget_probe_object_usable(value) || is_runtime_object_usable(value)) {
+                if (out_detail) {
+                    *out_detail = "reflection_ok";
+                }
+                return value;
+            }
+            if (is_likely_readable_region(value, sizeof(void*))) {
+                if (out_detail) {
+                    *out_detail = "reflection_readable";
+                }
+                return value;
+            }
+        }
+
+        if (out_detail) {
+            *out_detail = "property_not_found";
+        }
+        return nullptr;
+    }
+
+    static auto in_game_overlay_resolve_browser_widget(
+        RC::Unreal::UObject* controller,
+        std::string* out_detail = nullptr
+    ) -> RC::Unreal::UObject* {
+        if (out_detail) {
+            out_detail->clear();
+        }
+        if (!ui_widget_probe_object_usable(controller)) {
+            if (out_detail) {
+                *out_detail = "controller_unusable";
+            }
+            return nullptr;
+        }
+
+        std::string hud_detail{};
+        auto* crosshair_hud = in_game_overlay_try_get_object_property(controller, "crosshairhud", &hud_detail);
+        if (!crosshair_hud || !is_likely_readable_region(crosshair_hud, sizeof(void*))) {
+            if (out_detail) {
+                *out_detail = std::string{"crosshair_hud_missing:"} + hud_detail;
+            }
+            return nullptr;
+        }
+
+        std::string hud_widget_detail{};
+        auto* hud_widget = in_game_overlay_try_get_object_property(crosshair_hud, "hudwidget", &hud_widget_detail);
+        if (!hud_widget || !is_likely_readable_region(hud_widget, sizeof(void*))) {
+            if (out_detail) {
+                *out_detail = std::string{"hud_widget_missing:"} + hud_widget_detail;
+            }
+            return nullptr;
+        }
+
+        std::string browser_detail{};
+        auto* browser_widget = in_game_overlay_try_get_object_property(hud_widget, "xsollabrowserwidget", &browser_detail);
+        if (!browser_widget || !is_likely_readable_region(browser_widget, sizeof(void*))) {
+            if (out_detail) {
+                *out_detail = std::string{"browser_widget_missing:"} + browser_detail;
+            }
+            return nullptr;
+        }
+
+        if (out_detail) {
+            std::array<char, 320> buf{};
+            std::snprintf(
+                buf.data(),
+                buf.size(),
+                "crosshair=%s hud=%s browser=%s",
+                hud_detail.c_str(),
+                hud_widget_detail.c_str(),
+                browser_detail.c_str()
+            );
+            *out_detail = buf.data();
+        }
+        return browser_widget;
     }
 
     static auto in_game_overlay_process_event_call(
@@ -199,6 +505,114 @@
             );
             *out_detail = buf.data();
         }
+        return ok;
+    }
+
+    static auto in_game_overlay_browser_load_url_safe(
+        RC::Unreal::UObject* browser_widget,
+        RC::Unreal::UFunction* load_url_fn,
+        const std::string& url_utf8,
+        std::string* out_detail = nullptr
+    ) -> bool {
+        if (out_detail) {
+            out_detail->clear();
+        }
+        if (!browser_widget || !is_runtime_function_usable(load_url_fn) || url_utf8.empty()) {
+            if (out_detail) {
+                *out_detail = "invalid_browser_or_fn_or_url";
+            }
+            return false;
+        }
+        if (!is_likely_valid_object_ptr(browser_widget) && !is_likely_readable_region(browser_widget, sizeof(void*))) {
+            if (out_detail) {
+                *out_detail = "browser_widget_pointer_unusable";
+            }
+            return false;
+        }
+
+        int32_t param_size = static_cast<int32_t>(load_url_fn->GetParmsSize());
+        if (param_size <= 0 || param_size > 0x10000) {
+            param_size = load_url_fn->GetPropertiesSize();
+        }
+        if (param_size <= 0 || param_size > 0x10000) {
+            param_size = 0x200;
+        }
+        std::vector<uint8_t> params(static_cast<size_t>(param_size), 0);
+        const RC::StringType url_w = in_game_overlay_wide_from_utf8(url_utf8);
+
+        bool wrote = false;
+        const char* write_kind = "none";
+        for (RC::Unreal::FProperty* property : enumerate_properties(load_url_fn)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            if (!property_has_any_flags(property, RC::Unreal::CPF_Parm)
+                || property_has_any_flags(property, RC::Unreal::CPF_OutParm)
+                || property_has_any_flags(property, RC::Unreal::CPF_ReturnParm)) {
+                continue;
+            }
+
+            const auto name = normalize_ascii(property->GetName());
+            if (!(name.empty() || name == "url" || name == "inurl" || name == "value")) {
+                continue;
+            }
+
+            void* value_ptr = safe_property_value_ptr(property, params.data());
+            if (!value_ptr) {
+                continue;
+            }
+
+            if (auto* str_property = RC::Unreal::CastField<RC::Unreal::FStrProperty>(property);
+                str_property && is_likely_valid_object_ptr(str_property)) {
+                RC::Unreal::FString value(url_w.c_str());
+                str_property->SetPropertyValue(value_ptr, value);
+                wrote = true;
+                write_kind = "fstring";
+                break;
+            }
+
+            if (auto* text_property = RC::Unreal::CastField<RC::Unreal::FTextProperty>(property);
+                text_property && is_likely_valid_object_ptr(text_property)) {
+                RC::Unreal::FText value{};
+                value.SetString(RC::Unreal::FString(url_w.c_str()));
+                text_property->SetPropertyValue(value_ptr, value);
+                wrote = true;
+                write_kind = "ftext";
+                break;
+            }
+        }
+
+        if (!wrote) {
+            if (out_detail) {
+                *out_detail = "no_supported_loadurl_param";
+            }
+            return false;
+        }
+
+        std::string pe_detail{};
+        const bool ok = in_game_overlay_process_event_call(
+            browser_widget,
+            load_url_fn,
+            params.data(),
+            "in_game_overlay_browser_loadurl",
+            &pe_detail
+        );
+
+        if (out_detail) {
+            std::array<char, 320> buf{};
+            std::snprintf(
+                buf.data(),
+                buf.size(),
+                "write_kind=%s process_event=%s pe_detail=%s url=%s param_size=%d",
+                write_kind,
+                ok ? "ok" : "fault",
+                pe_detail.c_str(),
+                url_utf8.c_str(),
+                param_size
+            );
+            *out_detail = buf.data();
+        }
+
         return ok;
     }
 
@@ -793,14 +1207,19 @@
         static uint64_t s_next_spawn_attempt_ms = 0;
         static uint64_t s_last_set_text_ms = 0;
         static uint64_t s_last_diag_log_ms = 0;
+        static uint64_t s_last_browser_diag_log_ms = 0;
+        static uint64_t s_next_browser_attach_ms = 0;
+        static uint64_t s_next_browser_load_attempt_ms = 0;
         static RC::Unreal::UObject* s_widget = nullptr;
+        static RC::Unreal::UObject* s_browser_widget = nullptr;
         static RC::StringType s_last_text{};
+        static std::string s_last_browser_url_loaded{};
         static uint32_t s_spawn_attempts = 0;
         static bool s_logged_enabled = false;
 
         if (!s_logged_enabled) {
-            runtime_log_line("[in_game_overlay] enabled (set kovaaks_in_game_overlay.flag)");
-            runtime_log_line("[in_game_overlay] dump signatures: UWidgetBlueprintLibrary::Create(WorldContextObject,WidgetType,OwningPlayer); UUserWidget::AddToViewport(int32); UUserWidget::SetAlignmentInViewport(FVector2D); UUserWidget::SetPositionInViewport(FVector2D,bool); W_Text_C::SetText(FText)");
+            runtime_log_line("[in_game_overlay] enabled via explicit flag/env");
+            runtime_log_line("[in_game_overlay] dump signatures: XsollaWebBrowserWidget::LoadUrl(FString); fallback: UWidgetBlueprintLibrary::Create(...); UUserWidget::AddToViewport(int32); UUserWidget::SetAlignmentInViewport(FVector2D); UUserWidget::SetPositionInViewport(FVector2D,bool); W_Text_C::SetText(FText)");
             kovaaks::RustBridge::emit_json("{\"ev\":\"in_game_overlay\",\"enabled\":true}");
             s_logged_enabled = true;
         }
@@ -815,6 +1234,12 @@
             s_widget = nullptr;
             s_last_text.clear();
             s_next_spawn_attempt_ms = now_ms + 1000;
+        }
+        if (s_browser_widget && !ui_widget_probe_object_usable(s_browser_widget)) {
+            runtime_log_line("[in_game_overlay] browser widget invalidated; scheduling reattach");
+            s_browser_widget = nullptr;
+            s_last_browser_url_loaded.clear();
+            s_next_browser_attach_ms = now_ms + 1000;
         }
 
         s_in_game_overlay_stage = "resolve_controller";
@@ -867,6 +1292,102 @@
             nullptr,
             STR("/Xsolla/Common/Components/Primitives/W_Text.W_Text_C:SetText")
         );
+        s_in_game_overlay_stage = "resolve_browser_load_url_fn";
+        auto* browser_load_url_fn = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
+            nullptr,
+            nullptr,
+            STR("/Script/GameSkillsTrainer.XsollaWebBrowserWidget:LoadUrl")
+        );
+        s_in_game_overlay_stage = "resolve_browser_url";
+        const auto browser_url_utf8 = in_game_overlay_resolve_browser_url_utf8();
+        const bool browser_mode_requested = !browser_url_utf8.empty();
+
+        if (browser_mode_requested) {
+            if (!is_runtime_function_usable(browser_load_url_fn)) {
+                if (s_last_browser_diag_log_ms == 0 || (now_ms - s_last_browser_diag_log_ms) >= 5000) {
+                    s_last_browser_diag_log_ms = now_ms;
+                    runtime_log_line("[in_game_overlay] browser mode requested but LoadUrl function unavailable");
+                }
+            } else {
+                if (!ui_widget_probe_object_usable(s_browser_widget) && now_ms >= s_next_browser_attach_ms) {
+                    s_in_game_overlay_stage = "resolve_browser_widget";
+                    std::string browser_resolve_detail{};
+                    auto* resolved_browser_widget = in_game_overlay_resolve_browser_widget(controller, &browser_resolve_detail);
+                    if (ui_widget_probe_object_usable(resolved_browser_widget)) {
+                        s_browser_widget = resolved_browser_widget;
+                        s_last_browser_url_loaded.clear();
+                        s_next_browser_load_attempt_ms = now_ms;
+                        std::array<char, 512> bbuf{};
+                        std::snprintf(
+                            bbuf.data(),
+                            bbuf.size(),
+                            "[in_game_overlay] browser widget attached detail=%s",
+                            browser_resolve_detail.c_str()
+                        );
+                        runtime_log_line(bbuf.data());
+                        events_log_line(bbuf.data());
+                    } else {
+                        if (s_last_browser_diag_log_ms == 0 || (now_ms - s_last_browser_diag_log_ms) >= 5000) {
+                            s_last_browser_diag_log_ms = now_ms;
+                            std::array<char, 512> bbuf{};
+                            std::snprintf(
+                                bbuf.data(),
+                                bbuf.size(),
+                                "[in_game_overlay] browser widget unresolved detail=%s",
+                                browser_resolve_detail.c_str()
+                            );
+                            runtime_log_line(bbuf.data());
+                        }
+                    }
+                    s_next_browser_attach_ms = now_ms + 1000;
+                }
+
+                if (ui_widget_probe_object_usable(s_browser_widget)
+                    && now_ms >= s_next_browser_load_attempt_ms
+                    && s_last_browser_url_loaded != browser_url_utf8) {
+                    s_in_game_overlay_stage = "browser_load_url";
+                    std::string load_detail{};
+                    const bool loaded = in_game_overlay_browser_load_url_safe(
+                        s_browser_widget,
+                        browser_load_url_fn,
+                        browser_url_utf8,
+                        &load_detail
+                    );
+                    std::array<char, 1024> bbuf{};
+                    std::snprintf(
+                        bbuf.data(),
+                        bbuf.size(),
+                        "[in_game_overlay] browser LoadUrl %s detail=%s",
+                        loaded ? "ok" : "failed",
+                        load_detail.c_str()
+                    );
+                    runtime_log_line(bbuf.data());
+                    if (!loaded) {
+                        events_log_line(bbuf.data());
+                    }
+                    if (loaded) {
+                        s_last_browser_url_loaded = browser_url_utf8;
+                        s_next_browser_load_attempt_ms = now_ms + 5000;
+                        kovaaks::RustBridge::emit_json("{\"ev\":\"in_game_overlay_browser\",\"loaded\":true}");
+                    } else {
+                        s_next_browser_load_attempt_ms = now_ms + 1500;
+                    }
+                }
+            }
+
+            if (ui_widget_probe_object_usable(s_browser_widget)
+                && s_last_browser_url_loaded == browser_url_utf8
+                && !s_last_browser_url_loaded.empty()) {
+                return;
+            }
+
+            return;
+        }
+
+        if (s_last_browser_diag_log_ms == 0 || (now_ms - s_last_browser_diag_log_ms) >= 8000) {
+            s_last_browser_diag_log_ms = now_ms;
+            runtime_log_line("[in_game_overlay] browser URL not configured; using legacy text HUD path");
+        }
 
         const bool spawn_ready = ui_widget_probe_object_usable(controller)
             && widget_class
@@ -1086,7 +1607,7 @@
         }
 
         s_in_game_overlay_stage = "compose_text";
-        RC::StringType overlay_text = STR("KovaaKs | ");
+        RC::StringType overlay_text = STR("AimMod | ");
         overlay_text += state_label;
         if (!scenario_name_w.empty()) {
             overlay_text += STR(" | ");
