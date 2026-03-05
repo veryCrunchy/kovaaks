@@ -45,9 +45,9 @@ export interface MetricPoint {
 
 /** A single downsampled cursor position sample recorded during a session. */
 export interface RawPositionPoint {
-  /** Absolute screen X in physical pixels. */
+  /** Integrated X in mouse-delta space (session starts at 0). */
   x: number;
-  /** Absolute screen Y in physical pixels. */
+  /** Integrated Y in mouse-delta space (session starts at 0). */
   y: number;
   /** Milliseconds since session start. */
   timestamp_ms: number;
@@ -66,4 +66,61 @@ export interface ScreenFrame {
   timestamp_ms: number;
   /** Standard base64-encoded JPEG (RFC 4648). Use as `data:image/jpeg;base64,${jpeg_b64}`. */
   jpeg_b64: string;
+}
+
+export interface BridgeRunEventCounts {
+  shot_fired_events: number;
+  shot_hit_events: number;
+  kill_events: number;
+  challenge_queued_events: number;
+  challenge_start_events: number;
+  challenge_end_events: number;
+  challenge_complete_events: number;
+  challenge_canceled_events: number;
+}
+
+export interface BridgeRunTimelinePoint {
+  t_sec: number;
+  score_per_minute: number | null;
+  kills_per_second: number | null;
+  accuracy_pct: number | null;
+  damage_efficiency: number | null;
+  score_total: number | null;
+  score_total_derived: number | null;
+  kills: number | null;
+  shots_fired: number | null;
+  shots_hit: number | null;
+}
+
+export interface BridgeRunSnapshot {
+  duration_secs: number | null;
+  score_total: number | null;
+  score_total_derived: number | null;
+  score_per_minute: number | null;
+  shots_fired: number | null;
+  shots_hit: number | null;
+  kills: number | null;
+  kills_per_second: number | null;
+  damage_done: number | null;
+  damage_possible: number | null;
+  damage_efficiency: number | null;
+  accuracy_pct: number | null;
+  peak_score_per_minute: number | null;
+  peak_kills_per_second: number | null;
+  paired_shot_hits: number;
+  avg_fire_to_hit_ms: number | null;
+  p90_fire_to_hit_ms: number | null;
+  avg_shots_to_hit: number | null;
+  corrective_shot_ratio: number | null;
+  started_at_unix_ms: number | null;
+  ended_at_unix_ms: number | null;
+  event_counts: BridgeRunEventCounts;
+  timeline: BridgeRunTimelinePoint[];
+}
+
+export interface ReplayData {
+  positions: RawPositionPoint[];
+  metrics: MetricPoint[];
+  frames?: ScreenFrame[];
+  run_snapshot?: BridgeRunSnapshot | null;
 }

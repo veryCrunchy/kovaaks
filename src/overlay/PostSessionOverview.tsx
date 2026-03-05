@@ -27,6 +27,13 @@ function fmtDuration(secs: number): string {
   return m > 0 ? `${m}m ${s}s` : `${s}s`;
 }
 
+function fmtRunWindow(startSec?: number | null, endSec?: number | null): string | null {
+  if (startSec == null || endSec == null) return null;
+  const start = Math.max(0, Math.round(startSec));
+  const end = Math.max(start, Math.round(endSec));
+  return `${start}s–${end}s`;
+}
+
 function smoothLabel(score: number): { text: string; color: string } {
   if (score >= 80) return { text: "SMOOTH", color: "#00f5a0" };
   if (score >= 60) return { text: "GOOD", color: "#ffd700" };
@@ -421,8 +428,15 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
                   </div>
                   {runSnapshot.tips.map((tip) => (
                     <div key={tip.id} style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                      <div style={{ fontSize: 10, fontWeight: 700, color: tipColor(tip.level) }}>
-                        {tip.title}
+                      <div className="flex items-center justify-between" style={{ gap: 8 }}>
+                        <div style={{ fontSize: 10, fontWeight: 700, color: tipColor(tip.level) }}>
+                          {tip.title}
+                        </div>
+                        {fmtRunWindow(tip.windowStartSec, tip.windowEndSec) && (
+                          <div style={{ fontSize: 8, fontWeight: 700, color: "rgba(255,255,255,0.42)", letterSpacing: "0.08em" }}>
+                            {fmtRunWindow(tip.windowStartSec, tip.windowEndSec)}
+                          </div>
+                        )}
                       </div>
                       <div style={{ fontSize: 9, lineHeight: 1.35, color: "rgba(255,255,255,0.7)" }}>
                         {tip.detail}

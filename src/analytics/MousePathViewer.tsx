@@ -162,9 +162,19 @@ function drawPath(
   }
 
   const showFull = playHeadFraction < 0;
-  const count    = showFull
-    ? pts.length
-    : Math.max(2, Math.floor(playHeadFraction * pts.length));
+  const count = (() => {
+    if (showFull) return pts.length;
+    if (pts.length <= 2) return pts.length;
+    if (playbackMs <= pts[0].timestamp_ms) return 2;
+    let lo = 0;
+    let hi = pts.length - 1;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi + 1) / 2);
+      if (pts[mid].timestamp_ms <= playbackMs) lo = mid;
+      else hi = mid - 1;
+    }
+    return Math.max(2, Math.min(pts.length, lo + 1));
+  })();
 
   const CW = canvas.width;
   const CH = canvas.height;
@@ -395,6 +405,33 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef   = useRef<number | null>(null);
 
+  const replayStartMs = useMemo(() => {
+    let start = Number.POSITIVE_INFINITY;
+    if (rawPositions.length > 0) {
+      start = Math.min(start, rawPositions[0].timestamp_ms);
+    }
+    if (screenFrames.length > 0) {
+      start = Math.min(start, screenFrames[0].timestamp_ms);
+    }
+    return Number.isFinite(start) ? start : 0;
+  }, [rawPositions, screenFrames]);
+
+  const positions = useMemo(
+    () => rawPositions.map((point) => ({
+      ...point,
+      timestamp_ms: Math.max(0, point.timestamp_ms - replayStartMs),
+    })),
+    [rawPositions, replayStartMs],
+  );
+
+  const frames = useMemo(
+    () => screenFrames.map((frame) => ({
+      ...frame,
+      timestamp_ms: Math.max(0, frame.timestamp_ms - replayStartMs),
+    })),
+    [screenFrames, replayStartMs],
+  );
+
   const [isPlaying,    setIsPlaying]    = useState(false);
   const [playbackMs,   setPlaybackMs]   = useState(0);
   const [speed,        setSpeed]        = useState(1);
@@ -403,13 +440,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
   const [bgOpacity,    setBgOpacity]    = useState(0.5);
   const [viewportW,    setViewportW]    = useState(960);
 
-  const hasVideo = screenFrames.length > 0;
+  const hasVideo = frames.length > 0;
 
-  const durationMs = rawPositions.length > 0
-    ? rawPositions[rawPositions.length - 1].timestamp_ms
+  const lastPositionMs = positions.length > 0
+    ? positions[positions.length - 1].timestamp_ms
     : 0;
+  const lastFrameMs = frames.length > 0
+    ? frames[frames.length - 1].timestamp_ms
+    : 0;
+  const durationMs = Math.max(lastPositionMs, lastFrameMs);
 
-  const overshoots = useCallback(() => detectOvershoots(rawPositions), [rawPositions])();
+  const overshoots = useCallback(() => detectOvershoots(positions), [positions])();
   const suggestion = useCallback(
     () => computeSensitivitySuggestion(metricPoints),
     [metricPoints],
@@ -418,15 +459,15 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
   // Nearest game recording frame for the current playback position
   const currentFrameSrc = useMemo<string | null>(() => {
     if (!hasVideo || showFull) return null;
-    const idx = nearestFrameIdx(screenFrames, playbackMs);
-    return `data:image/jpeg;base64,${screenFrames[idx].jpeg_b64}`;
-  }, [screenFrames, playbackMs, showFull, hasVideo]);
+    const idx = nearestFrameIdx(frames, playbackMs);
+    return `data:image/jpeg;base64,${frames[idx].jpeg_b64}`;
+  }, [frames, playbackMs, showFull, hasVideo]);
 
   // ── Redraw on state change ────────────────────────────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (rawPositions.length < 2) {
+    if (positions.length < 2) {
       const ctx = canvas.getContext("2d");
       ctx?.clearRect(0, 0, canvas.width, canvas.height);
       return;
@@ -436,8 +477,8 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
       : durationMs > 0
         ? Math.min(1, playbackMs / durationMs)
         : -1;
-    drawPath(canvas, rawPositions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW);
-  }, [rawPositions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW]);
+    drawPath(canvas, positions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW);
+  }, [positions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW]);
 
   // ── Playback loop ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -496,7 +537,7 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
   const formatMs = (ms: number) =>
     `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}.${String(Math.floor((ms % 1000) / 100)).padStart(1, "0")}`;
 
-  if (rawPositions.length < 2) {
+  if (positions.length < 2) {
     return (
       <div
         className="rounded-xl p-4 mb-4"
@@ -543,18 +584,23 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             {/* Stat pills */}
             {hasVideo && (
               <span style={{ color: "rgba(0,245,160,0.7)" }}>
-                ● {screenFrames.length} frames
+                ● {frames.length} frames
+              </span>
+            )}
+            {!hasVideo && (
+              <span style={{ color: "rgba(255,120,120,0.7)" }}>
+                ● no video frames
               </span>
             )}
             <span>
               <span style={{ color: "rgba(255,220,30,0.9)" }}>●</span>{" "}
-              {rawPositions.filter((p) => p.is_click).length} clicks
+              {positions.filter((p) => p.is_click).length} clicks
             </span>
             <span>
               <span style={{ color: "rgba(255,80,30,0.8)" }}>▲</span>{" "}
               {overshoots.length} overshoots
             </span>
-            <span>{rawPositions.length.toLocaleString()} samples</span>
+            <span>{positions.length.toLocaleString()} samples</span>
           </div>
         </div>
 

@@ -7,6 +7,7 @@ import { StatsHUD } from "./overlay/StatsHUD";
 import { LiveFeedbackToast } from "./overlay/LiveFeedbackToast";
 import { DraggableHUD } from "./overlay/DraggableHUD";
 import { PostSessionOverview } from "./overlay/PostSessionOverview";
+import type { StatsPanelReading } from "./types/overlay";
 import type { AppSettings } from "./types/settings";
 import "./index.css";
 
@@ -16,6 +17,10 @@ const Settings = lazy(() =>
 );
 
 type Mode = "overlay" | "settings" | "layout";
+interface BridgeMetricEvent {
+  ev: string;
+  field?: string | null;
+}
 
 export default function App() {
   const [mode, setMode] = useState<Mode>("overlay");
@@ -75,12 +80,36 @@ export default function App() {
     return () => { unlisten.then(fn => fn()); };
   }, []);
 
-  // Track current scenario name for VS Mode comparison
+  // Track current scenario name for VS Mode comparison from live bridge/stats events.
   useEffect(() => {
-    const unlisten = listen<{ scenario: string }>("session-complete", (e) => {
-      setCurrentScenario(e.payload.scenario);
+    const applyScenario = (name: string | null | undefined) => {
+      const normalized = name?.trim();
+      if (!normalized) return;
+      setCurrentScenario(normalized);
+    };
+
+    const unlistenSessionStart = listen<void>("session-start", () => {
+      // Avoid pinning stale scenario from the previous run.
+      setCurrentScenario(null);
     });
-    return () => { unlisten.then(fn => fn()); };
+    const unlistenSessionComplete = listen<{ scenario: string }>("session-complete", (e) => {
+      applyScenario(e.payload.scenario);
+    });
+    const unlistenStatsPanel = listen<StatsPanelReading>("stats-panel-update", (e) => {
+      applyScenario(e.payload.scenario_name);
+    });
+    const unlistenBridgeMetric = listen<BridgeMetricEvent>("bridge-metric", (e) => {
+      if (e.payload.ev === "scenario_name") {
+        applyScenario(e.payload.field);
+      }
+    });
+
+    return () => {
+      unlistenSessionStart.then((fn) => fn());
+      unlistenSessionComplete.then((fn) => fn());
+      unlistenStatsPanel.then((fn) => fn());
+      unlistenBridgeMetric.then((fn) => fn());
+    };
   }, []);
 
   // Manage mouse click-through: active in overlay mode

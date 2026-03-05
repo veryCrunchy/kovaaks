@@ -4,7 +4,11 @@ import { listen } from "@tauri-apps/api/event";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
 import { DebugTab } from "./DebugTab";
 import { MousePathViewer } from "./MousePathViewer";
-import type { RawPositionPoint, MetricPoint, ScreenFrame } from "../types/mouse";
+import type {
+  ReplayData,
+  BridgeRunSnapshot,
+  BridgeRunTimelinePoint,
+} from "../types/mouse";
 import {
   LineChart,
   Line,
@@ -52,6 +56,14 @@ interface StatsPanelSnapshot {
   accuracy_trend: number | null;
 }
 
+interface ShotTimingSnapshot {
+  paired_shot_hits: number;
+  avg_fire_to_hit_ms: number | null;
+  p90_fire_to_hit_ms: number | null;
+  avg_shots_to_hit: number | null;
+  corrective_shot_ratio: number | null;
+}
+
 interface SessionRecord {
   id: string;
   scenario: string;
@@ -63,13 +75,8 @@ interface SessionRecord {
   timestamp: string;
   smoothness: SmoothnessSnapshot | null;
   stats_panel: StatsPanelSnapshot | null;
+  shot_timing?: ShotTimingSnapshot | null;
   has_replay: boolean;
-}
-
-interface ReplayData {
-  positions: RawPositionPoint[];
-  metrics: MetricPoint[];
-  frames?: ScreenFrame[];
 }
 
 interface BridgeParsedEvent {
@@ -195,6 +202,244 @@ function percentileOf(sortedArr: number[], p: number): number {
   if (!sortedArr.length) return 0;
   const idx = Math.max(0, Math.ceil((sortedArr.length * p) / 100) - 1);
   return sortedArr[idx];
+}
+
+interface RunMomentInsight {
+  id: string;
+  level: "good" | "tip" | "warning";
+  title: string;
+  detail: string;
+  metric: "spm" | "accuracy" | "kps" | "damage_eff";
+  startSec: number;
+  endSec: number;
+}
+
+function runAvg(values: number[]): number | null {
+  if (values.length === 0) return null;
+  return values.reduce((sum, val) => sum + val, 0) / values.length;
+}
+
+function runValuesInRange(
+  points: BridgeRunTimelinePoint[],
+  startSec: number,
+  endSec: number,
+  pick: (point: BridgeRunTimelinePoint) => number | null,
+): number[] {
+  return points
+    .filter((point) => point.t_sec >= startSec && point.t_sec <= endSec)
+    .map(pick)
+    .filter((val): val is number => val != null && Number.isFinite(val));
+}
+
+interface RunWindowShotStats {
+  shotsFired: number;
+  shotsHit: number;
+  hitRatePct: number;
+  shotsPerHit: number;
+}
+
+function runShotStatsInRange(
+  points: BridgeRunTimelinePoint[],
+  startSec: number,
+  endSec: number,
+): RunWindowShotStats | null {
+  const window = points.filter((point) => point.t_sec >= startSec && point.t_sec <= endSec);
+  if (window.length < 2) return null;
+
+  const firedVals = window
+    .map((point) => point.shots_fired)
+    .filter((val): val is number => val != null && Number.isFinite(val));
+  const hitVals = window
+    .map((point) => point.shots_hit)
+    .filter((val): val is number => val != null && Number.isFinite(val));
+
+  if (firedVals.length < 2 || hitVals.length < 2) return null;
+
+  const shotsFired = Math.max(0, Math.max(...firedVals) - Math.min(...firedVals));
+  const shotsHit = Math.max(0, Math.max(...hitVals) - Math.min(...hitVals));
+  if (shotsFired < 6) return null;
+
+  const hitRatePct = shotsFired > 0 ? (shotsHit / shotsFired) * 100 : 0;
+  const shotsPerHit = shotsHit > 0 ? shotsFired / shotsHit : shotsFired;
+
+  return {
+    shotsFired,
+    shotsHit,
+    hitRatePct,
+    shotsPerHit,
+  };
+}
+
+function buildRunMomentInsights(
+  points: BridgeRunTimelinePoint[],
+  durationSecs: number | null | undefined,
+): RunMomentInsight[] {
+  if (points.length < 4) return [];
+  const totalSecs = Math.max(1, Math.round(durationSecs ?? points[points.length - 1].t_sec));
+
+  const earlyStart = 0;
+  const earlyEnd = Math.max(1, Math.floor(totalSecs / 3));
+  const lateStart = Math.max(0, Math.floor((totalSecs * 2) / 3));
+  const lateEnd = totalSecs;
+
+  const earlySpm = runAvg(runValuesInRange(points, earlyStart, earlyEnd, (p) => p.score_per_minute));
+  const lateSpm = runAvg(runValuesInRange(points, lateStart, lateEnd, (p) => p.score_per_minute));
+  const earlyAcc = runAvg(runValuesInRange(points, earlyStart, earlyEnd, (p) => p.accuracy_pct));
+  const lateAcc = runAvg(runValuesInRange(points, lateStart, lateEnd, (p) => p.accuracy_pct));
+  const earlyShotStats = runShotStatsInRange(points, earlyStart, earlyEnd);
+  const lateShotStats = runShotStatsInRange(points, lateStart, lateEnd);
+
+  const midStart = earlyEnd;
+  const midEnd = Math.max(midStart + 1, lateStart);
+  const thirds = [
+    { label: "opening", startSec: earlyStart, endSec: earlyEnd },
+    { label: "mid-run", startSec: midStart, endSec: midEnd },
+    { label: "closing", startSec: lateStart, endSec: lateEnd },
+  ]
+    .map((window) => ({
+      ...window,
+      stats: runShotStatsInRange(points, window.startSec, window.endSec),
+    }))
+    .filter((window) => window.stats != null) as Array<{
+    label: string;
+    startSec: number;
+    endSec: number;
+    stats: RunWindowShotStats;
+  }>;
+
+  const peakSpmPoint = points
+    .filter((p) => p.score_per_minute != null)
+    .reduce<BridgeRunTimelinePoint | null>((best, curr) => {
+      if (curr.score_per_minute == null) return best;
+      if (!best || best.score_per_minute == null) return curr;
+      return curr.score_per_minute > best.score_per_minute ? curr : best;
+    }, null);
+
+  const minAccPoint = points
+    .filter((p) => p.accuracy_pct != null)
+    .reduce<BridgeRunTimelinePoint | null>((worst, curr) => {
+      if (curr.accuracy_pct == null) return worst;
+      if (!worst || worst.accuracy_pct == null) return curr;
+      return curr.accuracy_pct < worst.accuracy_pct ? curr : worst;
+    }, null);
+
+  const moments: RunMomentInsight[] = [];
+
+  if (
+    earlySpm != null
+    && lateSpm != null
+    && earlySpm > 0
+    && (earlySpm - lateSpm) / earlySpm > 0.12
+  ) {
+    const accDelta = earlyAcc != null && lateAcc != null ? lateAcc - earlyAcc : null;
+    const improvedAccuracy = accDelta != null && accDelta >= 2.5;
+
+    moments.push({
+      id: "moment-late-spm-fade",
+      level: improvedAccuracy ? "tip" : "warning",
+      title: improvedAccuracy ? "Speed→Accuracy Trade-off Late" : "Late-Run Pace Drop",
+      detail: improvedAccuracy
+        ? `Pace fell from ${Math.round(earlySpm)} to ${Math.round(lateSpm)} SPM while accuracy improved by ${accDelta!.toFixed(1)}%. Keep this control and add pace back gradually.`
+        : `Pace fell from ${Math.round(earlySpm)} to ${Math.round(lateSpm)} SPM in the final third without a meaningful accuracy gain.`,
+      metric: "spm",
+      startSec: lateStart,
+      endSec: lateEnd,
+    });
+  }
+
+  if (earlyAcc != null && lateAcc != null && lateAcc - earlyAcc >= 3) {
+    moments.push({
+      id: "moment-accuracy-build",
+      level: "good",
+      title: "Accuracy Stabilized",
+      detail:
+        earlyShotStats && lateShotStats
+          ? `Accuracy improved ${earlyAcc.toFixed(1)}% → ${lateAcc.toFixed(1)}%, and shots-per-hit improved ${earlyShotStats.shotsPerHit.toFixed(2)} → ${lateShotStats.shotsPerHit.toFixed(2)}.`
+          : `Accuracy improved from ${earlyAcc.toFixed(1)}% to ${lateAcc.toFixed(1)}% late-run.`,
+      metric: "accuracy",
+      startSec: lateStart,
+      endSec: lateEnd,
+    });
+  }
+
+  if (thirds.length > 0) {
+    const worstCorrectionWindow = [...thirds]
+      .sort((a, b) => b.stats.shotsPerHit - a.stats.shotsPerHit)[0];
+
+    if (worstCorrectionWindow.stats.shotsPerHit >= 1.6) {
+      moments.push({
+        id: "moment-correction-window",
+        level: worstCorrectionWindow.stats.shotsPerHit >= 2.0 ? "warning" : "tip",
+        title: "Correction-Heavy Window",
+        detail: `${worstCorrectionWindow.label} needed ${worstCorrectionWindow.stats.shotsPerHit.toFixed(2)} shots per hit (${worstCorrectionWindow.stats.hitRatePct.toFixed(0)}% hit conversion).`,
+        metric: "damage_eff",
+        startSec: worstCorrectionWindow.startSec,
+        endSec: worstCorrectionWindow.endSec,
+      });
+    }
+  }
+
+  if (peakSpmPoint?.score_per_minute != null) {
+    moments.push({
+      id: "moment-peak-spm",
+      level: "good",
+      title: "Peak Tempo Window",
+      detail:
+        peakSpmPoint.accuracy_pct != null
+          ? `Best pace reached ${Math.round(peakSpmPoint.score_per_minute)} SPM at ${Math.round(peakSpmPoint.t_sec)}s with ${peakSpmPoint.accuracy_pct.toFixed(1)}% accuracy.`
+          : `Best pace reached ${Math.round(peakSpmPoint.score_per_minute)} SPM at ${Math.round(peakSpmPoint.t_sec)}s.`,
+      metric: "spm",
+      startSec: Math.max(0, peakSpmPoint.t_sec - 4),
+      endSec: Math.min(totalSecs, peakSpmPoint.t_sec + 4),
+    });
+  }
+
+  if (minAccPoint?.accuracy_pct != null && minAccPoint.accuracy_pct < 78) {
+    moments.push({
+      id: "moment-low-accuracy",
+      level: "tip",
+      title: "Low Accuracy Pocket",
+      detail: `Lowest point reached ${minAccPoint.accuracy_pct.toFixed(1)}% accuracy around ${Math.round(minAccPoint.t_sec)}s.`,
+      metric: "accuracy",
+      startSec: Math.max(0, minAccPoint.t_sec - 4),
+      endSec: Math.min(totalSecs, minAccPoint.t_sec + 4),
+    });
+  }
+
+  const levelRank: Record<RunMomentInsight["level"], number> = {
+    warning: 0,
+    tip: 1,
+    good: 2,
+  };
+
+  return moments
+    .sort((a, b) => levelRank[a.level] - levelRank[b.level])
+    .slice(0, 4);
+}
+
+function formatRunWindow(startSec: number, endSec: number): string {
+  const start = Math.max(0, Math.round(startSec));
+  const end = Math.max(start, Math.round(endSec));
+  return `${start}s–${end}s`;
+}
+
+function runMomentAction(moment: RunMomentInsight): string {
+  switch (moment.id) {
+    case "moment-late-spm-fade":
+      return moment.level === "warning"
+        ? "Do 3 reps where you hold your opening rhythm into the final third before trying to push speed."
+        : "Keep this late-run control, then add pace back in 3–5% steps while preserving conversion.";
+    case "moment-correction-window":
+      return "Run this window at ~90% speed and focus on first-shot placement; only speed up after conversion stabilizes.";
+    case "moment-low-accuracy":
+      return "Pre-aim one target ahead in this window and delay the click slightly until the cursor is settled.";
+    case "moment-accuracy-build":
+      return "Use your opening pace for the first 5s, then apply this same settled timing earlier in the run.";
+    case "moment-peak-spm":
+      return "Anchor your rhythm to this window and repeat it across adjacent segments instead of short bursts.";
+    default:
+      return "Replay this window for 3 focused reps and change only one variable (speed, confirmation timing, or target switch plan).";
+  }
 }
 
 // ─── Warmup detection ─────────────────────────────────────────────────────────
@@ -379,6 +624,7 @@ interface Insight {
 function detectInsights(records: SessionRecord[]): Insight[] {
   const smoothRecords = records.filter((r) => r.smoothness !== null);
   const panelRecords  = records.filter((r) => r.stats_panel !== null);
+  const shotTimingRecords = records.filter((r) => r.shot_timing != null);
   const insights: Insight[] = [];
 
   // Derive scenario type from the most recent panel record that has one
@@ -426,7 +672,7 @@ function detectInsights(records: SessionRecord[]): Insight[] {
     else if (composite < 40)
       insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Movement needs work", description: `Overall smoothness ${composite.toFixed(1)}/100. ${smoothHighIssueCtx}` });
     else if (composite < 60)
-      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Smoothness has room to grow", description: `Overall smoothness ${composite.toFixed(1)}/100. Slow, deliberate practice builds the muscle memory for more consistent ${isTracking ? "tracking" : "aim"}.` });
+      insights.push({ kind: "issue", severity: "medium", category: "mouse", title: "Smoothness has room to grow", description: `Overall smoothness ${composite.toFixed(1)}/100. Use short 5–8 minute blocks at ~90% speed and prioritize cleaner ${isTracking ? "tracking lines" : "first-shot paths"}.` });
 
     // Jitter / wobble
     const jitterHighCtx = isTracking
@@ -444,27 +690,112 @@ function detectInsights(records: SessionRecord[]): Insight[] {
     else if (jitter < 0.15)
       insights.push({ kind: "positive", category: "mouse", title: "Rock-steady aim", description: `Very low wobble${isTracking ? " — cursor stays glued to the target with almost no lateral drift" : " — clean, shake-free aim line"}.` });
 
-    // Overshoot
-    const overshootHighCtx = isOneShot
-      ? "You're shooting past the target on most flicks — each overshoot costs a kill. Practice slowing down right before you arrive so the cursor lands on target, not past it."
-      : isReactive
-      ? "Overshooting adds time before you can fire — your cursor has to come back. Practice braking into the target zone rather than snapping straight through it."
-      : "You regularly overshoot targets after flicking. Try deceleration drills — flick 80% of the way then let momentum carry you the rest.";
+    // Overshoot / correction: prefer shot-anchored metrics when available.
+    if (!isTracking && shotTimingRecords.length >= 2) {
+      const shotVals = shotTimingRecords
+        .map((r) => r.shot_timing?.avg_shots_to_hit)
+        .filter((v): v is number => v != null && Number.isFinite(v));
+      const correctiveVals = shotTimingRecords
+        .map((r) => r.shot_timing?.corrective_shot_ratio)
+        .filter((v): v is number => v != null && Number.isFinite(v));
+      const latencyVals = shotTimingRecords
+        .map((r) => r.shot_timing?.avg_fire_to_hit_ms)
+        .filter((v): v is number => v != null && Number.isFinite(v));
 
-    const overshootLowCtx = isOneShot
-      ? "Slight overshoot on some flicks. A little more braking right before the target will improve your first-shot accuracy."
-      : "Slight overshoot on some movements. Practice stopping cleanly at the target instead of correcting back.";
+      const avgShotsToHit = shotVals.length > 0 ? mean(shotVals) : null;
+      const avgCorrectiveRatio = correctiveVals.length > 0 ? mean(correctiveVals) : null;
+      const avgFireToHitMs = latencyVals.length > 0 ? mean(latencyVals) : null;
 
-    const overshootGoodCtx = isOneShot
-      ? "flicks land on target on the first try — no wasted bullet"
-      : "flicks land accurately without drifting past";
+      const hasShotsToHit = avgShotsToHit != null;
+      const hasCorrective = avgCorrectiveRatio != null;
+      const hasLatency = avgFireToHitMs != null;
 
-    if (overshoot > 0.4)
-      insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Overshooting often", description: overshootHighCtx });
-    else if (overshoot > 0.2)
-      insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Slight overshoot", description: overshootLowCtx });
-    else if (overshoot < 0.1)
-      insights.push({ kind: "positive", category: "mouse", title: "Clean, precise flicks", description: `Very low overshoot — ${overshootGoodCtx}.` });
+      if (!hasShotsToHit && !hasCorrective && !hasLatency) {
+        // No usable shot-timing values yet — fall back to movement heuristic below.
+      } else {
+
+        const severeCorrection = (hasShotsToHit && avgShotsToHit > 1.75)
+          || (hasCorrective && avgCorrectiveRatio > 0.48)
+          || (hasLatency && avgFireToHitMs > 320);
+        const mildCorrection = (hasShotsToHit && avgShotsToHit > 1.35)
+          || (hasCorrective && avgCorrectiveRatio > 0.28)
+          || (hasLatency && avgFireToHitMs > 220);
+
+        if (severeCorrection) {
+          insights.push({
+            kind: "issue",
+            severity: "high",
+            category: "mouse",
+            title: "High post-shot correction",
+            description: `Shot recovery is heavy (${avgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${avgCorrectiveRatio != null ? `${(avgCorrectiveRatio * 100).toFixed(0)}%` : "—"} corrective hits, ${avgFireToHitMs?.toFixed(0) ?? "—"}ms fired→hit). Prioritize first-shot placement, then add pace.`,
+          });
+        } else if (mildCorrection) {
+          insights.push({
+            kind: "issue",
+            severity: "low",
+            category: "mouse",
+            title: "Moderate post-shot correction",
+            description: `Some shots still need recovery (${avgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${avgCorrectiveRatio != null ? `${(avgCorrectiveRatio * 100).toFixed(0)}%` : "—"} corrective hits). Stabilize first-shot conversion before pushing speed.`,
+          });
+        } else {
+          insights.push({
+            kind: "positive",
+            category: "mouse",
+            title: "Clean first-shot conversion",
+            description: `Shot timing is efficient (${avgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${avgCorrectiveRatio != null ? `${(avgCorrectiveRatio * 100).toFixed(0)}%` : "—"} corrective hits, ${avgFireToHitMs?.toFixed(0) ?? "—"}ms fired→hit).`,
+          });
+        }
+        // Skip heuristic overshoot logic when direct shot timing is available.
+        // Continue with remaining insights.
+        
+        
+      }
+      if (hasShotsToHit || hasCorrective || hasLatency) {
+        // already handled via shot-anchored logic
+      } else {
+        const overshootHighCtx = isOneShot
+          ? "You’re passing through targets on many flicks. Decelerate slightly in the last stretch so first shots land on target."
+          : isReactive
+          ? "Overshooting adds recovery time before you can fire. Brake into the target zone instead of snapping through it."
+          : "You regularly overshoot targets after flicks. Use controlled deceleration reps and focus on clean stops.";
+
+        const overshootLowCtx = isOneShot
+          ? "Slight overshoot on some flicks. A little more braking right before the target will improve your first-shot accuracy."
+          : "Slight overshoot on some movements. Practice stopping cleanly at the target instead of correcting back.";
+
+        const overshootGoodCtx = isOneShot
+          ? "flicks land on target on the first try — no wasted bullet"
+          : "flicks land accurately without drifting past";
+
+        if (overshoot > 0.4)
+          insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Overshooting often", description: overshootHighCtx });
+        else if (overshoot > 0.2)
+          insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Slight overshoot", description: overshootLowCtx });
+        else if (overshoot < 0.1)
+          insights.push({ kind: "positive", category: "mouse", title: "Clean, precise flicks", description: `Very low overshoot — ${overshootGoodCtx}.` });
+      }
+    } else {
+      const overshootHighCtx = isOneShot
+        ? "You’re passing through targets on many flicks. Decelerate slightly in the last stretch so first shots land on target."
+        : isReactive
+        ? "Overshooting adds recovery time before you can fire. Brake into the target zone instead of snapping through it."
+        : "You regularly overshoot targets after flicks. Use controlled deceleration reps and focus on clean stops.";
+
+      const overshootLowCtx = isOneShot
+        ? "Slight overshoot on some flicks. A little more braking right before the target will improve your first-shot accuracy."
+        : "Slight overshoot on some movements. Practice stopping cleanly at the target instead of correcting back.";
+
+      const overshootGoodCtx = isOneShot
+        ? "flicks land on target on the first try — no wasted bullet"
+        : "flicks land accurately without drifting past";
+
+      if (overshoot > 0.4)
+        insights.push({ kind: "issue", severity: "high", category: "mouse", title: "Overshooting often", description: overshootHighCtx });
+      else if (overshoot > 0.2)
+        insights.push({ kind: "issue", severity: "low", category: "mouse", title: "Slight overshoot", description: overshootLowCtx });
+      else if (overshoot < 0.1)
+        insights.push({ kind: "positive", category: "mouse", title: "Clean, precise flicks", description: `Very low overshoot — ${overshootGoodCtx}.` });
+    }
 
     // Path quality
     const pathHighIssueCtx = isTracking
@@ -1616,6 +1947,59 @@ function ReplayTab({
   }, [replayRecords]);
 
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
+  const runSnapshot: BridgeRunSnapshot | null = replayData?.run_snapshot ?? null;
+  const selectedShotTiming = selectedRecord?.shot_timing ?? null;
+  const runTimeline = useMemo(() => runSnapshot?.timeline ?? [], [runSnapshot]);
+  const hasRunTimelineSignal = useMemo(
+    () => runTimeline.some((point) =>
+      point.score_per_minute != null
+      || point.kills_per_second != null
+      || point.accuracy_pct != null
+      || point.damage_efficiency != null,
+    ),
+    [runTimeline],
+  );
+  const runMoments = useMemo(
+    () => buildRunMomentInsights(runTimeline, runSnapshot?.duration_secs),
+    [runTimeline, runSnapshot?.duration_secs],
+  );
+  const runChartData = useMemo(
+    () => runTimeline.map((point) => ({
+      tSec: point.t_sec,
+      spm: point.score_per_minute,
+      kps: point.kills_per_second,
+      acc: point.accuracy_pct,
+      dmgEff: point.damage_efficiency,
+    })),
+    [runTimeline],
+  );
+  const runAccuracy =
+    runSnapshot?.accuracy_pct
+    ?? (
+      runSnapshot?.shots_fired != null
+      && runSnapshot.shots_fired > 0
+      && runSnapshot.shots_hit != null
+      ? (runSnapshot.shots_hit / runSnapshot.shots_fired) * 100
+      : null
+    )
+    ?? (selectedRecord && selectedRecord.accuracy > 0 ? selectedRecord.accuracy * 100 : null);
+  const runDurationSecs = runSnapshot?.duration_secs ?? selectedRecord?.duration_secs ?? null;
+  const runShotsToHit = runSnapshot?.avg_shots_to_hit ?? selectedShotTiming?.avg_shots_to_hit ?? null;
+  const runCorrectiveRatio = runSnapshot?.corrective_shot_ratio ?? selectedShotTiming?.corrective_shot_ratio ?? null;
+  const runFireToHitMs = runSnapshot?.avg_fire_to_hit_ms ?? selectedShotTiming?.avg_fire_to_hit_ms ?? null;
+  const runFireToHitP90Ms = runSnapshot?.p90_fire_to_hit_ms ?? selectedShotTiming?.p90_fire_to_hit_ms ?? null;
+  const runDamageEff =
+    runSnapshot?.damage_efficiency
+    ?? (
+      runSnapshot?.damage_possible != null
+      && runSnapshot.damage_possible > 0
+      && runSnapshot.damage_done != null
+      ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
+      : null
+    );
+  const replayCapturedSecs = replayData?.positions.length
+    ? Math.max(0, replayData.positions[replayData.positions.length - 1].timestamp_ms / 1000)
+    : 0;
 
   // Worst-moment clips removed — full interactive viewer is shown instead
 
@@ -1706,6 +2090,184 @@ function ReplayTab({
       {/* Mouse path viewer */}
       {loading && (
         <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 12 }}>Loading replay…</div>
+      )}
+      {!loading && runSnapshot && selectedRecord && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+          <div style={CHART_STYLE}>
+            <SectionTitle>Bridge run stats (persisted)</SectionTitle>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              <StatCard
+                label="Duration"
+                value={runDurationSecs != null ? fmtDuration(runDurationSecs) : "—"}
+                accent="#00b4ff"
+              />
+              <StatCard
+                label="SPM"
+                value={runSnapshot.score_per_minute != null ? runSnapshot.score_per_minute.toFixed(0) : "—"}
+                sub={runSnapshot.peak_score_per_minute != null ? `peak ${runSnapshot.peak_score_per_minute.toFixed(0)}` : undefined}
+                accent="#00f5a0"
+              />
+              <StatCard
+                label="Accuracy"
+                value={runAccuracy != null ? `${runAccuracy.toFixed(1)}%` : "—"}
+                accent="#ffd700"
+              />
+              <StatCard
+                label="Damage Eff"
+                value={runDamageEff != null ? `${runDamageEff.toFixed(1)}%` : "—"}
+                accent="#a78bfa"
+              />
+              <StatCard
+                label="Shots / Hit"
+                value={runShotsToHit != null ? runShotsToHit.toFixed(2) : "—"}
+                sub={runCorrectiveRatio != null ? `${(runCorrectiveRatio * 100).toFixed(0)}% corrective` : undefined}
+                accent="#00b4ff"
+              />
+              <StatCard
+                label="Fire→Hit"
+                value={runFireToHitMs != null ? `${runFireToHitMs.toFixed(0)}ms` : "—"}
+                sub={runFireToHitP90Ms != null ? `p90 ${runFireToHitP90Ms.toFixed(0)}ms` : undefined}
+                accent="#ff9f43"
+              />
+            </div>
+            {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
+              <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
+                Per-second bridge timeline data is sparse for this run. Aggregate values above are shown from available session data.
+              </div>
+            )}
+          </div>
+
+          {runChartData.length > 1 && hasRunTimelineSignal && (
+            <div style={CHART_STYLE}>
+              <SectionTitle>Timeline by second (exact run windows)</SectionTitle>
+              <ResponsiveContainer width="100%" height={200}>
+                <LineChart data={runChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                  <XAxis
+                    dataKey="tSec"
+                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    label={{ value: "seconds", position: "insideBottomRight", offset: -5, fill: "rgba(255,255,255,0.35)", fontSize: 10 }}
+                  />
+                  <YAxis
+                    yAxisId="pace"
+                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={42}
+                  />
+                  <YAxis
+                    yAxisId="pct"
+                    orientation="right"
+                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={42}
+                    domain={[0, 100]}
+                  />
+                  <Tooltip content={<MiniTooltip />} />
+                  {runMoments.map((moment) => (
+                    <ReferenceArea
+                      key={moment.id}
+                      x1={moment.startSec}
+                      x2={moment.endSec}
+                      fill={moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166"}
+                      fillOpacity={0.08}
+                      strokeOpacity={0}
+                    />
+                  ))}
+                  <Line
+                    yAxisId="pace"
+                    type="monotone"
+                    dataKey="spm"
+                    name="SPM"
+                    stroke="#00f5a0"
+                    strokeWidth={2}
+                    dot={false}
+                    connectNulls
+                  />
+                  <Line
+                    yAxisId="pace"
+                    type="monotone"
+                    dataKey="kps"
+                    name="KPS"
+                    stroke="#00b4ff"
+                    strokeWidth={1.7}
+                    strokeDasharray="4 3"
+                    dot={false}
+                    connectNulls
+                  />
+                  <Line
+                    yAxisId="pct"
+                    type="monotone"
+                    dataKey="acc"
+                    name="Accuracy %"
+                    stroke="#ffd700"
+                    strokeWidth={1.8}
+                    dot={false}
+                    connectNulls
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+
+          {(runDurationSecs != null && replayCapturedSecs > 0 && runDurationSecs - replayCapturedSecs > 8) && (
+            <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.62)", fontSize: 12, lineHeight: 1.6 }}>
+              Replay capture started late for this run ({Math.round(replayCapturedSecs)}s captured of {Math.round(runDurationSecs)}s total). This can happen if session tracking started after initial combat events.
+            </div>
+          )}
+
+          {(replayData?.frames?.length ?? 0) === 0 && (
+            <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.52)", fontSize: 12, lineHeight: 1.6 }}>
+              No video frames were saved for this replay.
+            </div>
+          )}
+
+          {runMoments.length > 0 && (
+            <div style={CHART_STYLE}>
+              <SectionTitle>Moment coaching (time-specific)</SectionTitle>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {runMoments.map((moment) => (
+                  <div
+                    key={moment.id}
+                    style={{
+                      background: "rgba(255,255,255,0.03)",
+                      border: "1px solid rgba(255,255,255,0.08)",
+                      borderRadius: 8,
+                      padding: "10px 12px",
+                      display: "flex",
+                      flexDirection: "column",
+                      gap: 6,
+                    }}
+                  >
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                      <div style={{ fontWeight: 700, color: moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166" }}>
+                        {moment.title}
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                        {formatRunWindow(moment.startSec, moment.endSec)}
+                      </div>
+                    </div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.55 }}>
+                      {moment.detail}
+                    </div>
+                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.55 }}>
+                      <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
+                      {runMomentAction(moment)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+      {!loading && replayData && selectedRecord && !runSnapshot && (
+        <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.42)", fontSize: 12, lineHeight: 1.6 }}>
+          This replay was saved before bridge timeline persistence was added, so only mouse path data is available.
+        </div>
       )}
       {!loading && replayData && selectedRecord && (
         <div style={CHART_STYLE}>
@@ -1926,8 +2488,25 @@ function generateCoachingCards(
 ): CoachingCardData[] {
   const cards: CoachingCardData[] = [];
   const panelRecords = records.filter((r) => r.stats_panel != null);
+  const shotTimingRecords = records.filter((r) => r.shot_timing != null);
   const n = sorted.length;
   const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+
+  const shotToHitVals = shotTimingRecords
+    .map((r) => r.shot_timing?.avg_shots_to_hit)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const correctiveVals = shotTimingRecords
+    .map((r) => r.shot_timing?.corrective_shot_ratio)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const fireToHitVals = shotTimingRecords
+    .map((r) => r.shot_timing?.avg_fire_to_hit_ms)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const shotAvgShotsToHit = shotToHitVals.length > 0 ? mean(shotToHitVals) : null;
+  const shotAvgCorrective = correctiveVals.length > 0 ? mean(correctiveVals) : null;
+  const shotAvgFireToHit = fireToHitVals.length > 0 ? mean(fireToHitVals) : null;
+  const hasShotRecoverySignal = !isTracking
+    && shotTimingRecords.length >= 3
+    && (shotAvgShotsToHit != null || shotAvgCorrective != null || shotAvgFireToHit != null);
 
   if (isPlateau)
     cards.push({
@@ -1968,7 +2547,42 @@ function generateCoachingCards(
       });
   }
 
-  if (fingerprint && fingerprint.control < 45 && n >= 5) {
+  if (hasShotRecoverySignal) {
+    const severe = (shotAvgShotsToHit != null && shotAvgShotsToHit > 1.75)
+      || (shotAvgCorrective != null && shotAvgCorrective > 0.48)
+      || (shotAvgFireToHit != null && shotAvgFireToHit > 320);
+    const mild = (shotAvgShotsToHit != null && shotAvgShotsToHit > 1.35)
+      || (shotAvgCorrective != null && shotAvgCorrective > 0.28)
+      || (shotAvgFireToHit != null && shotAvgFireToHit > 220);
+
+    if (severe) {
+      cards.push({
+        title: "Shot Recovery Bottleneck",
+        badge: "Shot Timing",
+        badgeColor: "#00b4ff",
+        body: `Your fired→hit data shows heavy recovery burden (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits, ${shotAvgFireToHit?.toFixed(0) ?? "—"}ms fired→hit). This is consistent with overflick + micro-correction before final confirmation.`,
+        tip: "Shift 10–15% focus from max flick speed to first-shot landing quality: brake earlier and fire once your crosshair settles. Track this card over sessions until shots/hit moves toward 1.2 or lower.",
+      });
+    } else if (mild) {
+      cards.push({
+        title: "Recoveries Still Costing Time",
+        badge: "Shot Timing",
+        badgeColor: "#00b4ff",
+        body: `Shot recovery is moderate (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits). Small overshoots are forcing extra correction before secure hits.`,
+        tip: "Use deceleration reps: finish flicks under control and prioritize first-shot confirmation, then add speed back gradually.",
+      });
+    } else {
+      cards.push({
+        title: "Strong First-Shot Conversion",
+        badge: "Shot Timing",
+        badgeColor: "#00f5a0",
+        body: `You convert efficiently after firing (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits, ${shotAvgFireToHit?.toFixed(0) ?? "—"}ms fired→hit).`,
+        tip: "Keep this while increasing pace. Maintain control on shot entry so first-shot quality stays stable at higher speed.",
+      });
+    }
+  }
+
+  if (!hasShotRecoverySignal && fingerprint && fingerprint.control < 45 && n >= 5) {
     if (isTracking)
       cards.push({
         title: "Overshooting Your Targets",
