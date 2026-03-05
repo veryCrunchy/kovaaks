@@ -119,8 +119,6 @@ mod bridge;
 mod file_watcher;
 mod kovaaks_api;
 mod logger;
-mod mem_debug;
-mod memory_reader;
 mod mouse_hook;
 mod replay_store;
 mod sapi;
@@ -1076,15 +1074,6 @@ pub fn run() {
             search_scenarios,
             get_leaderboard_page,
             get_scenario_details,
-            mem_debug::mem_read_watches,
-            mem_debug::mem_scan,
-            mem_debug::mem_scan_cancel,
-            mem_debug::mem_rescan,
-            mem_debug::mem_follow_chain,
-            mem_debug::mem_get_modules,
-            mem_debug::mem_ptr_scan,
-            mem_debug::mem_auto_chain_find,
-            mem_debug::mem_scan_struct,
             inject_bridge,
             ue4ss_get_recent_logs,
             ue4ss_trigger_hot_reload,
@@ -1140,26 +1129,22 @@ pub fn run() {
                 log::error!("Failed to deploy/inject UE4SS runtime: {e}");
             }
 
-            // Start window tracker — shows/hides overlay based on KovaaK's focus
-            window_tracker::start(app.handle().clone());
-
-            // Start live memory reader — polls KovaaK's process for kills / TTK
-            memory_reader::start(app.handle().clone());
-
             // Build system tray (Windows only)
             #[cfg(not(target_os = "linux"))]
             setup_tray(app)?;
 
-            // Position overlay on the saved monitor
-            apply_monitor(app.handle(), loaded.monitor_index);
-
-            // Overlay starts with mouse passthrough enabled
+            // Configure desktop overlay window and start focus tracking.
             if let Some(win) = app.get_webview_window("overlay") {
                 let _ = win.set_ignore_cursor_events(true);
                 // Force the window background to fully transparent so the DWM
                 // compositor does not tint or dim the game colours underneath.
                 let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                let _ = win.show();
             }
+            window_tracker::set_force_show(false);
+            window_tracker::start(app.handle().clone());
+            let initial_game_focus = window_tracker::is_game_focused();
+            log::info!("Window tracker started (initial game focus={initial_game_focus})");
 
             // Keep the stats window alive when the user clicks X so that its
             // session-complete listener remains registered.  Closing hides

@@ -4,62 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type ValueType = "i32" | "u32" | "i64" | "f32" | "f64" | "u8";
-type SubTab = "watches" | "scanner" | "ptrscan" | "chain" | "autochain" | "modules" | "ue4ss" | "objdebug" | "methodsrc";
-
-interface WatchEntry {
-  id: string;
-  label: string;
-  type: ValueType;
-  // Either raw address OR chain offsets (chain preferred — survives ASLR restarts)
-  addrHex?: string;
-  chain?: string; // space-separated offsets e.g. "4F5FBF0 0 9C8"
-  // runtime only
-  currentValue?: string;
-  currentAddr?: string;
-  readOk?: boolean;
-  error?: string;
-}
-
-interface ScanHit {
-  addr: string;
-  value: number;
-  module_rel: string | null;
-}
-
-interface ChainStep {
-  label: string;
-  addr: string;
-  ptr_value: string;
-  ok: boolean;
-}
-
-interface ChainResult {
-  steps: ChainStep[];
-  final_addr: string | null;
-  final_value: number | null;
-  ok: boolean;
-  error: string | null;
-}
-
-interface PtrScanHit {
-  addr: string;        // address where the pointer lives
-  ptr_value: string;   // the pointer value stored there
-  offset: number;      // target - ptr_value (offset into the pointed object)
-  module_rel: string | null; // module+0x... if static
-}
-
-interface StructScanHit {
-  offset: string;
-  addr: string;
-  value: number;
-}
-
-interface ModuleEntry {
-  name: string;
-  base: string;
-  size: number;
-}
+type SubTab = "ue4ss" | "objdebug" | "methodsrc";
 
 interface RuntimeFlags {
   profile: string;
@@ -130,6 +75,10 @@ interface BridgeParsedEvent {
   field?: string | null;
   source?: string | null;
   raw: string;
+}
+
+interface StatsPanelUpdatePayload {
+  queue_time_remaining?: number | null;
 }
 
 type TriBoolFilter = "any" | "on" | "off";
@@ -253,22 +202,7 @@ interface ObjectDebugSnapshot {
 
 // ─── Persistence ──────────────────────────────────────────────────────────────
 
-const STORAGE_KEY = "mem_debug_watches_v1";
 const OBJECT_DEBUG_PINNED_KEY = "object_debug_pinned_v1";
-
-function loadWatches(): WatchEntry[] {
-  try {
-    return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]");
-  } catch {
-    return [];
-  }
-}
-
-function saveWatches(watches: WatchEntry[]) {
-  // Strip runtime-only fields before persisting
-  const clean = watches.map(({ currentValue: _, currentAddr: __, readOk: ___, error: ____, ...w }) => w);
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(clean));
-}
 
 function loadObjectDebugPinned(): string[] {
   try {
@@ -285,15 +219,6 @@ function saveObjectDebugPinned(ids: string[]) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function uid() {
-  return Math.random().toString(36).slice(2);
-}
-
-function fmtValue(v: number, type: ValueType): string {
-  if (type === "f32" || type === "f64") return v.toFixed(4);
-  return String(Math.round(v));
-}
 
 function extractKeyValuePairs(text: string): Array<{ key: string; value: string }> {
   const pairs: Array<{ key: string; value: string }> = [];
@@ -560,7 +485,6 @@ function parseUiSetTextLine(line: string): UiSetTextEvent | null {
   }
   const identity = objectIdentityFromFields("kmod", className, leaf, text, enrichedFields);
 
-  // If we still cannot resolve any stable object/function context, skip as diagnostic noise.
   if (!parsedFn && !parsedCtx && !parsedCaller && !parsedCtxPtr) {
     return null;
   }
@@ -654,1301 +578,6 @@ const BTN = (accent = false): React.CSSProperties => ({
   cursor: "pointer", flexShrink: 0,
 });
 
-const TYPE_OPTIONS: ValueType[] = ["i32", "u32", "i64", "f32", "f64", "u8"];
-
-const TYPE_LABELS: Record<ValueType, string> = {
-  i32: "i32  signed int",
-  u32: "u32  unsigned",
-  i64: "i64  int 64-bit",
-  f32: "f32  float",
-  f64: "f64  double",
-  u8:  "u8   byte",
-};
-
-function TypeSelect({ value, onChange }: { value: ValueType; onChange: (v: ValueType) => void }) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as ValueType)}
-      style={{ ...INPUT, width: 128, colorScheme: "dark" }}
-    >
-      {TYPE_OPTIONS.map((t) => <option key={t} value={t}>{TYPE_LABELS[t]}</option>)}
-    </select>
-  );
-}
-
-// ─── Watches tab ──────────────────────────────────────────────────────────────
-
-function WatchesTab() {
-  const [watches, setWatches] = useState<WatchEntry[]>(() => loadWatches());
-  const [adding, setAdding] = useState(false);
-  const [newLabel, setNewLabel] = useState("");
-  const [newType, setNewType] = useState<ValueType>("i32");
-  const [newAddr, setNewAddr] = useState("");
-  const [newChain, setNewChain] = useState("");
-  const [useChain, setUseChain] = useState(true);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const pollWatches = useCallback(async (current: WatchEntry[]) => {
-    if (current.length === 0) return;
-    const requests = current.map((w) => ({
-      value_type: w.type,
-      addr_hex: w.addrHex ?? null,
-      chain: w.chain ? w.chain.split(/\s+/).filter(Boolean) : null,
-    }));
-    try {
-      const results: Array<{ value?: number; addr?: string; ok: boolean; error?: string }> =
-        await invoke("mem_read_watches", { requests });
-      setWatches((prev) =>
-        prev.map((w, i) => {
-          const r = results[i];
-          if (!r) return w;
-          return {
-            ...w,
-            currentValue: r.ok && r.value != null ? fmtValue(r.value, w.type) : undefined,
-            currentAddr: r.addr,
-            readOk: r.ok,
-            error: r.error,
-          };
-        })
-      );
-    } catch {
-      // game not running — leave values stale
-    }
-  }, []);
-
-  // Start polling on mount, stop on unmount
-  useEffect(() => {
-    pollRef.current = setInterval(() => {
-      setWatches((current) => {
-        pollWatches(current);
-        return current;
-      });
-    }, 1000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [pollWatches]);
-
-  // Persist whenever watches list changes (but not runtime fields — handled in saveWatches)
-  useEffect(() => { saveWatches(watches); }, [watches]);
-
-  // Reload when ScannerTab / ChainTab add a watch from the outside
-  useEffect(() => {
-    const handler = () => setWatches(loadWatches());
-    window.addEventListener("watches-updated", handler);
-    return () => window.removeEventListener("watches-updated", handler);
-  }, []);
-
-  function addWatch() {
-    const entry: WatchEntry = {
-      id: uid(),
-      label: newLabel || (useChain ? newChain.split(/\s+/)[0] : newAddr) || "unnamed",
-      type: newType,
-      ...(useChain ? { chain: newChain.trim() } : { addrHex: newAddr.trim() }),
-    };
-    setWatches((prev) => [...prev, entry]);
-    setNewLabel(""); setNewAddr(""); setNewChain("");
-    setAdding(false);
-  }
-
-  function remove(id: string) {
-    setWatches((prev) => prev.filter((w) => w.id !== id));
-  }
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ fontSize: 10, color: "rgba(255,255,255,0.2)", letterSpacing: 1, textTransform: "uppercase" }}>
-        Watch list — polled every 1 s — persists across restarts
-      </div>
-
-      {/* Table */}
-      <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8, overflow: "hidden" }}>
-        {/* Header */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 160px 55px 130px 48px 28px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 0.8 }}>
-          <span>LABEL</span><span>ADDR / CHAIN</span><span>TYPE</span><span>VALUE</span><span /><span />
-        </div>
-
-        {watches.length === 0 && (
-          <div style={{ padding: "20px 12px", color: "rgba(255,255,255,0.2)", fontSize: 12, textAlign: "center" }}>
-            No watches yet — add one below or from Scanner results.
-          </div>
-        )}
-
-        {watches.map((w) => {
-          const resolvedAddr = w.currentAddr ?? w.addrHex;
-          return (
-            <div key={w.id} style={{ display: "grid", gridTemplateColumns: "1fr 160px 55px 130px 48px 28px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.04)", alignItems: "center" }}>
-              <span style={{ fontFamily: "monospace", fontSize: 12, color: "#fff" }}>{w.label}</span>
-              <span style={{ ...LABEL_COL, fontSize: 10, wordBreak: "break-all" }}>
-                {w.chain ? `chain: ${w.chain}` : w.addrHex}
-              </span>
-              <span style={{ ...LABEL_COL }}>{w.type}</span>
-              <span style={{
-                ...VALUE_COL,
-                color: w.readOk ? "#fff" : w.readOk === false ? "rgba(255,80,80,0.7)" : "rgba(255,255,255,0.25)",
-              }}>
-                {w.readOk && w.currentValue != null
-                  ? w.currentValue
-                  : w.error
-                  ? <span style={{ fontSize: 10, color: "rgba(255,80,80,0.6)" }}>{w.error}</span>
-                  : "—"}
-                {w.currentAddr && <span style={{ ...LABEL_COL, marginLeft: 6 }}>{w.currentAddr}</span>}
-              </span>
-              {/* Ptr scan shortcut — only useful when we have a resolved address */}
-              <button
-                onClick={() => {
-                  if (!resolvedAddr) return;
-                  window.dispatchEvent(new CustomEvent("open-ptr-scan", { detail: { addr: resolvedAddr } }));
-                  window.dispatchEvent(new CustomEvent("switch-debug-tab", { detail: { tab: "ptrscan" } }));
-                }}
-                disabled={!resolvedAddr}
-                style={{ ...BTN(), fontSize: 10, padding: "2px 5px", opacity: resolvedAddr ? 1 : 0.3 }}
-                title="Find pointers to this address"
-              >
-                →ptr
-              </button>
-              <button onClick={() => remove(w.id)} style={{ background: "none", border: "none", color: "rgba(255,80,80,0.5)", cursor: "pointer", fontSize: 14, padding: 0 }}>×</button>
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Add form */}
-      {adding ? (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <span style={LABEL_COL}>Label</span>
-            <input value={newLabel} onChange={(e) => setNewLabel(e.target.value)} placeholder="e.g. kills" style={{ ...INPUT, flex: 1 }} />
-            <TypeSelect value={newType} onChange={setNewType} />
-          </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <button onClick={() => setUseChain(true)} style={{ ...BTN(useChain), fontSize: 10 }}>Chain</button>
-            <button onClick={() => setUseChain(false)} style={{ ...BTN(!useChain), fontSize: 10 }}>Raw addr</button>
-          </div>
-          {useChain ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-              <span style={{ ...LABEL_COL, fontSize: 10 }}>Offsets (space-separated hex, relative to game base). All but last are ptr dereferences.</span>
-              <input value={newChain} onChange={(e) => setNewChain(e.target.value)} placeholder="e.g. 4F5FBF0 0 9C8" style={{ ...INPUT, width: "100%", boxSizing: "border-box" }} />
-              <span style={{ ...LABEL_COL, fontSize: 10 }}>= game_base →+4F5FBF0 →+0 → read i32 at +9C8</span>
-            </div>
-          ) : (
-            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={LABEL_COL}>Address (hex)</span>
-              <input value={newAddr} onChange={(e) => setNewAddr(e.target.value)} placeholder="0x1A2B3C4D" style={{ ...INPUT, flex: 1 }} />
-            </div>
-          )}
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={addWatch} style={BTN(true)}>Add</button>
-            <button onClick={() => setAdding(false)} style={BTN()}>Cancel</button>
-          </div>
-        </div>
-      ) : (
-        <button onClick={() => setAdding(true)} style={{ ...BTN(true), alignSelf: "flex-start" }}>+ Add Watch</button>
-      )}
-    </div>
-  );
-}
-
-// Export helper so external code can add a scan hit to the watch list.
-export function addWatchFromScan(hit: ScanHit, type: ValueType) {
-  const watches = loadWatches();
-  if (watches.some((w) => w.addrHex === hit.addr)) return;
-  watches.push({ id: uid(), label: hit.module_rel ?? hit.addr, type, addrHex: hit.addr });
-  saveWatches(watches);
-  window.dispatchEvent(new CustomEvent("watches-updated"));
-}
-
-// ─── Scanner tab ──────────────────────────────────────────────────────────────
-
-interface ScanProgressEvt {
-  scanned_mb: number;
-  hits: number;
-  pct: number;
-  done: boolean;
-  cancelled: boolean;
-  error?: string;
-}
-
-// Max hits to live-poll every second (keep RPM calls manageable)
-const LIVE_POLL_CAP = 500;
-
-function ScannerTab() {
-  const [valueStr, setValueStr] = useState("");
-  const [type, setType] = useState<ValueType>("i32");
-  const [hits, setHits] = useState<ScanHit[]>([]);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState<ScanProgressEvt | null>(null);
-  const [liveValues, setLiveValues] = useState<Record<string, string>>({});
-  const prevHitsRef = useRef<ScanHit[]>([]);
-
-  // Poll live values for the current hit list (capped at LIVE_POLL_CAP)
-  useEffect(() => {
-    if (hits.length === 0 || hits.length > LIVE_POLL_CAP) {
-      setLiveValues({});
-      return;
-    }
-    const poll = async () => {
-      const requests = hits.map((h) => ({ value_type: type, addr_hex: h.addr, chain: null }));
-      try {
-        const results: Array<{ value?: number; ok: boolean }> =
-          await invoke("mem_read_watches", { requests });
-        const map: Record<string, string> = {};
-        hits.forEach((h, i) => {
-          const r = results[i];
-          if (r?.ok && r.value != null) map[h.addr] = fmtValue(r.value, type);
-        });
-        setLiveValues(map);
-      } catch { /* game not running */ }
-    };
-    poll(); // immediate first read
-    const id = setInterval(poll, 1000);
-    return () => clearInterval(id);
-  }, [hits, type]);
-
-  // Subscribe to live progress events from the Rust scan worker
-  useEffect(() => {
-    const unlisten = listen<ScanProgressEvt>("mem-scan-progress", (e) => {
-      setProgress(e.payload);
-      if (e.payload.done) setScanning(false);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  async function runScan(rescan: boolean) {
-    const target = parseFloat(valueStr);
-    if (isNaN(target)) { setProgress({ scanned_mb: 0, hits: 0, pct: 0, done: true, cancelled: false, error: "Enter a numeric value first." }); return; }
-
-    setScanning(true);
-    setProgress({ scanned_mb: 0, hits: 0, pct: 0, done: false, cancelled: false });
-    try {
-      let result: ScanHit[];
-      if (rescan && prevHitsRef.current.length > 0) {
-        result = await invoke<ScanHit[]>("mem_rescan", {
-          addrs: prevHitsRef.current.map((h) => h.addr),
-          valueType: type,
-          target,
-        });
-        setProgress((p) => p ? { ...p, done: true, hits: result.length } : null);
-        setScanning(false);
-      } else {
-        // Progress arrives via "mem-scan-progress" events; also clear scanning when invoke resolves.
-        result = await invoke<ScanHit[]>("mem_scan", { valueType: type, target });
-        setScanning(false);
-      }
-      setHits(result);
-      prevHitsRef.current = result;
-    } catch (e) {
-      setProgress({ scanned_mb: 0, hits: 0, pct: 0, done: true, cancelled: false, error: String(e) });
-      setScanning(false);
-    }
-  }
-
-  async function cancel() {
-    await invoke("mem_scan_cancel");
-  }
-
-  function addToWatches(hit: ScanHit) {
-    const watches = loadWatches();
-    if (watches.some((w) => w.addrHex === hit.addr)) return; // already watching
-    watches.push({ id: uid(), label: hit.module_rel ?? hit.addr, type, addrHex: hit.addr });
-    saveWatches(watches);
-    window.dispatchEvent(new CustomEvent("watches-updated"));
-  }
-
-  const statusText = progress
-    ? progress.error
-      ? `Error: ${progress.error}`
-      : progress.cancelled
-      ? `Cancelled — ${progress.hits} hits found`
-      : progress.done
-      ? `Done — ${progress.hits} hit${progress.hits !== 1 ? "s" : ""}${progress.hits >= 2000 ? " (capped)" : ""}`
-      : `Scanning… ${progress.scanned_mb} MB read, ${progress.hits} hits`
-    : "";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <input
-          value={valueStr}
-          onChange={(e) => setValueStr(e.target.value)}
-          placeholder="value to find…"
-          style={{ ...INPUT, width: 140 }}
-          onKeyDown={(e) => e.key === "Enter" && !scanning && runScan(false)}
-        />
-        <TypeSelect value={type} onChange={setType} />
-        <button onClick={() => runScan(false)} disabled={scanning} style={BTN(true)}>
-          {scanning ? "Scanning…" : "Scan"}
-        </button>
-        <button
-          onClick={() => runScan(true)}
-          disabled={scanning || prevHitsRef.current.length === 0}
-          style={BTN()}
-          title="Re-check previous results with new value"
-        >
-          Rescan
-        </button>
-        {scanning && (
-          <button onClick={cancel} style={{ ...BTN(), color: "rgba(255,100,100,0.8)", borderColor: "rgba(255,100,100,0.3)" }}>
-            Cancel
-          </button>
-        )}
-        {!scanning && hits.length > 0 && (
-          <button onClick={() => { setHits([]); prevHitsRef.current = []; setProgress(null); }} style={BTN()}>Clear</button>
-        )}
-      </div>
-
-      {/* Progress bar + status */}
-      {progress && !progress.done && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${progress.pct}%`, background: "#00f5a0", borderRadius: 2, transition: "width 0.3s ease" }} />
-          </div>
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)", fontFamily: "monospace" }}>{statusText}</div>
-        </div>
-      )}
-      {progress?.done && statusText && (
-        <div style={{ fontSize: 11, fontFamily: "monospace", color: progress.error || progress.cancelled ? "rgba(255,120,120,0.8)" : "rgba(0,245,160,0.7)" }}>
-          {statusText}
-        </div>
-      )}
-
-      {/* Results */}
-      {hits.length > 0 && (
-        <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8, overflow: "hidden", maxHeight: 420, overflowY: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "150px 1fr 180px 28px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 0.8, position: "sticky", top: 0, background: "rgba(0,0,0,0.7)" }}>
-            <span>ADDRESS</span><span>MODULE REL</span><span>VALUE → LIVE</span><span />
-          </div>
-          {hits.map((h) => {
-            const scanned = fmtValue(h.value, type);
-            const live = liveValues[h.addr];
-            const changed = live !== undefined && live !== scanned;
-            const alreadyWatching = loadWatches().some((w) => w.addrHex === h.addr);
-            return (
-              <div key={h.addr} style={{ display: "grid", gridTemplateColumns: "150px 1fr 180px 28px", gap: 8, padding: "4px 12px", borderBottom: "1px solid rgba(255,255,255,0.03)", alignItems: "center" }}>
-                <span style={{ ...LABEL_COL, fontSize: 11 }}>{h.addr}</span>
-                <span style={{ ...LABEL_COL, fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.module_rel ?? "—"}</span>
-                <span style={{ ...VALUE_COL, display: "flex", alignItems: "center", gap: 4 }}>
-                  <span>{scanned}</span>
-                  {live !== undefined && (
-                    <span style={{ fontSize: 11, color: changed ? "rgba(255,200,60,0.9)" : "rgba(0,245,160,0.7)" }}>→ {live}</span>
-                  )}
-                  {hits.length > LIVE_POLL_CAP && live === undefined && (
-                    <span style={{ fontSize: 10, color: "rgba(255,255,255,0.2)" }}>rescan↓</span>
-                  )}
-                </span>
-                <button
-                  onClick={() => addToWatches(h)}
-                  disabled={alreadyWatching}
-                  style={{ background: "none", border: "none", color: alreadyWatching ? "rgba(255,255,255,0.15)" : "rgba(0,245,160,0.6)", cursor: alreadyWatching ? "default" : "pointer", fontSize: 14, padding: 0 }}
-                  title={alreadyWatching ? "Already in watches" : "Add to watches"}
-                >
-                  {alreadyWatching ? "·" : "+"}
-                </button>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.18)", display: "flex", flexDirection: "column", gap: 3 }}>
-        <span>Only scans PAGE_READWRITE regions. Results capped at 2 000. Scan → change value in-game → Rescan to narrow down.</span>
-        <span>
-          Types: <span style={{ color: "rgba(255,255,255,0.4)" }}>i32/u32</span> for integers (kills, shots, ammo)
-          · <span style={{ color: "rgba(255,255,255,0.4)" }}>f32/f64</span> for decimals (time, damage)
-          · <span style={{ color: "rgba(255,255,255,0.4)" }}>u8</span> for bytes (0–255)
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ─── Chain tester tab ─────────────────────────────────────────────────────────
-
-function ChainTab({ pendingOffsets }: { pendingOffsets: string[] | null }) {
-  const [offsets, setOffsets] = useState<string[]>(["4F5FBF0", "0", "9C8"]);
-  const [type, setType] = useState<ValueType>("i32");
-  const [result, setResult] = useState<ChainResult | null>(null);
-  const [running, setRunning] = useState(false);
-
-  // State for the "Find nearby fields" panel
-  const [structScanBase, setStructScanBase] = useState("");
-  const [structScanType, setStructScanType] = useState<ValueType>("i32");
-  const [structScanTarget, setStructScanTarget] = useState("");
-  const [structScanRadius, setStructScanRadius] = useState("1000");
-  const [structScanHits, setStructScanHits] = useState<StructScanHit[]>([]);
-  const [structScanning, setStructScanning] = useState(false);
-  const [structScanError, setStructScanError] = useState<string | null>(null);
-
-  // When PtrScanTab sends offsets to pre-populate, apply them
-  useEffect(() => {
-    if (pendingOffsets && pendingOffsets.length > 0) setOffsets(pendingOffsets);
-  }, [pendingOffsets]);
-
-  async function follow() {
-    setRunning(true);
-    try {
-      const raw = await invoke<ChainResult>("mem_follow_chain", {
-        offsetsHex: offsets.filter((o) => o.trim()),
-        valueType: type,
-      });
-      setResult(raw);
-      // On successful chain follow, auto-populate the base address for struct scan
-      if (raw.ok && raw.steps.length > 1) {
-        const finalStep = raw.steps[raw.steps.length - 2];
-        setStructScanBase(finalStep.ptr_value);
-      }
-    } catch (e) {
-      setResult({ steps: [], final_addr: null, final_value: null, ok: false, error: String(e) });
-    } finally {
-      setRunning(false);
-    }
-  }
-
-  async function runStructScan() {
-    const target = parseFloat(structScanTarget);
-    const radius = parseInt(structScanRadius, 16);
-    if (isNaN(target) || isNaN(radius) || !structScanBase) {
-      setStructScanError("Base address, target value, and radius (hex) must be valid.");
-      return;
-    }
-    setStructScanning(true);
-    setStructScanError(null);
-    setStructScanHits([]);
-    try {
-      const hits = await invoke<StructScanHit[]>("mem_scan_struct", {
-        baseAddrHex: structScanBase,
-        valueType: structScanType,
-        target,
-        radius,
-      });
-      setStructScanHits(hits);
-    } catch (e) {
-      setStructScanError(String(e));
-    } finally {
-      setStructScanning(false);
-    }
-  }
-
-  function addOffset() { setOffsets((prev) => [...prev, ""]); }
-  function removeOffset(i: number) { setOffsets((prev) => prev.filter((_, j) => j !== i)); }
-  function setOffset(i: number, v: string) { setOffsets((prev) => prev.map((o, j) => j === i ? v : o)); }
-
-  function saveAsWatch() {
-    if (!result?.ok) return;
-    const chainStr = offsets.filter(Boolean).join(" ");
-    const watches = loadWatches();
-    if (watches.some((w) => w.chain === chainStr)) return;
-    watches.push({ id: uid(), label: `chain (${offsets.join("→")})`, type, chain: chainStr });
-    saveWatches(watches);
-    window.dispatchEvent(new CustomEvent("watches-updated"));
-  }
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Concept banner */}
-      <div style={{ fontSize: 11, fontFamily: "monospace", lineHeight: 1.7, padding: "8px 12px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 6, color: "rgba(255,255,255,0.3)" }}>
-        <span style={{ color: "rgba(100,180,255,0.8)" }}>PTR</span> hops read a 64-bit pointer and follow it to the next address.
-        &nbsp;The last hop reads the final <span style={{ color: "#00f5a0" }}>{type}</span> value.
-        &nbsp;Chain: <span style={{ color: "rgba(255,255,255,0.45)" }}>game_base → follow ptrs → read {type}</span>
-      </div>
-
-      {/* Chain steps */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-        {offsets.map((off, i) => {
-          const isFinal = i === offsets.length - 1;
-          const step = result?.steps[i];
-          return (
-            <div key={i} style={{ display: "flex", gap: 8, alignItems: "center" }}>
-              <span style={{
-                fontSize: 10, fontFamily: "monospace", padding: "2px 5px", borderRadius: 3, flexShrink: 0,
-                minWidth: 34, textAlign: "center",
-                background: isFinal ? "rgba(0,245,160,0.1)" : "rgba(100,180,255,0.08)",
-                border: `1px solid ${isFinal ? "rgba(0,245,160,0.25)" : "rgba(100,180,255,0.15)"}`,
-                color: isFinal ? "#00f5a0" : "rgba(100,180,255,0.8)",
-              }}>
-                {isFinal ? type : "PTR"}
-              </span>
-              <span style={{ ...LABEL_COL, width: 60, flexShrink: 0, fontSize: 10, textAlign: "right" }}>
-                {i === 0 ? "game_base" : `ptr${i - 1}`}
-              </span>
-              <span style={{ color: "rgba(255,255,255,0.2)", fontSize: 12, flexShrink: 0 }}>+0x</span>
-              <input
-                value={off}
-                onChange={(e) => setOffset(i, e.target.value)}
-                placeholder="offset"
-                style={{ ...INPUT, width: 100 }}
-              />
-              {step && (
-                <>
-                  <span style={{ color: "rgba(255,255,255,0.15)", flexShrink: 0 }}>→</span>
-                  <span style={{
-                    fontFamily: "monospace", fontSize: 11, flexShrink: 0,
-                    color: step.ok
-                      ? isFinal ? "#00f5a0" : "rgba(100,180,255,0.8)"
-                      : "rgba(255,80,80,0.7)",
-                  }}>
-                    {step.ok ? step.ptr_value : "✗"}
-                  </span>
-                  {step.ok && !isFinal && (
-                    <span style={{ ...LABEL_COL, fontSize: 10 }}>({step.addr})</span>
-                  )}
-                </>
-              )}
-              {offsets.length > 1 && (
-                <button onClick={() => removeOffset(i)} style={{ background: "none", border: "none", color: "rgba(255,80,80,0.4)", cursor: "pointer", fontSize: 14, padding: 0, marginLeft: "auto", flexShrink: 0 }}>×</button>
-              )}
-            </div>
-          );
-        })}
-        <button onClick={addOffset} style={{ ...BTN(), alignSelf: "flex-start", fontSize: 10, marginTop: 2 }}>+ Add hop</button>
-      </div>
-
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-        <span style={LABEL_COL}>Final type</span>
-        <TypeSelect value={type} onChange={setType} />
-        <button onClick={follow} disabled={running} style={BTN(true)}>
-          {running ? "Following…" : "Follow chain"}
-        </button>
-        {result?.ok && (
-          <button onClick={saveAsWatch} style={BTN()}>Save to Watches</button>
-        )}
-      </div>
-
-      {/* Result summary */}
-      {result?.ok && result.final_addr && (
-        <div style={{ fontSize: 11, fontFamily: "monospace", padding: "6px 10px", borderRadius: 5, background: "rgba(0,245,160,0.05)", border: "1px solid rgba(0,245,160,0.15)", color: "rgba(0,245,160,0.8)" }}>
-          ✓ &nbsp;{result.final_addr} = {result.final_value}
-        </div>
-      )}
-      {result && !result.ok && result.error && (
-        <div style={{ fontSize: 11, fontFamily: "monospace", padding: "6px 10px", borderRadius: 5, background: "rgba(255,80,80,0.05)", border: "1px solid rgba(255,80,80,0.15)", color: "rgba(255,80,80,0.8)" }}>
-          ✗ &nbsp;{result.error}
-        </div>
-      )}
-
-      {/* Find nearby fields panel */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 24, paddingTop: 20, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 1, textTransform: "uppercase" }}>
-                Find nearby fields
-            </div>
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.3)" }}>
-                Scan memory near an object base to discover fields (e.g. find HP offset from Player base).
-                Following a chain above will auto-fill the base address.
-            </div>
-        </div>
-
-        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <span style={LABEL_COL}>Base (hex)</span>
-            <input value={structScanBase} onChange={e => setStructScanBase(e.target.value)} placeholder="object base addr" style={{...INPUT, width: 140}} />
-            <span style={LABEL_COL}>Type</span>
-            <TypeSelect value={structScanType} onChange={setStructScanType} />
-            <span style={LABEL_COL}>Target</span>
-            <input value={structScanTarget} onChange={e => setStructScanTarget(e.target.value)} placeholder="value" style={{...INPUT, width: 80}} />
-            <span style={LABEL_COL}>Radius (hex)</span>
-            <input value={structScanRadius} onChange={e => setStructScanRadius(e.target.value)} placeholder="e.g. 1000" style={{...INPUT, width: 80}} />
-
-            <button onClick={runStructScan} disabled={structScanning} style={BTN(true)}>
-                {structScanning ? "Scanning..." : "Scan Struct"}
-            </button>
-        </div>
-
-        {structScanError && (
-            <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,100,100,0.8)"}}>{structScanError}</div>
-        )}
-
-        {structScanHits.length > 0 && (
-            <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8, overflow: "hidden", maxHeight: 280, overflowY: "auto" }}>
-                <div style={{ display: "grid", gridTemplateColumns: "100px 1fr 120px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)", position: "sticky", top: 0, background: "rgba(0,0,0,0.7)" }}>
-                    <span>OFFSET</span><span>ADDRESS</span><span>VALUE</span>
-                </div>
-                {structScanHits.map(h => (
-                    <div key={h.addr} style={{ display: "grid", gridTemplateColumns: "100px 1fr 120px", gap: 8, padding: "4px 12px", borderBottom: "1px solid rgba(255,255,255,0.03)", alignItems: "center" }}>
-                        <span style={{ fontFamily: "monospace", fontSize: 11, color: "#00f5a0" }}>{h.offset}</span>
-                        <span style={{...LABEL_COL, fontSize: 11}}>{h.addr}</span>
-                        <span style={VALUE_COL}>{fmtValue(h.value, structScanType)}</span>
-                    </div>
-                ))}
-            </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-// ─── Pointer scan tab ────────────────────────────────────────────────────────
-
-interface PtrScanProgressEvt {
-  scanned_mb: number; hits: number; pct: number;
-  done: boolean; cancelled: boolean; error?: string;
-}
-
-function PtrScanTab({ onLoadChain }: { onLoadChain: (offsets: string[]) => void }) {
-  const [targetAddr, setTargetAddr] = useState("");
-  const [maxBack, setMaxBack] = useState("1000");
-  const [hits, setHits] = useState<PtrScanHit[]>([]);
-  const [scanning, setScanning] = useState(false);
-  const [progress, setProgress] = useState<PtrScanProgressEvt | null>(null);
-
-  // Listen to ptr-scan-specific progress events (separate from value scan)
-  useEffect(() => {
-    const unlisten = listen<PtrScanProgressEvt>("mem-ptr-scan-progress", (e) => {
-      setProgress(e.payload);
-      if (e.payload.done) setScanning(false);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  // "→ptr" button on a watch entry sets target addr and switches here
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const ce = e as CustomEvent<{ addr: string }>;
-      setTargetAddr(ce.detail.addr);
-    };
-    window.addEventListener("open-ptr-scan", handler);
-    return () => window.removeEventListener("open-ptr-scan", handler);
-  }, []);
-
-  async function run() {
-    const maxBackNum = parseInt(maxBack, 16);
-    if (isNaN(maxBackNum) || !targetAddr.trim()) return;
-    setScanning(true);
-    setProgress({ scanned_mb: 0, hits: 0, pct: 0, done: false, cancelled: false });
-    try {
-      const result = await invoke<PtrScanHit[]>("mem_ptr_scan", {
-        targetAddr: targetAddr.trim(),
-        maxBack: maxBackNum,
-      });
-      setHits(result);
-      setScanning(false);
-    } catch (e) {
-      setProgress({ scanned_mb: 0, hits: 0, pct: 0, done: true, cancelled: false, error: String(e) });
-      setScanning(false);
-    }
-  }
-
-  async function cancel() { await invoke("mem_scan_cancel"); }
-
-  function loadChain(h: PtrScanHit) {
-    // Extract module hex offset from "Name.exe+0xABCD" → "ABCD"
-    const rel = h.module_rel ?? "";
-    const plusIdx = rel.indexOf("+0x");
-    const modOff = plusIdx >= 0 ? rel.slice(plusIdx + 3) : rel;
-    const targetOff = h.offset.toString(16).toUpperCase();
-    onLoadChain([modOff, targetOff]);
-  }
-
-  const staticHits = hits.filter((h) => h.module_rel !== null);
-  const dynamicHits = hits.filter((h) => h.module_rel === null);
-  const statusText = progress
-    ? progress.error ? `Error: ${progress.error}`
-    : progress.cancelled ? `Cancelled — ${progress.hits} pointers found`
-    : progress.done ? `Done — ${hits.length} pointer${hits.length !== 1 ? "s" : ""} (${staticHits.length} static)`
-    : `Scanning… ${progress.scanned_mb} MB, ${progress.hits} hits`
-    : "";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Concept */}
-      <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,0.3)", lineHeight: 1.7, padding: "8px 12px", background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 6 }}>
-        Finds all 8-byte pointers that land within <span style={{ color: "rgba(255,255,255,0.5)" }}>max_back</span> bytes of the target.
-        &nbsp;<span style={{ color: "#00f5a0" }}>Static</span> hits (module-relative) are stable across restarts → use them to build chains.
-        &nbsp;For deep chains, click <span style={{ color: "rgba(100,180,255,0.8)" }}>+lvl</span> on a heap hit to scan one level deeper.
-      </div>
-
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-        <input value={targetAddr} onChange={(e) => setTargetAddr(e.target.value)}
-          placeholder="target addr (hex)" style={{ ...INPUT, width: 160 }}
-          onKeyDown={(e) => e.key === "Enter" && !scanning && run()} />
-        <span style={LABEL_COL}>max back</span>
-        <input value={maxBack} onChange={(e) => setMaxBack(e.target.value)}
-          placeholder="hex" style={{ ...INPUT, width: 72 }}
-          title="How far before the target to search (hex). 1000 = 4 KB, common for struct fields." />
-        <button onClick={run} disabled={scanning || !targetAddr.trim()} style={BTN(true)}>
-          {scanning ? "Scanning…" : "Find pointers"}
-        </button>
-        {scanning && (
-          <button onClick={cancel} style={{ ...BTN(), color: "rgba(255,100,100,0.8)", borderColor: "rgba(255,100,100,0.3)" }}>Cancel</button>
-        )}
-        {!scanning && hits.length > 0 && (
-          <button onClick={() => { setHits([]); setProgress(null); }} style={BTN()}>Clear</button>
-        )}
-      </div>
-
-      {/* Progress */}
-      {progress && !progress.done && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${progress.pct}%`, background: "#00f5a0", borderRadius: 2, transition: "width 0.3s ease" }} />
-          </div>
-          <div style={{ fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,0.45)" }}>{statusText}</div>
-        </div>
-      )}
-      {progress?.done && statusText && (
-        <div style={{ fontSize: 11, fontFamily: "monospace", color: progress.error || progress.cancelled ? "rgba(255,120,120,0.8)" : "rgba(0,245,160,0.7)" }}>
-          {statusText}
-        </div>
-      )}
-
-      {/* Static hits — green, stable across restarts */}
-      {staticHits.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <div style={{ fontSize: 10, color: "#00f5a0", letterSpacing: 1, textTransform: "uppercase" }}>
-            Static pointers — survive restarts ({staticHits.length})
-          </div>
-          <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(0,245,160,0.12)", borderRadius: 8, overflow: "hidden" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 90px 80px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)" }}>
-              <span>MODULE OFFSET</span><span>+STRUCT OFF</span><span />
-            </div>
-            {staticHits.map((h) => (
-              <div key={h.addr} style={{ display: "grid", gridTemplateColumns: "1fr 90px 80px", gap: 8, padding: "5px 12px", borderBottom: "1px solid rgba(255,255,255,0.04)", alignItems: "center" }}>
-                <span style={{ fontFamily: "monospace", fontSize: 11, color: "#00f5a0" }}>{h.module_rel}</span>
-                <span style={{ fontFamily: "monospace", fontSize: 11, color: "rgba(255,255,255,0.6)" }}>+0x{h.offset.toString(16).toUpperCase()}</span>
-                <button onClick={() => loadChain(h)} style={{ ...BTN(true), fontSize: 10, padding: "2px 6px" }}
-                  title="Load these two offsets into Chain tab and switch to it">
-                  →Chain
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Dynamic hits — heap pointers, need deeper scan */}
-      {dynamicHits.length > 0 && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 1, textTransform: "uppercase" }}>
-            Heap pointers — scan deeper to find their static base ({dynamicHits.length})
-          </div>
-          <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8, overflow: "hidden", maxHeight: 280, overflowY: "auto" }}>
-            <div style={{ display: "grid", gridTemplateColumns: "160px 1fr 90px 50px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)" }}>
-              <span>PTR ADDRESS</span><span>POINTS TO</span><span>+STRUCT OFF</span><span />
-            </div>
-            {dynamicHits.map((h) => (
-              <div key={h.addr} style={{ display: "grid", gridTemplateColumns: "160px 1fr 90px 50px", gap: 8, padding: "4px 12px", borderBottom: "1px solid rgba(255,255,255,0.03)", alignItems: "center" }}>
-                <span style={{ ...LABEL_COL, fontSize: 11 }}>{h.addr}</span>
-                <span style={{ ...LABEL_COL, fontSize: 11 }}>{h.ptr_value}</span>
-                <span style={{ fontFamily: "monospace", fontSize: 11, color: "rgba(255,255,255,0.5)" }}>+0x{h.offset.toString(16).toUpperCase()}</span>
-                <button
-                  onClick={() => {
-                    setTargetAddr(h.addr);
-                    // stay on this tab — user can adjust max_back and re-run
-                  }}
-                  style={{ ...BTN(), fontSize: 10, padding: "2px 4px" }}
-                  title="Scan for pointers to this heap address (go one level deeper)"
-                >
-                  +lvl
-                </button>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {hits.length === 0 && progress?.done && !progress.error && !progress.cancelled && (
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.25)", fontFamily: "monospace" }}>
-          No pointers found. Try increasing max_back (e.g. 2000 or 4000 hex).
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Auto Chain tab ──────────────────────────────────────────────────────────
-
-interface AutoChainProgress {
-  phase: number;        // 0 = building index, 1 = searching
-  pct: number;
-  index_size: number;
-  chains_found: number;
-  done: boolean;
-  error?: string;
-}
-
-interface FoundChain {
-  offsets: string[];
-  module_rel: string;
-  depth: number;
-}
-
-interface AutoChainResult {
-  target_addr: string;
-  target_label: string;
-  chains: FoundChain[];
-}
-
-function AutoChainTab({ onLoadChain }: { onLoadChain: (offsets: string[]) => void }) {
-  const [watches, setWatches] = useState<WatchEntry[]>(() => loadWatches());
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  // Defaults tuned for KovaaK's (UE4):
-  //   depth      6     — UE4 object graphs typically need 4-6 dereferences
-  //   max_back   200   — real struct fields sit ≤ 512 bytes from their object base
-  //   heap cap   100   — broader search per level to compensate for tight max_back
-  //   max struct 200   — post-filter matches max_back; hides arena/buffer false hits
-  const [maxDepth, setMaxDepth] = useState("6");
-  const [maxBack, setMaxBack] = useState("200");
-  const [maxHeapPerLevel, setMaxHeapPerLevel] = useState("100");
-  const [maxStructOff, setMaxStructOff] = useState("200");
-  const [running, setRunning] = useState(false);
-  const [progress, setProgress] = useState<AutoChainProgress | null>(null);
-  const [results, setResults] = useState<AutoChainResult[]>([]);
-  // Tracks the value_type to use per target label (set from the selected watch)
-  const typeMapRef = useRef<Record<string, ValueType>>({});
-  // chain key → { val, ok } after verification
-  const [chainValues, setChainValues] = useState<Record<string, { val: string | null; ok: boolean }>>({});
-  const [verifying, setVerifying] = useState(false);
-
-  useEffect(() => {
-    const handler = () => setWatches(loadWatches());
-    window.addEventListener("watches-updated", handler);
-    return () => window.removeEventListener("watches-updated", handler);
-  }, []);
-
-  useEffect(() => {
-    const unlisten = listen<AutoChainProgress>("mem-auto-chain-progress", (e) => {
-      setProgress(e.payload);
-      if (e.payload.done) setRunning(false);
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  function toggleSelect(id: string) {
-    setSelectedIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  }
-
-  // Batch-read the current value through every found chain so users can verify correctness.
-  async function verifyAllChains(chainResults: AutoChainResult[]) {
-    const keys: string[] = [];
-    const requests: Array<{ value_type: string; addr_hex: null; chain: string[] }> = [];
-
-    for (const res of chainResults) {
-      const vtype = typeMapRef.current[res.target_label] ?? "i32";
-      for (const chain of res.chains) {
-        keys.push(res.target_addr + "|" + chain.offsets.join(" "));
-        requests.push({ value_type: vtype, addr_hex: null, chain: chain.offsets });
-      }
-    }
-    if (requests.length === 0) return;
-
-    setVerifying(true);
-    try {
-      const readResults: Array<{ value?: number; ok: boolean; error?: string }> =
-        await invoke("mem_read_watches", { requests });
-      const map: Record<string, { val: string | null; ok: boolean }> = {};
-      keys.forEach((key, i) => {
-        const r = readResults[i];
-        const vtype = typeMapRef.current[
-          (chainResults.find(res => key.startsWith(res.target_addr + "|"))?.target_label) ?? ""
-        ] ?? "i32";
-        map[key] = {
-          val: r?.ok && r.value != null ? fmtValue(r.value, vtype) : null,
-          ok: r?.ok ?? false,
-        };
-      });
-      setChainValues(map);
-    } catch { /* game not running */ }
-    setVerifying(false);
-  }
-
-  async function run() {
-    const selected = watches.filter((w) => selectedIds.has(w.id));
-    if (selected.length === 0) return;
-
-    setRunning(true);
-    setResults([]);
-    setChainValues({});
-    setProgress({ phase: 0, pct: 0, index_size: 0, chains_found: 0, done: false });
-
-    // Build typeMap from selected watches
-    const newTypeMap: Record<string, ValueType> = {};
-    selected.forEach((w) => { newTypeMap[w.label] = w.type; });
-    typeMapRef.current = newTypeMap;
-
-    // Resolve current addresses for chain-based watches
-    const resolveReqs = selected.map((w) => ({
-      value_type: w.type,
-      addr_hex: w.addrHex ?? null,
-      chain: w.chain ? w.chain.split(/\s+/).filter(Boolean) : null,
-    }));
-    let resolved: Array<{ addr?: string; ok: boolean }> = [];
-    try {
-      resolved = await invoke("mem_read_watches", { requests: resolveReqs });
-    } catch { /* game not running — raw-addr watches still usable */ }
-
-    const targetAddrs: string[] = [];
-    const targetLabels: string[] = [];
-    selected.forEach((w, i) => {
-      const addr = w.addrHex ?? resolved[i]?.addr;
-      if (addr) { targetAddrs.push(addr); targetLabels.push(w.label); }
-    });
-
-    if (targetAddrs.length === 0) {
-      setProgress({
-        phase: 0, pct: 0, index_size: 0, chains_found: 0, done: true,
-        error: "No resolved addresses. Is the game running? Chain watches need the game online.",
-      });
-      setRunning(false);
-      return;
-    }
-
-    const maxBackNum = parseInt(maxBack, 16);
-    const depth = Math.max(1, Math.min(10, parseInt(maxDepth) || 5));
-    const heapCap = Math.max(1, Math.min(500, parseInt(maxHeapPerLevel) || 50));
-
-    try {
-      const raw = await invoke<AutoChainResult[]>("mem_auto_chain_find", {
-        targetAddrs,
-        targetLabels,
-        maxDepth: depth,
-        maxBack: maxBackNum,
-        maxHeapPerLevel: heapCap,
-      });
-      setResults(raw);
-      setRunning(false);
-      // Auto-verify all found chains immediately
-      verifyAllChains(raw);
-    } catch (e) {
-      setProgress({ phase: 0, pct: 0, index_size: 0, chains_found: 0, done: true, error: String(e) });
-      setRunning(false);
-    }
-  }
-
-  async function cancel() { await invoke("mem_scan_cancel"); }
-
-  // Only show chains where every non-first offset is within the struct-offset threshold.
-  // Non-first offsets represent "distance from object base to field" — real struct fields
-  // are almost always < 0x500.  Large values indicate accidental hits through memory arenas.
-  const structOffThreshold = parseInt(maxStructOff, 16) || Infinity;
-  const filteredResults = results.map((res) => ({
-    ...res,
-    chains: res.chains.filter((chain) =>
-      chain.offsets.slice(1).every((o) => parseInt(o, 16) <= structOffThreshold)
-    ),
-    hiddenCount: res.chains.filter((chain) =>
-      chain.offsets.slice(1).some((o) => parseInt(o, 16) > structOffThreshold)
-    ).length,
-  }));
-
-  const totalChains = results.reduce((s, r) => s + r.chains.length, 0);
-  const visibleChains = filteredResults.reduce((s, r) => s + r.chains.length, 0);
-  const phaseLabel = progress
-    ? progress.phase === 0
-      ? `Building pointer index… ${progress.pct}%`
-      : `Searching chains… ${progress.pct}%`
-    : "";
-  const hiddenTotal = totalChains - visibleChains;
-  const statusText = progress
-    ? progress.error
-      ? `Error: ${progress.error}`
-      : progress.done
-      ? `Done — ${visibleChains} chain${visibleChains !== 1 ? "s" : ""} shown${hiddenTotal > 0 ? ` (${hiddenTotal} filtered — large offsets)` : ""}`
-      : phaseLabel
-    : "";
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      {/* Concept banner */}
-      <div style={{ fontSize: 11, fontFamily: "monospace", lineHeight: 1.7, padding: "8px 12px",
-        background: "rgba(0,0,0,0.2)", border: "1px solid rgba(255,255,255,0.06)", borderRadius: 6,
-        color: "rgba(255,255,255,0.3)" }}>
-        Scans <span style={{ color: "rgba(255,255,255,0.5)" }}>all</span> memory once to build a
-        pointer index, then BFS-searches for static chains reaching each selected watch.
-        &nbsp;<span style={{ color: "#00f5a0" }}>Values are read immediately so you can verify correctness.</span>
-        &nbsp;Use <span style={{ color: "rgba(100,180,255,0.8)" }}>→Chain</span> to load into the Chain tab.
-      </div>
-
-      {/* Settings */}
-      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-        {[
-          { label: "depth",             val: maxDepth,        set: setMaxDepth,        w: 44,  title: "Max pointer dereference levels. KovaaK's (UE4) typically needs 4-6. Try 7-8 if nothing is found." },
-          { label: "max back (hex)",    val: maxBack,         set: setMaxBack,         w: 72,  title: "Max distance from object base to target field (hex). 200 = 512 bytes covers most UE4 struct fields. Larger values find more hits but produce more unstable chains." },
-          { label: "heap cap/lvl",      val: maxHeapPerLevel, set: setMaxHeapPerLevel, w: 44,  title: "Max heap addresses queued per BFS level. 100 is a good balance for UE4 — increase to 200+ if depth 6 finds nothing." },
-          { label: "max struct off (hex)", val: maxStructOff, set: setMaxStructOff,   w: 72,  title: "Post-filter: hide chains with non-first offsets larger than this. Keep equal to max back. Large offsets = accidental hit through a memory arena, not a real struct field." },
-        ].map(({ label, val, set, w, title }) => (
-          <div key={label} style={{ display: "flex", gap: 6, alignItems: "center" }}>
-            <span style={LABEL_COL}>{label}</span>
-            <input value={val} onChange={(e) => set(e.target.value)}
-              style={{ ...INPUT, width: w }} title={title} />
-          </div>
-        ))}
-      </div>
-
-      {/* Watch selector */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-        <div style={{ fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 1, textTransform: "uppercase" }}>
-          Select watches to find chains for
-        </div>
-        {watches.length === 0 ? (
-          <div style={{ fontSize: 12, color: "rgba(255,255,255,0.2)", fontFamily: "monospace" }}>
-            No watches yet — add some in the Watches tab first.
-          </div>
-        ) : (
-          <div style={{ background: "rgba(0,0,0,0.25)", border: "1px solid rgba(255,255,255,0.07)",
-            borderRadius: 8, overflow: "hidden" }}>
-            {watches.map((w) => (
-              <label key={w.id} style={{ display: "flex", gap: 10, alignItems: "center",
-                padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.04)", cursor: "pointer" }}>
-                <input type="checkbox" checked={selectedIds.has(w.id)}
-                  onChange={() => toggleSelect(w.id)} style={{ accentColor: "#00f5a0" }} />
-                <span style={{ fontFamily: "monospace", fontSize: 12, color: "#fff", flex: 1 }}>{w.label}</span>
-                <span style={{ ...LABEL_COL, fontSize: 10 }}>{w.type}</span>
-                <span style={{ ...LABEL_COL, fontSize: 10, maxWidth: 180, overflow: "hidden",
-                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {w.chain ? `chain: ${w.chain}` : w.addrHex}
-                </span>
-              </label>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Controls */}
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={run} disabled={running || selectedIds.size === 0} style={BTN(true)}>
-          {running ? "Searching…" : `Find chains (${selectedIds.size} selected)`}
-        </button>
-        {running && (
-          <button onClick={cancel} style={{ ...BTN(), color: "rgba(255,100,100,0.8)", borderColor: "rgba(255,100,100,0.3)" }}>
-            Cancel
-          </button>
-        )}
-        {!running && results.length > 0 && (
-          <>
-            <button onClick={() => verifyAllChains(results)} disabled={verifying} style={BTN()}>
-              {verifying ? "Verifying…" : "Re-verify values"}
-            </button>
-            <button onClick={() => { setResults([]); setProgress(null); setChainValues({}); }} style={BTN()}>
-              Clear
-            </button>
-          </>
-        )}
-      </div>
-
-      {/* Progress bar */}
-      {progress && !progress.done && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-          <div style={{ height: 4, background: "rgba(255,255,255,0.08)", borderRadius: 2, overflow: "hidden" }}>
-            <div style={{ height: "100%", width: `${progress.pct}%`,
-              background: progress.phase === 0 ? "rgba(100,180,255,0.7)" : "#00f5a0",
-              borderRadius: 2, transition: "width 0.3s ease" }} />
-          </div>
-          <div style={{ display: "flex", gap: 16, fontSize: 11, fontFamily: "monospace", color: "rgba(255,255,255,0.4)" }}>
-            <span>{statusText}</span>
-            {progress.index_size > 0 && (
-              <span style={{ color: "rgba(100,180,255,0.6)" }}>
-                {(progress.index_size / 1000).toFixed(0)}K ptr entries indexed
-              </span>
-            )}
-          </div>
-        </div>
-      )}
-      {progress?.done && statusText && (
-        <div style={{ fontSize: 11, fontFamily: "monospace",
-          color: progress.error ? "rgba(255,120,120,0.8)" : "rgba(0,245,160,0.7)" }}>
-          {statusText}
-          {progress.index_size > 0 && !progress.error && (
-            <span style={{ color: "rgba(255,255,255,0.3)", marginLeft: 12 }}>
-              ({(progress.index_size / 1000).toFixed(0)}K ptr entries)
-            </span>
-          )}
-        </div>
-      )}
-
-      {/* Results — one section per target watch */}
-      {filteredResults.map((res) => {
-        // We need the original (unfiltered) chain count for the header message
-        const originalCount = results.find((r) => r.target_addr === res.target_addr)?.chains.length ?? 0;
-        return (
-          <div key={res.target_addr} style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {/* Target header */}
-            <div style={{ display: "flex", gap: 8, alignItems: "baseline", flexWrap: "wrap" }}>
-              <span style={{ fontFamily: "monospace", fontSize: 12, color: "#fff", fontWeight: 600 }}>
-                {res.target_label}
-              </span>
-              <span style={{ ...LABEL_COL, fontSize: 11 }}>{res.target_addr}</span>
-              <span style={{
-                fontSize: 10, fontFamily: "monospace",
-                color: res.chains.length > 0 ? "#00f5a0" : "rgba(255,255,255,0.2)",
-              }}>
-                {res.chains.length} chain{res.chains.length !== 1 ? "s" : ""}
-              </span>
-              {res.hiddenCount > 0 && (
-                <span style={{ fontSize: 10, fontFamily: "monospace", color: "rgba(255,120,60,0.7)" }}>
-                  +{res.hiddenCount} hidden (large offsets — likely unstable)
-                </span>
-              )}
-            </div>
-
-            {res.chains.length === 0 ? (
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.2)", fontFamily: "monospace", paddingLeft: 12 }}>
-                {originalCount > 0
-                  ? `All ${originalCount} chain${originalCount !== 1 ? "s" : ""} filtered out — try a larger max struct off value.`
-                  : "No static chains found — try larger depth or max back."}
-              </div>
-            ) : (
-              <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(0,245,160,0.1)",
-                borderRadius: 8, overflow: "hidden" }}>
-                {/* Header */}
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 100px 45px 90px 70px",
-                  gap: 8, padding: "5px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)",
-                  fontSize: 10, color: "rgba(255,255,255,0.25)", letterSpacing: 0.8,
-                  position: "sticky", top: 0, background: "rgba(12,12,18,0.95)" }}>
-                  <span>OFFSETS  (game_base → deref … → value)</span>
-                  <span>STATIC PTR</span><span>DEPTH</span><span>VALUE NOW</span><span />
-                </div>
-
-                {res.chains.map((chain, ci) => {
-                  const cvKey = res.target_addr + "|" + chain.offsets.join(" ");
-                  const cv = chainValues[cvKey];
-                  return (
-                    <div key={ci} style={{ display: "grid", gridTemplateColumns: "1fr 100px 45px 90px 70px",
-                      gap: 8, padding: "5px 12px", borderBottom: "1px solid rgba(255,255,255,0.03)",
-                      alignItems: "center" }}>
-
-                      {/* Color-coded offset chips */}
-                      <div style={{ display: "flex", gap: 3, flexWrap: "wrap", minWidth: 0 }}>
-                        {chain.offsets.map((o, oi) => {
-                          const v = parseInt(o, 16);
-                          // First chip = static module offset (always large, always blue)
-                          // Non-first chips = struct field offsets, color by size:
-                          //   ≤ 0x80  green   (definitely a struct field)
-                          //   ≤ 0x400 cyan    (plausible struct field)
-                          //   ≤ 0x1000 amber  (large but possible)
-                          //   > 0x1000 red    (suspicious — likely arena hit)
-                          const col = oi === 0
-                            ? "rgba(100,180,255,0.85)"
-                            : v <= 0x80   ? "#00f5a0"
-                            : v <= 0x400  ? "rgba(100,220,255,0.85)"
-                            : v <= 0x1000 ? "rgba(255,200,60,0.9)"
-                            : "rgba(255,100,60,0.9)";
-                          const bg = oi === 0
-                            ? "rgba(100,180,255,0.08)"
-                            : v <= 0x80   ? "rgba(0,245,160,0.06)"
-                            : v <= 0x400  ? "rgba(100,220,255,0.06)"
-                            : v <= 0x1000 ? "rgba(255,200,60,0.06)"
-                            : "rgba(255,100,60,0.08)";
-                          const border = oi === 0
-                            ? "rgba(100,180,255,0.2)"
-                            : v <= 0x80   ? "rgba(0,245,160,0.2)"
-                            : v <= 0x400  ? "rgba(100,220,255,0.2)"
-                            : v <= 0x1000 ? "rgba(255,200,60,0.25)"
-                            : "rgba(255,100,60,0.3)";
-                          return (
-                            <span key={oi} title={oi === 0 ? "Static module offset" : `Struct field offset: 0x${o} = ${v} bytes`}
-                              style={{ fontFamily: "monospace", fontSize: 10,
-                                padding: "1px 5px", borderRadius: 3,
-                                background: bg, border: `1px solid ${border}`, color: col }}>
-                              0x{o}
-                            </span>
-                          );
-                        })}
-                      </div>
-
-                      {/* Static anchor (module+offset) */}
-                      <span style={{ fontFamily: "monospace", fontSize: 10,
-                        color: "rgba(0,245,160,0.8)", overflow: "hidden",
-                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}
-                        title={chain.module_rel}>
-                        +0x{chain.offsets[0]}
-                      </span>
-
-                      {/* Depth (number of ptr dereferences) */}
-                      <span style={{ fontFamily: "monospace", fontSize: 11,
-                        color: "rgba(255,255,255,0.35)", textAlign: "center" }}>
-                        {chain.depth}
-                      </span>
-
-                      {/* Live verified value */}
-                      <span style={{
-                        fontFamily: "monospace", fontSize: 12, fontVariantNumeric: "tabular-nums",
-                        color: cv === undefined
-                          ? "rgba(255,255,255,0.2)"
-                          : cv.ok && cv.val !== null ? "#00f5a0"
-                          : "rgba(255,80,80,0.7)",
-                      }}>
-                        {cv === undefined ? (verifying ? "…" : "—")
-                          : cv.ok && cv.val !== null ? cv.val : "✗"}
-                      </span>
-
-                      <button onClick={() => onLoadChain(chain.offsets)}
-                        style={{ ...BTN(cv?.ok ?? false), fontSize: 10, padding: "2px 6px" }}>
-                        →Chain
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-// ─── Modules tab ─────────────────────────────────────────────────────────────
-
-function ModulesTab() {
-  const [modules, setModules] = useState<ModuleEntry[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState("");
-
-  async function load() {
-    setLoading(true);
-    try {
-      setModules(await invoke<ModuleEntry[]>("mem_get_modules"));
-    } catch (e) {
-      setModules([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  const filtered = filter
-    ? modules.filter((m) => m.name.toLowerCase().includes(filter.toLowerCase()))
-    : modules;
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-        <button onClick={load} disabled={loading} style={BTN(true)}>
-          {loading ? "Loading…" : "Load modules"}
-        </button>
-        {modules.length > 0 && (
-          <input
-            value={filter}
-            onChange={(e) => setFilter(e.target.value)}
-            placeholder="filter…"
-            style={{ ...INPUT, width: 160 }}
-          />
-        )}
-        {modules.length > 0 && <span style={{ ...LABEL_COL }}>{filtered.length} / {modules.length} modules</span>}
-      </div>
-
-      {filtered.length > 0 && (
-        <div style={{ background: "rgba(0,0,0,0.3)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 8, overflow: "hidden", maxHeight: 420, overflowY: "auto" }}>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 130px 80px", gap: 8, padding: "6px 12px", borderBottom: "1px solid rgba(255,255,255,0.07)", fontSize: 10, color: "rgba(255,255,255,0.25)", position: "sticky", top: 0, background: "rgba(0,0,0,0.7)" }}>
-            <span>MODULE</span><span>BASE</span><span>SIZE</span>
-          </div>
-          {filtered.map((m) => (
-            <div key={m.name + m.base} style={{ display: "grid", gridTemplateColumns: "1fr 130px 80px", gap: 8, padding: "4px 12px", borderBottom: "1px solid rgba(255,255,255,0.03)", alignItems: "center" }}>
-              <span style={{ fontFamily: "monospace", fontSize: 11, color: "#fff", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m.name}</span>
-              <span style={{ ...LABEL_COL, fontSize: 11 }}>{m.base}</span>
-              <span style={{ ...LABEL_COL, fontSize: 11 }}>{(m.size / 1024 / 1024).toFixed(1)} MB</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── AimMod Runtime Console tab ──────────────────────────────────────────────
 
 function Ue4ssConsoleTab() {
@@ -1967,6 +596,8 @@ function Ue4ssConsoleTab() {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const eventScrollerRef = useRef<HTMLDivElement | null>(null);
   const objectScrollerRef = useRef<HTMLDivElement | null>(null);
+  const lastQremRef = useRef<number | null>(null);
+  const lastChRef = useRef<number | null>(null);
 
   const pushLine = useCallback((line: string) => {
     setLines((prev) => {
@@ -2048,11 +679,92 @@ function Ue4ssConsoleTab() {
       });
     });
 
+    const unlistenBridgeMetric = listen<BridgeParsedEvent>("bridge-metric", (event) => {
+      const payload = event.payload;
+      if (!payload || !payload.ev) return;
+
+      if (
+        payload.ev === "pull_queue_time_remaining"
+        || payload.ev === "challenge_queue_time_remaining"
+        || payload.ev === "queue_time_remaining"
+        || payload.ev === "qrem"
+      ) {
+        const qrem = payload.value;
+        if (typeof qrem !== "number" || !Number.isFinite(qrem)) return;
+        const prev = lastQremRef.current;
+        if (prev !== null && Math.abs(prev - qrem) <= 0.0001) return;
+        lastQremRef.current = qrem;
+        pushEvent({
+          ts: new Date().toLocaleTimeString(),
+          source: "bridge",
+          raw: `[bridge-metric] qrem=${qrem.toFixed(3)}`,
+          ev: "qrem",
+        });
+        return;
+      }
+
+      if (
+        payload.ev === "pull_is_in_challenge"
+        || payload.ev === "is_in_challenge"
+        || payload.ev === "ch"
+      ) {
+        const rawValue = payload.value;
+        if (typeof rawValue !== "number" || !Number.isFinite(rawValue)) return;
+        const ch = rawValue >= 0.5 ? 1 : 0;
+        if (lastChRef.current === ch) return;
+        lastChRef.current = ch;
+        pushEvent({
+          ts: new Date().toLocaleTimeString(),
+          source: "bridge",
+          raw: `[bridge-metric] ch=${ch}`,
+          ev: "ch",
+        });
+      }
+    });
+
+    const unlistenChallengeStart = listen("challenge-start", () => {
+      lastChRef.current = 1;
+      pushEvent({
+        ts: new Date().toLocaleTimeString(),
+        source: "bridge",
+        raw: "[challenge-start]",
+        ev: "challenge_start",
+      });
+    });
+
+    const unlistenChallengeEnd = listen("challenge-end", () => {
+      lastChRef.current = 0;
+      pushEvent({
+        ts: new Date().toLocaleTimeString(),
+        source: "bridge",
+        raw: "[challenge-end]",
+        ev: "challenge_end",
+      });
+    });
+
+    const unlistenStatsPanel = listen<StatsPanelUpdatePayload>("stats-panel-update", (event) => {
+      const qrem = event.payload?.queue_time_remaining;
+      if (typeof qrem !== "number" || !Number.isFinite(qrem)) return;
+      const prev = lastQremRef.current;
+      if (prev !== null && Math.abs(prev - qrem) <= 0.0001) return;
+      lastQremRef.current = qrem;
+      pushEvent({
+        ts: new Date().toLocaleTimeString(),
+        source: "bridge",
+        raw: `[stats-panel-update] queue_time_remaining=${qrem.toFixed(3)}`,
+        ev: "pull_queue_time_remaining",
+      });
+    });
+
     return () => {
       mounted = false;
       unlistenLog.then((u) => u());
       unlistenBridge.then((u) => u());
       unlistenBridgeParsed.then((u) => u());
+      unlistenBridgeMetric.then((u) => u());
+      unlistenChallengeStart.then((u) => u());
+      unlistenChallengeEnd.then((u) => u());
+      unlistenStatsPanel.then((u) => u());
     };
   }, [pushLine, pushEvent, refreshFlags]);
 
@@ -3793,32 +2505,9 @@ function ObjectDebugTab() {
 // ─── Main DebugTab ────────────────────────────────────────────────────────────
 
 export function DebugTab() {
-  const [sub, setSub] = useState<SubTab>("watches");
-  // Offsets loaded from PtrScanTab "→Chain" button; fed into ChainTab
-  const [pendingChainOffsets, setPendingChainOffsets] = useState<string[] | null>(null);
-
-  // Allow sub-components to switch tabs via custom event
-  useEffect(() => {
-    const handler = (e: Event) => {
-      const tab = (e as CustomEvent<{ tab: SubTab }>).detail.tab;
-      setSub(tab);
-    };
-    window.addEventListener("switch-debug-tab", handler);
-    return () => window.removeEventListener("switch-debug-tab", handler);
-  }, []);
-
-  function handleLoadChain(offsets: string[]) {
-    setPendingChainOffsets(offsets);
-    setSub("chain");
-  }
+  const [sub, setSub] = useState<SubTab>("ue4ss");
 
   const subTabs: { id: SubTab; label: string }[] = [
-    { id: "watches",   label: "Watches" },
-    { id: "scanner",   label: "Scanner" },
-    { id: "ptrscan",   label: "Ptr Scan" },
-    { id: "chain",     label: "Chain" },
-    { id: "autochain", label: "Auto Chain" },
-    { id: "modules",   label: "Modules" },
     { id: "ue4ss",     label: "AimMod Runtime" },
     { id: "methodsrc", label: "Method Sources" },
     { id: "objdebug",  label: "Object Debug" },
@@ -3846,13 +2535,6 @@ export function DebugTab() {
         ))}
       </div>
 
-      {/* Always mounted — display:none preserves state (scan progress, watch poll, etc.) */}
-      <div style={{ display: sub === "watches"   ? undefined : "none" }}><WatchesTab /></div>
-      <div style={{ display: sub === "scanner"   ? undefined : "none" }}><ScannerTab /></div>
-      <div style={{ display: sub === "ptrscan"   ? undefined : "none" }}><PtrScanTab onLoadChain={handleLoadChain} /></div>
-      <div style={{ display: sub === "chain"     ? undefined : "none" }}><ChainTab pendingOffsets={pendingChainOffsets} /></div>
-      <div style={{ display: sub === "autochain" ? undefined : "none" }}><AutoChainTab onLoadChain={handleLoadChain} /></div>
-      <div style={{ display: sub === "modules"   ? undefined : "none" }}><ModulesTab /></div>
       <div style={{ display: sub === "ue4ss"     ? undefined : "none" }}><Ue4ssConsoleTab /></div>
       <div style={{ display: sub === "methodsrc" ? undefined : "none" }}><MethodSourcesTab /></div>
       <div style={{ display: sub === "objdebug"  ? undefined : "none" }}><ObjectDebugTab /></div>

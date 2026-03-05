@@ -40,7 +40,6 @@ pub fn is_game_focused() -> bool {
 }
 
 /// Return the cached KovaaK's HWND, if we have seen it at least once.
-#[cfg(all(target_os = "windows", feature = "ocr"))]
 pub fn get_game_hwnd() -> Option<windows::Win32::Foundation::HWND> {
     let ptr = GAME_HWND_PTR.load(Ordering::Relaxed);
     if ptr == 0 {
@@ -68,9 +67,6 @@ pub fn set_force_show(val: bool) {
     FORCE_SHOW.store(val, Ordering::Relaxed);
 }
 
-// ─── Platform implementation ─────────────────────────────────────────────────
-
-#[cfg(all(target_os = "windows", feature = "ocr"))]
 fn tracker_loop(app: AppHandle) {
     use windows::Win32::Foundation::{HWND, RECT};
     use windows::Win32::Graphics::Gdi::{
@@ -239,7 +235,6 @@ fn tracker_loop(app: AppHandle) {
 
 /// Returns true if `hwnd` belongs to the KovaaK's game process.
 /// Checks window title first (fast), then process exe name (reliable after mode switch).
-#[cfg(all(target_os = "windows", feature = "ocr"))]
 fn is_kovaaks_window(hwnd: windows::Win32::Foundation::HWND) -> bool {
     use windows::Win32::System::Threading::{
         OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -287,10 +282,4 @@ fn is_kovaaks_window(hwnd: windows::Win32::Foundation::HWND) -> bool {
     }
 
     false
-}
-
-#[cfg(not(all(target_os = "windows", feature = "ocr")))]
-fn tracker_loop(_app: AppHandle) {
-    // No-op stub for non-Windows / dev builds.
-    // The overlay remains always visible on those platforms.
 }

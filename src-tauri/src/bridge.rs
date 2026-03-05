@@ -150,7 +150,11 @@ fn is_metric_event_name(ev: &str) -> bool {
         || ev.starts_with("derived_")
         || ev.starts_with("shot_")
         || ev.starts_with("challenge_")
+        || ev == "is_in_challenge"
+        || ev == "queue_time_remaining"
         || ev == "score_source"
+        || ev == "qrem"
+        || ev == "ch"
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -235,6 +239,10 @@ mod imp {
     const PAYLOAD_MANIFEST_FILE: &str = ".kovaaks_overlay_payload_manifest.txt";
     const PAYLOAD_PROFILE_FILE: &str = ".kovaaks_overlay_profile";
     const PAYLOAD_DEPLOY_INFO_FILE: &str = ".kovaaks_overlay_deploy_info.txt";
+    const IN_GAME_OVERLAY_DIST_DIR: &str = "dist";
+    const IN_GAME_OVERLAY_TARGET_DIR: &str = "aimmod_overlay";
+    const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
+    const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
     const LOG_RING_CAPACITY: usize = 1200;
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
@@ -384,6 +392,23 @@ mod imp {
 
         if emit_challenge {
             let _ = app.emit(super::EVENT_CHALLENGE_START, ());
+            if reason != "bridge:challenge_start" {
+                let synthetic = super::BridgeParsedEvent {
+                    ev: "challenge_start".to_string(),
+                    value: Some(1.0),
+                    total: None,
+                    delta: Some(1.0),
+                    field: None,
+                    source: Some(reason.to_string()),
+                    method: Some("session_tracking".to_string()),
+                    origin: Some("bridge_session_tracking".to_string()),
+                    origin_flag: Some("compat".to_string()),
+                    fn_name: None,
+                    receiver: None,
+                    raw: format!("{{\"ev\":\"challenge_start\",\"source\":\"{}\"}}", reason),
+                };
+                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+            }
         }
         if emit_session {
             reset_bridge_stats_snapshot();
@@ -409,6 +434,26 @@ mod imp {
 
         if emit_challenge {
             let _ = app.emit(super::EVENT_CHALLENGE_END, ());
+            let parsed_terminal_reason = reason == "bridge:challenge_end"
+                || reason == "bridge:challenge_complete"
+                || reason == "bridge:challenge_canceled";
+            if !parsed_terminal_reason {
+                let synthetic = super::BridgeParsedEvent {
+                    ev: "challenge_end".to_string(),
+                    value: Some(1.0),
+                    total: None,
+                    delta: Some(1.0),
+                    field: None,
+                    source: Some(reason.to_string()),
+                    method: Some("session_tracking".to_string()),
+                    origin: Some("bridge_session_tracking".to_string()),
+                    origin_flag: Some("compat".to_string()),
+                    fn_name: None,
+                    receiver: None,
+                    raw: format!("{{\"ev\":\"challenge_end\",\"source\":\"{}\"}}", reason),
+                };
+                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+            }
         }
         if emit_session {
             let _ = app.emit(super::EVENT_SESSION_END, ());
@@ -567,6 +612,21 @@ mod imp {
             .and_then(derive_scenario_name_from_id)
     }
 
+    fn parse_state_manager_queue_time_remaining_from_metadata(raw: &str) -> Option<f64> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+        let value = match obj.get("queue_time_remaining") {
+            Some(serde_json::Value::Number(n)) => n.as_f64(),
+            Some(serde_json::Value::String(s)) => s.parse::<f64>().ok(),
+            _ => None,
+        }?;
+        if value.is_finite() && value >= 0.0 {
+            Some(value)
+        } else {
+            None
+        }
+    }
+
     fn apply_scenario_name_update(app: &AppHandle, name: String, source: &str, raw: &str) {
         let mut changed = false;
         if let Ok(mut state) = bridge_compat_state().lock() {
@@ -712,6 +772,7 @@ mod imp {
             }
         }
 
+        let mut challenge_transition_active: Option<bool> = None;
         match parsed.ev.as_str() {
             "session_start" => {
                 begin_session_tracking(app, "bridge:session_start", false);
@@ -721,22 +782,122 @@ mod imp {
             }
             "challenge_start" | "scenario_start" => {
                 begin_session_tracking(app, "bridge:challenge_start", true);
+                challenge_transition_active = Some(true);
             }
             "challenge_end" | "scenario_end" => {
                 end_session_tracking(app, "bridge:challenge_end", true);
+                challenge_transition_active = Some(false);
             }
             "challenge_complete" | "challenge_completed" | "post_challenge_complete" => {
                 end_session_tracking(app, "bridge:challenge_complete", true);
+                challenge_transition_active = Some(false);
             }
             "challenge_canceled" | "challenge_quit" => {
                 end_session_tracking(app, "bridge:challenge_canceled", true);
+                challenge_transition_active = Some(false);
             }
             _ => {}
+        }
+
+        if let Some(active) = challenge_transition_active {
+            let mut should_emit_stats = false;
+            if let Ok(mut state) = bridge_compat_state().lock() {
+                if state.stats.is_in_challenge != Some(active) {
+                    state.stats.is_in_challenge = Some(active);
+                    should_emit_stats = true;
+                }
+                if !active
+                    && state
+                        .stats
+                        .queue_time_remaining
+                        .map_or(false, |prev| prev.abs() > 0.0001)
+                {
+                    state.stats.queue_time_remaining = Some(0.0);
+                    should_emit_stats = true;
+                }
+                let next_game_state = derive_game_state(&state.stats).to_string();
+                if state.stats.game_state != next_game_state {
+                    state.stats.game_state = next_game_state;
+                    should_emit_stats = true;
+                }
+                if should_emit_stats {
+                    let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                }
+            }
+
+            let ch_metric = super::BridgeParsedEvent {
+                ev: "ch".to_string(),
+                value: Some(if active { 1.0 } else { 0.0 }),
+                total: None,
+                delta: None,
+                field: Some("is_in_challenge".to_string()),
+                source: parsed.source.clone(),
+                method: Some("challenge_transition".to_string()),
+                origin: Some("bridge_session_tracking".to_string()),
+                origin_flag: Some("compat".to_string()),
+                fn_name: parsed.fn_name.clone(),
+                receiver: parsed.receiver.clone(),
+                raw: parsed.raw.clone(),
+            };
+            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &ch_metric);
+
+            if !active {
+                let qrem_metric = super::BridgeParsedEvent {
+                    ev: "qrem".to_string(),
+                    value: Some(0.0),
+                    total: None,
+                    delta: None,
+                    field: Some("queue_time_remaining".to_string()),
+                    source: parsed.source.clone(),
+                    method: Some("challenge_transition".to_string()),
+                    origin: Some("bridge_session_tracking".to_string()),
+                    origin_flag: Some("compat".to_string()),
+                    fn_name: parsed.fn_name.clone(),
+                    receiver: parsed.receiver.clone(),
+                    raw: parsed.raw.clone(),
+                };
+                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &qrem_metric);
+            }
         }
 
         if parsed.ev == "scenario_metadata" {
             if let Some(name) = parse_state_manager_scenario_name_from_metadata(&parsed.raw) {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
+            }
+            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw) {
+                let mut queue_changed = false;
+                if let Ok(mut state) = bridge_compat_state().lock() {
+                    if !state
+                        .stats
+                        .queue_time_remaining
+                        .map_or(false, |prev| (prev - qrem).abs() <= 0.0001)
+                    {
+                        state.stats.queue_time_remaining = Some(qrem);
+                        let next_game_state = derive_game_state(&state.stats).to_string();
+                        if state.stats.game_state != next_game_state {
+                            state.stats.game_state = next_game_state;
+                        }
+                        queue_changed = true;
+                        let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                    }
+                }
+                if queue_changed {
+                    let synthetic = super::BridgeParsedEvent {
+                        ev: "pull_queue_time_remaining".to_string(),
+                        value: Some(qrem),
+                        total: None,
+                        delta: None,
+                        field: None,
+                        source: Some("state_manager".to_string()),
+                        method: Some("scenario_metadata".to_string()),
+                        origin: Some("scenario_metadata".to_string()),
+                        origin_flag: Some("state_manager".to_string()),
+                        fn_name: None,
+                        receiver: None,
+                        raw: parsed.raw.clone(),
+                    };
+                    let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+                }
             }
             return;
         }
@@ -757,7 +918,13 @@ mod imp {
             return;
         }
 
-        if !parsed.ev.starts_with("pull_") {
+        let is_compat_metric = parsed.ev.starts_with("pull_")
+            || parsed.ev == "is_in_challenge"
+            || parsed.ev == "queue_time_remaining"
+            || parsed.ev == "challenge_queue_time_remaining"
+            || parsed.ev == "qrem"
+            || parsed.ev == "ch";
+        if !is_compat_metric {
             return;
         }
 
@@ -801,6 +968,8 @@ mod imp {
         let now = Instant::now();
         let mut should_emit_stats = false;
         let mut fallback_session_start_reason: Option<&'static str> = None;
+        let mut emit_alias_qrem: Option<f64> = None;
+        let mut emit_alias_ch: Option<f64> = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
             match parsed.ev.as_str() {
@@ -814,11 +983,12 @@ mod imp {
                         fallback_session_start_reason = Some("bridge:pull_is_in_scenario");
                     }
                 }
-                "pull_is_in_challenge" => {
+                "pull_is_in_challenge" | "is_in_challenge" => {
                     let next = value >= 0.5;
                     if state.stats.is_in_challenge != Some(next) {
                         state.stats.is_in_challenge = Some(next);
                         should_emit_stats = true;
+                        emit_alias_ch = Some(if next { 1.0 } else { 0.0 });
                     }
                     if next {
                         fallback_session_start_reason = Some("bridge:pull_is_in_challenge");
@@ -1069,7 +1239,7 @@ mod imp {
                         should_emit_stats = true;
                     }
                 }
-                "pull_queue_time_remaining" => {
+                "pull_queue_time_remaining" | "challenge_queue_time_remaining" | "queue_time_remaining" => {
                     let suppress = low_confidence_zero
                         && value <= 0.000001
                         && state
@@ -1084,6 +1254,7 @@ mod imp {
                     {
                         state.stats.queue_time_remaining = Some(value);
                         should_emit_stats = true;
+                        emit_alias_qrem = Some(value);
                     }
                 }
                 "pull_score_total" | "pull_score_total_derived" => {
@@ -1168,6 +1339,42 @@ mod imp {
                     let _ = app.emit(super::EVENT_LIVE_SCORE, &payload);
                 }
             }
+        }
+
+        if let Some(ch) = emit_alias_ch {
+            let synthetic = super::BridgeParsedEvent {
+                ev: "ch".to_string(),
+                value: Some(ch),
+                total: None,
+                delta: None,
+                field: Some("is_in_challenge".to_string()),
+                source: parsed.source.clone(),
+                method: Some("compat_alias".to_string()),
+                origin: Some("bridge_compat".to_string()),
+                origin_flag: Some("bridge_compat".to_string()),
+                fn_name: parsed.fn_name.clone(),
+                receiver: parsed.receiver.clone(),
+                raw: parsed.raw.clone(),
+            };
+            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+        }
+
+        if let Some(qrem) = emit_alias_qrem {
+            let synthetic = super::BridgeParsedEvent {
+                ev: "qrem".to_string(),
+                value: Some(qrem),
+                total: None,
+                delta: None,
+                field: Some("queue_time_remaining".to_string()),
+                source: parsed.source.clone(),
+                method: Some("compat_alias".to_string()),
+                origin: Some("bridge_compat".to_string()),
+                origin_flag: Some("bridge_compat".to_string()),
+                fn_name: parsed.fn_name.clone(),
+                receiver: parsed.receiver.clone(),
+                raw: parsed.raw.clone(),
+            };
+            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
         }
 
         if let Some(reason) = fallback_session_start_reason {
@@ -1406,6 +1613,7 @@ mod imp {
             .map(|p| find_loaded_module(p, UE4SS_DLL).is_some())
             .unwrap_or(false);
         sync_payload(&payload_root, &game_bin_dir, already_loaded)?;
+        sync_in_game_overlay_bundle(resource_dir, &game_bin_dir, already_loaded)?;
         let managed_mod_dll = game_bin_dir
             .join("Mods")
             .join("KovaaksBridgeMod")
@@ -2208,6 +2416,166 @@ mod imp {
             ));
         }
         Ok(bin_dir)
+    }
+
+    fn to_file_url(path: &Path) -> String {
+        let mut normalized = path.to_string_lossy().replace('\\', "/");
+        if !normalized.starts_with('/') {
+            normalized.insert(0, '/');
+        }
+        let encoded = normalized.replace(' ', "%20");
+        format!("file://{encoded}")
+    }
+
+    fn write_in_game_overlay_url(game_bin_dir: &Path, overlay_index: &Path) -> Result<String, String> {
+        if !overlay_index.is_file() {
+            return Err(format!(
+                "In-game browser index file not found: {}",
+                overlay_index.display()
+            ));
+        }
+
+        let overlay_url = to_file_url(overlay_index);
+        let overlay_url_path = game_bin_dir.join(IN_GAME_OVERLAY_URL_FILE);
+        std::fs::write(&overlay_url_path, format!("{}\n", overlay_url)).map_err(|e| {
+            format!(
+                "Failed to write in-game overlay URL file {}: {}",
+                overlay_url_path.display(),
+                e
+            )
+        })?;
+
+        emit_bridge_log_line(format!(
+            "[bridge] in-game browser URL file written path={} url={}",
+            overlay_url_path.display(),
+            overlay_url
+        ));
+
+        Ok(overlay_url)
+    }
+
+    fn resolve_in_game_overlay_dist_source(resource_dir: &Path) -> Option<PathBuf> {
+        let primary = resource_dir.join(IN_GAME_OVERLAY_DIST_DIR);
+        if primary.is_dir() {
+            return Some(primary);
+        }
+
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                for ancestor in exe_dir.ancestors().take(10) {
+                    let candidate = ancestor.join(IN_GAME_OVERLAY_DIST_DIR);
+                    if candidate.is_dir() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+
+        if let Some(manifest_dir) = option_env!("CARGO_MANIFEST_DIR") {
+            let manifest_path = Path::new(manifest_dir);
+            if let Some(repo_root) = manifest_path.parent() {
+                let candidate = repo_root.join(IN_GAME_OVERLAY_DIST_DIR);
+                if candidate.is_dir() {
+                    return Some(candidate);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn sync_in_game_overlay_bundle(
+        resource_dir: &Path,
+        game_bin_dir: &Path,
+        tolerate_locked_files: bool,
+    ) -> Result<(), String> {
+        let dist_src = resolve_in_game_overlay_dist_source(resource_dir);
+        if dist_src.is_none() {
+            let existing_index = game_bin_dir
+                .join(IN_GAME_OVERLAY_TARGET_DIR)
+                .join(IN_GAME_OVERLAY_INDEX_FILE);
+            if existing_index.is_file() {
+                let overlay_url = write_in_game_overlay_url(game_bin_dir, &existing_index)?;
+                log::info!(
+                    "bridge: reusing existing in-game browser bundle index={} url={}",
+                    existing_index.display(),
+                    overlay_url
+                );
+                return Ok(());
+            }
+
+            log::warn!(
+                "bridge: bundled frontend dist not found at {}; skipping in-game browser payload sync",
+                resource_dir.join(IN_GAME_OVERLAY_DIST_DIR).display()
+            );
+            emit_bridge_log_line(format!(
+                "[bridge] in-game browser bundle missing at {} (skipped)",
+                resource_dir.join(IN_GAME_OVERLAY_DIST_DIR).display()
+            ));
+            return Ok(());
+        }
+        let dist_src = dist_src.expect("checked is_some");
+
+        let dist_dst = game_bin_dir.join(IN_GAME_OVERLAY_TARGET_DIR);
+        if dist_dst.exists() {
+            if let Err(e) = std::fs::remove_dir_all(&dist_dst) {
+                if tolerate_locked_files && is_permission_denied(&e) {
+                    log::warn!(
+                        "bridge: could not replace in-game browser bundle (in use): {} ({})",
+                        dist_dst.display(),
+                        e
+                    );
+                } else {
+                    return Err(format!(
+                        "Failed to replace in-game browser bundle {}: {}",
+                        dist_dst.display(),
+                        e
+                    ));
+                }
+            }
+        }
+
+        let mut copied_paths = Vec::new();
+        let copied = copy_dir_recursive(
+            &dist_src,
+            &dist_dst,
+            &dist_src,
+            "full",
+            tolerate_locked_files,
+            &mut copied_paths,
+        )?;
+
+        let overlay_index = dist_dst.join(IN_GAME_OVERLAY_INDEX_FILE);
+        if !overlay_index.is_file() {
+            log::warn!(
+                "bridge: in-game browser bundle missing index file after sync: {}",
+                overlay_index.display()
+            );
+            emit_bridge_log_line(format!(
+                "[bridge] in-game browser bundle missing {} (copied files={})",
+                overlay_index.display(),
+                copied
+            ));
+            return Ok(());
+        }
+
+        let overlay_url = write_in_game_overlay_url(game_bin_dir, &overlay_index)?;
+
+        log::info!(
+            "bridge: synced in-game browser bundle files={} src={} dst={} url={}",
+            copied,
+            dist_src.display(),
+            dist_dst.display(),
+            overlay_url
+        );
+        let overlay_url_path = game_bin_dir.join(IN_GAME_OVERLAY_URL_FILE);
+        emit_bridge_log_line(format!(
+            "[bridge] in-game browser bundle synced files={} url_file={} url={}",
+            copied,
+            overlay_url_path.display(),
+            overlay_url
+        ));
+        Ok(())
     }
 
     fn sync_payload(

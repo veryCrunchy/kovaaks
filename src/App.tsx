@@ -3,7 +3,6 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { VSMode } from "./overlay/VSMode";
 import { SmoothnessHUD } from "./overlay/SmoothnessHUD";
-import { LiveMemStatsHUD } from "./overlay/LiveMemStatsHUD";
 import { StatsHUD } from "./overlay/StatsHUD";
 import { LiveFeedbackToast } from "./overlay/LiveFeedbackToast";
 import { DraggableHUD } from "./overlay/DraggableHUD";
@@ -126,9 +125,6 @@ export default function App() {
               <SmoothnessHUD preview={true} />
             </DraggableHUD>
           )}
-          <DraggableHUD storageKey="live-mem" defaultPos={{ x: window.innerWidth - 140, y: 16 }} layoutMode={mode === "layout"}>
-            <LiveMemStatsHUD preview={mode === "layout"} />
-          </DraggableHUD>
           {hudVis.stats && (
             <DraggableHUD storageKey="statshud" defaultPos={{ x: window.innerWidth - 160, y: window.innerHeight - 200 }} layoutMode={mode === "layout"}>
               <StatsHUD preview={true} />

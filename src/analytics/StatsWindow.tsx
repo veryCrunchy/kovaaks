@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
-import { LiveTab } from "./LiveTab";
 import { DebugTab } from "./DebugTab";
 import { MousePathViewer } from "./MousePathViewer";
 import type { RawPositionPoint, MetricPoint, ScreenFrame } from "../types/mouse";
@@ -2804,7 +2803,7 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-type RootMode = "sessions" | "leaderboards" | "live" | "debug";
+type RootMode = "sessions" | "leaderboards" | "debug";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
@@ -2978,7 +2977,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           flexShrink: 0,
         }}
       >
-        {(["sessions", "leaderboards", "live", "debug"] as RootMode[]).map((m) => (
+        {(["sessions", "leaderboards", "debug"] as RootMode[]).map((m) => (
           <button
             key={m}
             onClick={() => setRootMode(m)}
@@ -2995,7 +2994,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               fontWeight: rootMode === m ? 700 : 400,
             }}
           >
-            {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : m === "live" ? "Live" : "Debug"}
+            {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : "Debug"}
           </button>
         ))}
       </div>
@@ -3249,13 +3248,6 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       {rootMode === "leaderboards" && (
         <div style={{ flex: 1, overflow: "hidden" }}>
           <LeaderboardBrowser />
-        </div>
-      )}
-
-      {/* ── Live mem content ── */}
-      {rootMode === "live" && (
-        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
-          <LiveTab />
         </div>
       )}
 

@@ -743,6 +743,8 @@ private:
         int32_t current_kills_total,
         float current_score_per_minute,
         float current_seconds,
+        float current_challenge_average_fps,
+        int32_t current_challenge_tick_count,
         float current_time_remaining
     ) -> void {
         const auto sanitize_state = [](int32_t current, int32_t fallback) -> int32_t {
@@ -774,9 +776,9 @@ private:
         s_last_pull_score = sanitize_metric(current_score_total, last_score_total_);
         s_last_pull_kills = sanitize_state(current_kills_total, last_kills_total_);
         s_last_pull_spm = sanitize_metric(current_score_per_minute, last_score_per_minute_);
-        s_last_pull_challenge_seconds = sanitize_metric(current_seconds, last_seconds_);
-        s_last_pull_challenge_average_fps = -1.0f;
-        s_last_pull_challenge_tick_count = -1;
+        s_last_pull_challenge_seconds = sanitize_metric(current_seconds, last_challenge_seconds_total_);
+        s_last_pull_challenge_average_fps = sanitize_metric(current_challenge_average_fps, last_challenge_average_fps_);
+        s_last_pull_challenge_tick_count = sanitize_state(current_challenge_tick_count, last_challenge_tick_count_);
         s_last_pull_time_remaining = sanitize_metric(current_time_remaining, last_time_remaining_);
         s_last_run_scenario_name = last_scenario_name_;
     }
@@ -829,11 +831,13 @@ private:
         float current_score_per_minute = -1.0f;
         float current_kills_per_second = -1.0f;
         float current_accuracy = -1.0f;
+        float current_challenge_average_fps = -1.0f;
         float current_damage_done = -1.0f;
         float current_damage_possible = -1.0f;
         float current_damage_efficiency = -1.0f;
         float current_time_remaining = -1.0f;
         float current_queue_time_remaining = -1.0f;
+        int32_t current_challenge_tick_count = -1;
         RC::Unreal::UObject* meta = nullptr;
         RC::Unreal::UObject* scenario_manager = nullptr;
 
@@ -901,6 +905,28 @@ private:
                 emit_pull_f32("pull_score_per_minute", last_score_per_minute_, fv, last_nonzero_spm_ms_, now);
             }
             if (try_read_float(receiver, {
+                    targets_.get_challenge_average_fps_value_else,
+                    targets_.get_challenge_average_fps_value_or,
+                    targets_.receive_challenge_average_fps_value_else,
+                    targets_.receive_challenge_average_fps_value_or,
+                    targets_.receive_challenge_average_fps_single,
+                    targets_.receive_challenge_average_fps
+                }, fv)) {
+                current_challenge_average_fps = fv;
+                emit_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, fv, last_nonzero_challenge_average_fps_ms_, now);
+            }
+            if (try_read_int(receiver, {
+                    targets_.get_challenge_tick_count_value_else,
+                    targets_.get_challenge_tick_count_value_or,
+                    targets_.receive_challenge_tick_count_value_else,
+                    targets_.receive_challenge_tick_count_value_or,
+                    targets_.receive_challenge_tick_count_single,
+                    targets_.receive_challenge_tick_count
+                }, iv)) {
+                current_challenge_tick_count = iv;
+                emit_pull_i32("pull_challenge_tick_count_total", last_challenge_tick_count_, iv, last_nonzero_challenge_tick_count_ms_, now);
+            }
+            if (try_read_float(receiver, {
                     targets_.get_damage_done_value_else,
                     targets_.get_damage_done_value_or,
                     targets_.receive_damage_done_value_else,
@@ -943,6 +969,7 @@ private:
                 }, fv)) {
                 current_seconds = fv;
                 emit_pull_f32("pull_seconds_total", last_seconds_, fv, last_nonzero_seconds_ms_, now);
+                emit_pull_f32("pull_challenge_seconds_total", last_challenge_seconds_total_, fv, last_nonzero_challenge_seconds_ms_, now);
             }
         }
 
@@ -1041,6 +1068,7 @@ private:
                 && (current_seconds < 0.0f || current_seconds <= 0.0001f)) {
                 current_seconds = ui.seconds;
                 emit_pull_f32("pull_seconds_total", last_seconds_, ui.seconds, last_nonzero_seconds_ms_, now);
+                emit_pull_f32("pull_challenge_seconds_total", last_challenge_seconds_total_, ui.seconds, last_nonzero_challenge_seconds_ms_, now);
             }
             if (std::isfinite(ui.score_per_minute) && ui.score_per_minute >= 0.0f
                 && (current_score_per_minute < 0.0f || current_score_per_minute <= 0.0001f)) {
@@ -1105,6 +1133,8 @@ private:
             current_kills_total,
             current_score_per_minute,
             current_seconds,
+            current_challenge_average_fps,
+            current_challenge_tick_count,
             current_time_remaining
         );
         in_game_overlay_tick(now);
@@ -1296,6 +1326,18 @@ private:
         RC::Unreal::UFunction* get_damage_efficiency_value_or{};
         RC::Unreal::UFunction* receive_damage_efficiency_value_else{};
         RC::Unreal::UFunction* receive_damage_efficiency{};
+        RC::Unreal::UFunction* get_challenge_average_fps_value_else{};
+        RC::Unreal::UFunction* get_challenge_average_fps_value_or{};
+        RC::Unreal::UFunction* receive_challenge_average_fps_value_else{};
+        RC::Unreal::UFunction* receive_challenge_average_fps_value_or{};
+        RC::Unreal::UFunction* receive_challenge_average_fps_single{};
+        RC::Unreal::UFunction* receive_challenge_average_fps{};
+        RC::Unreal::UFunction* get_challenge_tick_count_value_else{};
+        RC::Unreal::UFunction* get_challenge_tick_count_value_or{};
+        RC::Unreal::UFunction* receive_challenge_tick_count_value_else{};
+        RC::Unreal::UFunction* receive_challenge_tick_count_value_or{};
+        RC::Unreal::UFunction* receive_challenge_tick_count_single{};
+        RC::Unreal::UFunction* receive_challenge_tick_count{};
         RC::Unreal::UFunction* meta_get_in_trainer{};
         RC::Unreal::UFunction* scenario_get_challenge_time_remaining{};
         RC::Unreal::UFunction* scenario_get_challenge_queue_time_remaining{};
@@ -1393,6 +1435,9 @@ private:
     float last_score_per_minute_{std::numeric_limits<float>::quiet_NaN()};
     float last_kills_per_second_{std::numeric_limits<float>::quiet_NaN()};
     float last_accuracy_{std::numeric_limits<float>::quiet_NaN()};
+    float last_challenge_seconds_total_{std::numeric_limits<float>::quiet_NaN()};
+    float last_challenge_average_fps_{std::numeric_limits<float>::quiet_NaN()};
+    int32_t last_challenge_tick_count_{std::numeric_limits<int32_t>::min()};
     float last_damage_done_{std::numeric_limits<float>::quiet_NaN()};
     float last_damage_possible_{std::numeric_limits<float>::quiet_NaN()};
     float last_damage_efficiency_{std::numeric_limits<float>::quiet_NaN()};
@@ -1408,6 +1453,9 @@ private:
     uint64_t last_nonzero_spm_ms_{0};
     uint64_t last_nonzero_kills_per_second_ms_{0};
     uint64_t last_nonzero_accuracy_ms_{0};
+    uint64_t last_nonzero_challenge_seconds_ms_{0};
+    uint64_t last_nonzero_challenge_average_fps_ms_{0};
+    uint64_t last_nonzero_challenge_tick_count_ms_{0};
     uint64_t last_nonzero_damage_done_ms_{0};
     uint64_t last_nonzero_damage_possible_ms_{0};
     uint64_t last_nonzero_damage_efficiency_ms_{0};
@@ -1632,6 +1680,18 @@ private:
         targets_.get_damage_efficiency_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_DamageEfficiency_ValueOr"));
         targets_.receive_damage_efficiency_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_DamageEfficiency_ValueElse"));
         targets_.receive_damage_efficiency = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_DamageEfficiency"));
+        targets_.get_challenge_average_fps_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ChallengeAverageFPS_ValueElse"));
+        targets_.get_challenge_average_fps_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ChallengeAverageFPS_ValueOr"));
+        targets_.receive_challenge_average_fps_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeAverageFPS_ValueElse"));
+        targets_.receive_challenge_average_fps_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeAverageFPS_ValueOr"));
+        targets_.receive_challenge_average_fps_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeAverageFPS_Single"));
+        targets_.receive_challenge_average_fps = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeAverageFPS"));
+        targets_.get_challenge_tick_count_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ChallengeTickCount_ValueElse"));
+        targets_.get_challenge_tick_count_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ChallengeTickCount_ValueOr"));
+        targets_.receive_challenge_tick_count_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount_ValueElse"));
+        targets_.receive_challenge_tick_count_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount_ValueOr"));
+        targets_.receive_challenge_tick_count_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount_Single"));
+        targets_.receive_challenge_tick_count = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount"));
         targets_.meta_get_in_trainer = resolve_fn(STR("/Script/GameSkillsTrainer.GTheMetaGameInstance:GetInTrainer"));
         targets_.scenario_get_challenge_time_remaining = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:GetChallengeTimeRemaining"));
         targets_.scenario_get_challenge_queue_time_remaining = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:GetChallengeQueueTimeRemaining"));
@@ -2512,11 +2572,13 @@ private:
         if (!std::isfinite(value) || value < 0.0f) {
             return;
         }
-        if (value == 0.0f && last_nonzero_ms == 0) {
+        const bool is_qrem = (std::strcmp(ev, "pull_queue_time_remaining") == 0);
+        if (value == 0.0f && last_nonzero_ms == 0 && !is_qrem) {
             return;
         }
         constexpr uint64_t k_zero_suppress_ms = 2500;
-        if (value == 0.0f && std::isfinite(last_value) && last_value > 0.0f && (now - last_nonzero_ms) < k_zero_suppress_ms) {
+        if (value == 0.0f && std::isfinite(last_value) && last_value > 0.0f
+            && (now - last_nonzero_ms) < k_zero_suppress_ms && !is_qrem) {
             return;
         }
         if (value > 0.0f) {

@@ -48,6 +48,10 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
     || (reading?.is_in_scenario ?? false)
     || (reading?.time_remaining != null && reading.time_remaining > 0)
     || (reading?.challenge_seconds_total != null && reading.challenge_seconds_total > 0);
+  const hasPositive = (value: number | null | undefined) =>
+    value != null && Number.isFinite(value) && value > 0.0001;
+  const hasPositiveInt = (value: number | null | undefined) =>
+    value != null && Number.isFinite(value) && value > 0;
 
   return (
     <AnimatePresence>
@@ -116,11 +120,21 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
 
             {showChallengeRows && (
               <>
-                <StatRow label="REM" value={fmt(reading?.time_remaining, 1)} accent={accentColor} />
-                <StatRow label="QREM" value={fmt(reading?.queue_time_remaining, 1)} accent={accentColor} />
-                <StatRow label="CH SEC" value={fmt(reading?.challenge_seconds_total, 1)} accent={accentColor} />
-                <StatRow label="CH FPS" value={fmt(reading?.challenge_average_fps, 2)} accent={accentColor} />
-                <StatRow label="CH TICK" value={fmt(reading?.challenge_tick_count_total, 0)} accent={accentColor} />
+                {hasPositive(reading?.time_remaining) && (
+                  <StatRow label="REM" value={fmt(reading?.time_remaining, 1)} accent={accentColor} />
+                )}
+                {hasPositive(reading?.queue_time_remaining) && (
+                  <StatRow label="QREM" value={fmt(reading?.queue_time_remaining, 1)} accent={accentColor} />
+                )}
+                {hasPositive(reading?.challenge_seconds_total) && (
+                  <StatRow label="CH SEC" value={fmt(reading?.challenge_seconds_total, 1)} accent={accentColor} />
+                )}
+                {hasPositive(reading?.challenge_average_fps) && (
+                  <StatRow label="CH FPS" value={fmt(reading?.challenge_average_fps, 2)} accent={accentColor} />
+                )}
+                {hasPositiveInt(reading?.challenge_tick_count_total) && (
+                  <StatRow label="CH TICK" value={fmt(reading?.challenge_tick_count_total, 0)} accent={accentColor} />
+                )}
               </>
             )}
           </div>
