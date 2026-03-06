@@ -36,11 +36,19 @@ static auto derive_game_state_code(
 
     const bool has_queue = std::isfinite(queue_time_remaining) && queue_time_remaining > 0.0001f;
     const bool has_time = std::isfinite(time_remaining) && time_remaining > 0.0001f;
+    const bool queue_sentinel_only =
+        has_queue
+        && !has_time
+        && is_in_challenge != 1
+        && is_in_scenario != 1
+        && is_in_trainer != 1
+        && std::fabs(static_cast<double>(queue_time_remaining) - 1.0) <= 0.0001;
+    const bool effective_queue = has_queue && !queue_sentinel_only;
 
     if (is_in_challenge == 1 || has_time) {
         return GameStateCode::Challenge;
     }
-    if (has_queue) {
+    if (effective_queue) {
         return GameStateCode::Queued;
     }
     if (is_in_scenario == 1) {

@@ -494,6 +494,8 @@ mod imp {
         queue_last_seen_at: Option<Instant>,
         queue_last_progress_at: Option<Instant>,
         queue_last_value: Option<f64>,
+        challenge_lifecycle_active: bool,
+        challenge_lifecycle_at: Option<Instant>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1381,6 +1383,8 @@ mod imp {
                 queue_last_seen_at: None,
                 queue_last_progress_at: None,
                 queue_last_value: None,
+                challenge_lifecycle_active: false,
+                challenge_lifecycle_at: None,
             })
         })
     }
@@ -1437,6 +1441,8 @@ mod imp {
             state.queue_last_seen_at = None;
             state.queue_last_progress_at = None;
             state.queue_last_value = None;
+            state.challenge_lifecycle_active = false;
+            state.challenge_lifecycle_at = None;
         }
     }
 
@@ -1642,6 +1648,7 @@ mod imp {
                 | "session_end"
                 | "challenge_start"
                 | "challenge_restart"
+                | "challenge_restarted"
                 | "challenge_end"
                 | "challenge_complete"
                 | "challenge_completed"
@@ -1753,16 +1760,12 @@ mod imp {
         if stats.scenario_is_paused == Some(true) {
             return (5, "paused");
         }
-        let in_challenge = stats.is_in_challenge == Some(true);
+        let in_challenge = stats.is_in_challenge == Some(true) || state.challenge_lifecycle_active;
         let in_scenario = stats.is_in_scenario == Some(true);
         let in_trainer = stats.is_in_trainer == Some(true);
         let has_queue_timer = stats.queue_time_remaining.map_or(false, |v| v > 0.0001);
         let has_challenge_timer = stats.time_remaining.map_or(false, |v| v > 0.0001);
-        let queue_recent_window = Duration::from_millis(1400);
         let queue_progress_window = Duration::from_millis(2600);
-        let queue_seen_recent = state
-            .queue_last_seen_at
-            .map_or(false, |ts| now.duration_since(ts) <= queue_recent_window);
         let queue_progress_recent = state
             .queue_last_progress_at
             .map_or(false, |ts| now.duration_since(ts) <= queue_progress_window);
@@ -2060,7 +2063,7 @@ mod imp {
                 begin_session_tracking(app, "bridge:challenge_start", true);
                 challenge_transition_active = Some(true);
             }
-            "challenge_restart" | "scenario_restart" | "scenario_restarted" => {
+            "challenge_restart" | "challenge_restarted" | "scenario_restart" | "scenario_restarted" => {
                 restart_session_tracking(app, "bridge:challenge_restart", true);
                 challenge_transition_active = Some(true);
             }
@@ -2082,6 +2085,9 @@ mod imp {
         if let Some(active) = challenge_transition_active {
             let mut should_emit_stats = false;
             if let Ok(mut state) = bridge_compat_state().lock() {
+                let now = Instant::now();
+                state.challenge_lifecycle_active = active;
+                state.challenge_lifecycle_at = Some(now);
                 if state.stats.is_in_challenge != Some(active) {
                     state.stats.is_in_challenge = Some(active);
                     should_emit_stats = true;
@@ -2098,7 +2104,7 @@ mod imp {
                     state.queue_last_value = None;
                     should_emit_stats = true;
                 }
-                let (next_game_state_code, next_game_state) = derive_game_state(&state, Instant::now());
+                let (next_game_state_code, next_game_state) = derive_game_state(&state, now);
                 if state.stats.game_state != next_game_state
                     || state.stats.game_state_code != next_game_state_code
                 {
@@ -2160,7 +2166,10 @@ mod imp {
                 parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_trainer");
             let mut state_changed = false;
             if let Ok(mut state) = bridge_compat_state().lock() {
+                let now = Instant::now();
                 if let Some(next) = metadata_is_in_challenge {
+                    state.challenge_lifecycle_active = next;
+                    state.challenge_lifecycle_at = Some(now);
                     if state.stats.is_in_challenge != Some(next) {
                         state.stats.is_in_challenge = Some(next);
                         state_changed = true;
@@ -2185,7 +2194,7 @@ mod imp {
                     }
                 }
                 if state_changed {
-                    let (next_game_state_code, next_game_state) = derive_game_state(&state, Instant::now());
+                    let (next_game_state_code, next_game_state) = derive_game_state(&state, now);
                     if state.stats.game_state != next_game_state
                         || state.stats.game_state_code != next_game_state_code
                     {
@@ -2233,8 +2242,6 @@ mod imp {
                             if (prev - qrem) > 0.0001 {
                                 state.queue_last_progress_at = Some(now);
                             }
-                        } else {
-                            state.queue_last_progress_at = Some(now);
                         }
                         state.queue_last_seen_at = Some(now);
                         state.queue_last_value = Some(qrem);
@@ -2360,10 +2367,27 @@ mod imp {
                 }
                 "pull_is_in_challenge" | "is_in_challenge" => {
                     let next = value >= 0.5;
-                    if state.stats.is_in_challenge != Some(next) {
-                        state.stats.is_in_challenge = Some(next);
-                        should_emit_stats = true;
-                        emit_alias_ch = Some(if next { 1.0 } else { 0.0 });
+                    const START_FALSE_GRACE: Duration = Duration::from_millis(1800);
+                    let suppress_false = !next
+                        && state.challenge_lifecycle_active
+                        && state
+                            .challenge_lifecycle_at
+                            .map_or(false, |ts| now.duration_since(ts) <= START_FALSE_GRACE);
+                    if suppress_false {
+                        // Lifecycle start/restart is authoritative for a short window.
+                        // Ignore transient pull=false jitter immediately after transitions.
+                    } else {
+                        if next {
+                            state.challenge_lifecycle_active = true;
+                        } else {
+                            state.challenge_lifecycle_active = false;
+                        }
+                        state.challenge_lifecycle_at = Some(now);
+                        if state.stats.is_in_challenge != Some(next) {
+                            state.stats.is_in_challenge = Some(next);
+                            should_emit_stats = true;
+                            emit_alias_ch = Some(if next { 1.0 } else { 0.0 });
+                        }
                     }
                 }
                 "pull_is_in_scenario_editor" => {
@@ -2618,8 +2642,6 @@ mod imp {
                             if (prev - value) > 0.0001 {
                                 state.queue_last_progress_at = Some(now);
                             }
-                        } else {
-                            state.queue_last_progress_at = Some(now);
                         }
                         state.queue_last_seen_at = Some(now);
                         state.queue_last_value = Some(value);
