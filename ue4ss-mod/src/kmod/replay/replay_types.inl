@@ -38,6 +38,13 @@ struct ReplayEntityActorRef {
     RC::Unreal::UObject* actor{nullptr};
 };
 
+struct ReplayPlaybackFrame {
+    uint64_t ts_ms{0};
+    uint64_t seq{0};
+    std::vector<ReplayEntity> upserts{};
+    std::vector<std::string> removes{};
+};
+
 struct ReplayContext {
     uint64_t run_id{0};
     std::string scenario_name{};
@@ -113,6 +120,9 @@ enum class BridgeCommandKind : int32_t {
     ReplayEntityMeta = 4,
     ReplayEntityPose = 5,
     ReplayRemoveEntity = 6,
+    ReplayLoadBegin = 7,
+    ReplayLoadChunk = 8,
+    ReplayLoadEnd = 9,
 };
 
 struct BridgeCommand {
@@ -125,6 +135,15 @@ struct BridgeCommand {
     int32_t force_freeplay{1};
     int32_t hide_ui{1};
     int32_t bootstrap_timeout_ms{12000};
+    std::string ready_policy{"best_effort"};
+    int32_t status_interval_ms{250};
+    int32_t expected_bot_count{-1};
+    std::vector<std::string> expected_bot_profiles{};
+    float playback_speed{1.0f};
+    int32_t chunk_index{-1};
+    int32_t total_chunks{-1};
+    int32_t total_frames{-1};
+    std::string payload{};
     ReplayEntity entity{};
     std::string entity_id{};
 };

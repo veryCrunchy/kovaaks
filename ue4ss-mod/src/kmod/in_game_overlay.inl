@@ -1,4 +1,7 @@
     static auto in_game_overlay_enabled() -> bool {
+        if (kmod_replay::replay_ingame_debug_overlay_enabled()) {
+            return true;
+        }
         if (env_flag_enabled("KOVAAKS_DISABLE_IN_GAME_OVERLAY")
             || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_disable_in_game_overlay.flag"))) {
             return false;
@@ -6,9 +9,6 @@
         if (env_flag_enabled("KOVAAKS_ENABLE_IN_GAME_OVERLAY")
             || env_flag_enabled("KOVAAKS_IN_GAME_OVERLAY")
             || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_in_game_overlay.flag"))) {
-            return true;
-        }
-        if (kmod_replay::replay_ingame_debug_overlay_enabled()) {
             return true;
         }
         return false;
@@ -19,6 +19,15 @@
         RC::Unreal::UObjectGlobals::FindAllOf(STR("NewCharacterPlayerController"), candidates);
         std::vector<RC::Unreal::UObject*> alt_candidates{};
         RC::Unreal::UObjectGlobals::FindAllOf(STR("NewCharacterPlayerController_C"), alt_candidates);
+        append_unique_objects(candidates, alt_candidates);
+        alt_candidates.clear();
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("MetaPlayerController"), alt_candidates);
+        append_unique_objects(candidates, alt_candidates);
+        alt_candidates.clear();
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("MetaPlayerController_C"), alt_candidates);
+        append_unique_objects(candidates, alt_candidates);
+        alt_candidates.clear();
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("PlayerController"), alt_candidates);
         append_unique_objects(candidates, alt_candidates);
 
         RC::Unreal::UObject* best = nullptr;
@@ -33,6 +42,8 @@
             if (full_name.find(STR("Default__")) != RC::StringType::npos) score -= 1000;
             if (full_name.find(STR("/Script/")) != RC::StringType::npos) score -= 200;
             if (full_name.find(STR("NewCharacterPlayerController_C_")) != RC::StringType::npos) score += 150;
+            if (full_name.find(STR("MetaPlayerController_C_")) != RC::StringType::npos) score += 180;
+            if (full_name.find(STR("PlayerController_C_")) != RC::StringType::npos) score += 120;
             if (!best || score > best_score) {
                 best = obj;
                 best_score = score;
@@ -1203,6 +1214,8 @@
     }
 
     inline static std::atomic<bool> s_in_game_overlay_fault_latched{false};
+    inline static std::atomic<uint64_t> s_in_game_overlay_fault_retry_after_ms{0};
+    inline static std::atomic<uint32_t> s_in_game_overlay_fault_count{0};
     inline static const char* s_in_game_overlay_stage = "init";
 
     static auto in_game_overlay_tick_impl(uint64_t now_ms) -> void {
@@ -1221,7 +1234,7 @@
         static bool s_logged_enabled = false;
 
         if (!s_logged_enabled) {
-            runtime_log_line("[in_game_overlay] enabled via explicit flag/env");
+            runtime_log_line("[in_game_overlay] enabled");
             runtime_log_line("[in_game_overlay] dump signatures: XsollaWebBrowserWidget::LoadUrl(FString); fallback: UWidgetBlueprintLibrary::Create(...); UUserWidget::AddToViewport(int32); UUserWidget::SetAlignmentInViewport(FVector2D); UUserWidget::SetPositionInViewport(FVector2D,bool); W_Text_C::SetText(FText)");
             kovaaks::RustBridge::emit_json("{\"ev\":\"in_game_overlay\",\"enabled\":true}");
             s_logged_enabled = true;
@@ -1304,6 +1317,7 @@
         s_in_game_overlay_stage = "resolve_browser_url";
         const auto browser_url_utf8 = in_game_overlay_resolve_browser_url_utf8();
         const bool browser_mode_requested = !browser_url_utf8.empty();
+        const bool force_text_replay_hud = kmod_replay::replay_ingame_debug_overlay_enabled();
 
         if (browser_mode_requested) {
             if (!is_runtime_function_usable(browser_load_url_fn)) {
@@ -1380,11 +1394,14 @@
 
             if (ui_widget_probe_object_usable(s_browser_widget)
                 && s_last_browser_url_loaded == browser_url_utf8
-                && !s_last_browser_url_loaded.empty()) {
+                && !s_last_browser_url_loaded.empty()
+                && !force_text_replay_hud) {
                 return;
             }
 
-            return;
+            if (!force_text_replay_hud) {
+                return;
+            }
         }
 
         if (s_last_browser_diag_log_ms == 0 || (now_ms - s_last_browser_diag_log_ms) >= 8000) {
@@ -1686,7 +1703,12 @@
             return;
         }
         if (s_in_game_overlay_fault_latched.load(std::memory_order_acquire)) {
-            return;
+            const auto retry_after = s_in_game_overlay_fault_retry_after_ms.load(std::memory_order_acquire);
+            if (retry_after == 0 || now_ms < retry_after) {
+                return;
+            }
+            s_in_game_overlay_fault_latched.store(false, std::memory_order_release);
+            runtime_log_line("[in_game_overlay] retrying after prior fault");
         }
 
 #if defined(_MSC_VER)
@@ -1694,11 +1716,14 @@
             in_game_overlay_tick_impl(now_ms);
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             s_in_game_overlay_fault_latched.store(true, std::memory_order_release);
+            const auto fault_count = s_in_game_overlay_fault_count.fetch_add(1, std::memory_order_acq_rel) + 1;
+            const uint64_t backoff_ms = static_cast<uint64_t>(std::min<uint32_t>(fault_count, 12u)) * 500;
+            s_in_game_overlay_fault_retry_after_ms.store(now_ms + std::max<uint64_t>(1500, backoff_ms), std::memory_order_release);
             std::array<char, 320> fbuf{};
             std::snprintf(
                 fbuf.data(),
                 fbuf.size(),
-                "[in_game_overlay] seh_fault_latched stage=%s (overlay disabled until restart)",
+                "[in_game_overlay] seh_fault_latched stage=%s (retry scheduled)",
                 s_in_game_overlay_stage ? s_in_game_overlay_stage : "unknown"
             );
             runtime_log_line(fbuf.data());
