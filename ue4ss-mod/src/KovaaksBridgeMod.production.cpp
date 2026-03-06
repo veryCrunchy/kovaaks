@@ -1595,74 +1595,23 @@ private:
                                    int32_t& current_value,
                                    int32_t& last_value,
                                    std::initializer_list<RC::Unreal::UFunction*> fns) {
-            constexpr uint64_t k_false_grace_ms = 850;
-            constexpr uint64_t k_recent_true_window_ms = 1500;
-            constexpr uint64_t k_recent_state_change_ms = 1500;
+            (void)last_value;
             bool bool_value = false;
             if (!source || !try_read_bool(source, fns, bool_value)) {
                 return;
             }
 
-            const bool has_runtime_progress =
-                (std::isfinite(current_seconds) && current_seconds > 0.15f)
-                || (current_challenge_tick_count > 5)
-                || (std::isfinite(current_time_remaining) && current_time_remaining > 1.0f);
-            const bool recent_state_change =
-                last_state_change_emit_ms_ > 0
-                && safe_elapsed_ms(now, last_state_change_emit_ms_) < k_recent_state_change_ms;
-            const bool recent_lifecycle_signal =
-                last_lifecycle_signal_ms_ > 0
-                && (now - last_lifecycle_signal_ms_) < k_recent_true_window_ms;
-            const bool should_guard_false =
-                has_runtime_progress || recent_state_change || recent_lifecycle_signal;
-
             if (std::strcmp(ev, "pull_is_in_challenge") == 0) {
                 if (bool_value) {
                     last_in_challenge_true_ms_ = now;
-                    pending_in_challenge_false_ms_ = 0;
-                } else if (fault_state_guard_until_ms_ > now
-                    && last_in_challenge_true_ms_ > 0
-                    && (now - last_in_challenge_true_ms_) < k_recent_true_window_ms) {
-                    bool_value = true;
-                    pending_in_challenge_false_ms_ = now;
-                } else if (last_in_challenge_true_ms_ > 0
-                    && (now - last_in_challenge_true_ms_) < k_recent_true_window_ms
-                    && should_guard_false) {
-                    if (pending_in_challenge_false_ms_ == 0) {
-                        pending_in_challenge_false_ms_ = now;
-                    }
-                    if ((now - pending_in_challenge_false_ms_) < k_false_grace_ms) {
-                        bool_value = true;
-                    }
-                } else {
-                    pending_in_challenge_false_ms_ = 0;
                 }
             } else if (std::strcmp(ev, "pull_is_in_scenario") == 0) {
                 if (bool_value) {
                     last_in_scenario_true_ms_ = now;
-                    pending_in_scenario_false_ms_ = 0;
-                } else if (fault_state_guard_until_ms_ > now
-                    && last_in_scenario_true_ms_ > 0
-                    && (now - last_in_scenario_true_ms_) < k_recent_true_window_ms) {
-                    bool_value = true;
-                    pending_in_scenario_false_ms_ = now;
-                } else if (current_is_in_challenge > 0
-                    || (last_in_scenario_true_ms_ > 0
-                        && (now - last_in_scenario_true_ms_) < k_recent_true_window_ms
-                        && should_guard_false)) {
-                    if (pending_in_scenario_false_ms_ == 0) {
-                        pending_in_scenario_false_ms_ = now;
-                    }
-                    if ((now - pending_in_scenario_false_ms_) < k_false_grace_ms) {
-                        bool_value = true;
-                    }
-                } else {
-                    pending_in_scenario_false_ms_ = 0;
                 }
             }
 
             current_value = bool_value ? 1 : 0;
-            emit_state_i32(ev, last_value, current_value, now);
         };
 
         meta = resolve_meta_game_instance(now);
@@ -1766,6 +1715,67 @@ private:
                 }
             }
         }
+
+        const bool seconds_advancing =
+            has_critical_seconds_read
+            && std::isfinite(current_seconds)
+            && std::isfinite(last_seconds_)
+            && current_seconds > (last_seconds_ + 0.0001f);
+        const bool ticks_advancing =
+            has_critical_tick_read
+            && current_challenge_tick_count >= 0
+            && last_challenge_tick_count_ >= 0
+            && current_challenge_tick_count > last_challenge_tick_count_;
+        const bool score_advancing =
+            std::isfinite(current_score_total)
+            && std::isfinite(last_score_total_)
+            && current_score_total > (last_score_total_ + 0.0001f);
+        const bool timer_implies_challenge =
+            std::isfinite(current_time_remaining) && current_time_remaining > 0.25f;
+        const bool replay_active = kmod_replay::replay_ingame_playback_is_active();
+        const bool recent_runtime_progress =
+            safe_elapsed_ms(now, last_runtime_progress_ms_) < 1200;
+        const bool runtime_progress_active =
+            seconds_advancing
+            || ticks_advancing
+            || score_advancing
+            || timer_implies_challenge;
+        const bool inferred_active =
+            !replay_active
+            && (runtime_progress_active
+                || (recent_runtime_progress
+                    && (current_challenge_tick_count > 0
+                        || timer_implies_challenge
+                        || (std::isfinite(current_seconds) && current_seconds > 0.05f))));
+
+        if (current_is_in_scenario <= 0 && current_is_in_challenge <= 0 && inferred_active) {
+            current_is_in_scenario = 1;
+            last_in_scenario_true_ms_ = now;
+            if (timer_implies_challenge) {
+                current_is_in_challenge = 1;
+                last_in_challenge_true_ms_ = now;
+            }
+        }
+        if (current_is_in_scenario < 0) {
+            current_is_in_scenario = inferred_active ? 1 : 0;
+        }
+        if (current_is_in_challenge < 0) {
+            current_is_in_challenge = (inferred_active && timer_implies_challenge) ? 1 : 0;
+        }
+        if (current_is_in_scenario_editor < 0) {
+            current_is_in_scenario_editor = (last_is_in_scenario_editor_ > 0) ? 1 : 0;
+        }
+        if (current_is_currently_in_benchmark < 0) {
+            current_is_currently_in_benchmark = (last_is_currently_in_benchmark_ > 0) ? 1 : 0;
+        }
+        if (current_is_in_trainer < 0) {
+            current_is_in_trainer = (last_is_in_trainer_ > 0) ? 1 : 0;
+        }
+        emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, current_is_in_challenge > 0 ? 1 : 0, now);
+        emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, current_is_in_scenario > 0 ? 1 : 0, now);
+        emit_state_i32("pull_is_in_scenario_editor", last_is_in_scenario_editor_, current_is_in_scenario_editor > 0 ? 1 : 0, now);
+        emit_state_i32("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_, current_is_currently_in_benchmark > 0 ? 1 : 0, now);
+        emit_state_i32("pull_is_in_trainer", last_is_in_trainer_, current_is_in_trainer > 0 ? 1 : 0, now);
 
         const bool active_now =
             current_is_in_challenge > 0
@@ -2170,6 +2180,30 @@ private:
             current_time_remaining,
             current_queue_time_remaining
         );
+
+        const bool stale_active_flags =
+            !kmod_replay::replay_ingame_playback_is_active()
+            && (last_is_in_challenge_ == 1 || last_is_in_scenario_ == 1)
+            && safe_elapsed_ms(now, last_runtime_progress_ms_) > 2200
+            && (!std::isfinite(last_time_remaining_) || last_time_remaining_ <= 0.0001f)
+            && (!std::isfinite(last_queue_time_remaining_) || last_queue_time_remaining_ <= 0.0001f)
+            && (last_lifecycle_signal_ms_ == 0 || safe_elapsed_ms(now, last_lifecycle_signal_ms_) > 1200);
+        if (stale_active_flags) {
+            EmitTagScope stale_scope(*this, "state_guard", "state_inferred");
+            emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, 0, now);
+            emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, 0, now);
+            current_is_in_challenge = 0;
+            current_is_in_scenario = 0;
+            last_in_challenge_true_ms_ = 0;
+            last_in_scenario_true_ms_ = 0;
+            pending_in_challenge_false_ms_ = 0;
+            pending_in_scenario_false_ms_ = 0;
+            if (verbose_logs_) {
+                RC::Output::send<RC::LogLevel::Warning>(
+                    STR("[kmod-prod] cleared stale active state after runtime-progress timeout\n")
+                );
+            }
+        }
 
         const bool challenge_expected_active =
             (current_is_in_challenge > 0)
@@ -2822,19 +2856,13 @@ private:
             (progress_signal || has_positive_float(time_remaining)) && recent_stream_activity;
         const bool known_in_challenge = is_in_challenge >= 0;
         const bool known_in_scenario = is_in_scenario >= 0;
-        bool active_signal = false;
-        if (known_in_challenge) {
-            active_signal = (is_in_challenge != 0);
-            if (!active_signal && runtime_active_hint && lifecycle_active_) {
-                active_signal = true;
-            }
-        } else if (known_in_scenario) {
-            active_signal = (is_in_scenario != 0);
-            if (!active_signal && runtime_active_hint && lifecycle_active_) {
-                active_signal = true;
-            }
-        } else {
+        const bool challenge_active_signal = known_in_challenge && (is_in_challenge != 0);
+        const bool scenario_active_signal = known_in_scenario && (is_in_scenario != 0);
+        bool active_signal = challenge_active_signal || scenario_active_signal;
+        if (!known_in_challenge && !known_in_scenario) {
             active_signal = runtime_active_hint;
+        } else if (!active_signal && runtime_active_hint && lifecycle_active_) {
+            active_signal = true;
         }
 
         if (!lifecycle_initialized_) {
@@ -2877,7 +2905,7 @@ private:
         }
 
         if (known_in_challenge || known_in_scenario) {
-            constexpr uint64_t k_state_end_confirm_ms = 400;
+            constexpr uint64_t k_state_end_confirm_ms = 120;
             if (runtime_active_hint) {
                 last_lifecycle_signal_ms_ = now;
                 pending_lifecycle_end_ms_ = 0;
@@ -2895,7 +2923,7 @@ private:
             return;
         }
 
-        constexpr uint64_t k_idle_end_ms = 2000;
+        constexpr uint64_t k_idle_end_ms = 700;
         if (last_lifecycle_signal_ms_ > 0 && (now - last_lifecycle_signal_ms_) > k_idle_end_ms) {
             pending_lifecycle_end_ms_ = 0;
             emit_lifecycle_end(lifecycle_seen_progress_ || progress_signal, now);

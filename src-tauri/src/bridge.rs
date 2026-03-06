@@ -1491,23 +1491,6 @@ mod imp {
 
         if emit_challenge {
             let _ = app.emit(super::EVENT_CHALLENGE_START, ());
-            if reason != "bridge:challenge_start" {
-                let synthetic = super::BridgeParsedEvent {
-                    ev: "challenge_start".to_string(),
-                    value: Some(1.0),
-                    total: None,
-                    delta: Some(1.0),
-                    field: None,
-                    source: Some(reason.to_string()),
-                    method: Some("session_tracking".to_string()),
-                    origin: Some("bridge_session_tracking".to_string()),
-                    origin_flag: Some("compat".to_string()),
-                    fn_name: None,
-                    receiver: None,
-                    raw: format!("{{\"ev\":\"challenge_start\",\"source\":\"{}\"}}", reason),
-                };
-                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-            }
         }
         if emit_session {
             reset_bridge_stats_snapshot();
@@ -1572,26 +1555,6 @@ mod imp {
 
         if emit_challenge {
             let _ = app.emit(super::EVENT_CHALLENGE_END, ());
-            let parsed_terminal_reason = reason == "bridge:challenge_end"
-                || reason == "bridge:challenge_complete"
-                || reason == "bridge:challenge_canceled";
-            if !parsed_terminal_reason {
-                let synthetic = super::BridgeParsedEvent {
-                    ev: "challenge_end".to_string(),
-                    value: Some(1.0),
-                    total: None,
-                    delta: Some(1.0),
-                    field: None,
-                    source: Some(reason.to_string()),
-                    method: Some("session_tracking".to_string()),
-                    origin: Some("bridge_session_tracking".to_string()),
-                    origin_flag: Some("compat".to_string()),
-                    fn_name: None,
-                    receiver: None,
-                    raw: format!("{{\"ev\":\"challenge_end\",\"source\":\"{}\"}}", reason),
-                };
-                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-            }
         }
         if emit_session {
             let _ = app.emit(super::EVENT_SESSION_END, ());
@@ -1766,10 +1729,14 @@ mod imp {
         let has_queue_timer = stats.queue_time_remaining.map_or(false, |v| v > 0.0001);
         let has_challenge_timer = stats.time_remaining.map_or(false, |v| v > 0.0001);
         let queue_progress_window = Duration::from_millis(2600);
+        let queue_seen_window = Duration::from_millis(700);
         let queue_progress_recent = state
             .queue_last_progress_at
             .map_or(false, |ts| now.duration_since(ts) <= queue_progress_window);
-        let queue_authoritative = has_queue_timer && queue_progress_recent;
+        let queue_seen_recent = state
+            .queue_last_seen_at
+            .map_or(false, |ts| now.duration_since(ts) <= queue_seen_window);
+        let queue_authoritative = has_queue_timer && (queue_progress_recent || queue_seen_recent);
 
         if in_challenge || has_challenge_timer {
             return (4, "challenge");
@@ -1837,58 +1804,6 @@ mod imp {
             .and_then(derive_scenario_name_from_id)
     }
 
-    fn parse_state_manager_queue_time_remaining_from_metadata(raw: &str) -> Option<f64> {
-        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
-        let obj = payload.as_object()?;
-        let value = match obj.get("queue_time_remaining") {
-            Some(serde_json::Value::Number(n)) => n.as_f64(),
-            Some(serde_json::Value::String(s)) => s.parse::<f64>().ok(),
-            _ => None,
-        }?;
-        if value.is_finite() && value >= 0.0 {
-            Some(value)
-        } else {
-            None
-        }
-    }
-
-    fn parse_state_manager_bool_from_metadata(raw: &str, key: &str) -> Option<bool> {
-        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
-        let obj = payload.as_object()?;
-        match obj.get(key) {
-            Some(serde_json::Value::Bool(v)) => Some(*v),
-            Some(serde_json::Value::Number(n)) => {
-                if let Some(v) = n.as_i64() {
-                    return match v {
-                        0 => Some(false),
-                        1 => Some(true),
-                        _ => None,
-                    };
-                }
-                n.as_f64().and_then(|v| {
-                    if (v - 0.0).abs() <= 0.000001 {
-                        Some(false)
-                    } else if (v - 1.0).abs() <= 0.000001 {
-                        Some(true)
-                    } else {
-                        None
-                    }
-                })
-            }
-            Some(serde_json::Value::String(s)) => {
-                let normalized = s.trim().to_ascii_lowercase();
-                if normalized == "1" || normalized == "true" {
-                    Some(true)
-                } else if normalized == "0" || normalized == "false" {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
     fn apply_scenario_name_update(app: &AppHandle, name: String, source: &str, raw: &str) {
         let mut changed = false;
         if let Ok(mut state) = bridge_compat_state().lock() {
@@ -1950,27 +1865,10 @@ mod imp {
     }
 
     fn emit_bridge_compat_events(app: &AppHandle, parsed: &super::BridgeParsedEvent) {
-        if let Some((fn_name, ret_u32, ret_i32, ret_f32)) = parse_class_hook_from_raw(&parsed.raw) {
+        if let Some((fn_name, ret_u32, ret_i32, _ret_f32)) = parse_class_hook_from_raw(&parsed.raw) {
             let bool_sample = ret_u32
                 .map(|v| (v & 1) == 1)
                 .or_else(|| ret_i32.map(|v| (v & 1) != 0));
-            let emit_class_bool_metric = |event_name: &str, sample: bool| {
-                let synthetic = super::BridgeParsedEvent {
-                    ev: event_name.to_string(),
-                    value: Some(if sample { 1.0 } else { 0.0 }),
-                    total: None,
-                    delta: None,
-                    field: None,
-                    source: Some(fn_name.clone()),
-                    method: Some("class_hook_ret_bool".to_string()),
-                    origin: Some("class_hook_probe".to_string()),
-                    origin_flag: Some("class_probe_hooks".to_string()),
-                    fn_name: Some(fn_name.clone()),
-                    receiver: None,
-                    raw: parsed.raw.clone(),
-                };
-                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-            };
 
             if fn_name.ends_with(":IsInChallenge") {
                 if let Some(in_challenge) = bool_sample {
@@ -1982,57 +1880,6 @@ mod imp {
                         // explicit lifecycle events are less jitter-prone for terminal transitions.
                         ChallengeTransition::Exited => {}
                         ChallengeTransition::None => {}
-                    }
-                    emit_class_bool_metric("pull_is_in_challenge", in_challenge);
-                }
-            } else if fn_name.ends_with(":IsInScenario") {
-                if let Some(in_scenario) = bool_sample {
-                    emit_class_bool_metric("pull_is_in_scenario", in_scenario);
-                }
-            } else if fn_name.ends_with(":IsInScenarioEditor") {
-                if let Some(in_editor) = bool_sample {
-                    emit_class_bool_metric("pull_is_in_scenario_editor", in_editor);
-                }
-            }
-
-            if fn_name.ends_with(":GetChallengeTimeRemaining") {
-                if let Some(value) = ret_f32 {
-                    if value.is_finite() && value >= 0.0 {
-                        let synthetic = super::BridgeParsedEvent {
-                            ev: "pull_time_remaining".to_string(),
-                            value: Some(value),
-                            total: None,
-                            delta: None,
-                            field: None,
-                            source: Some(fn_name.clone()),
-                            method: Some("class_hook_ret_f32".to_string()),
-                            origin: Some("class_hook_probe".to_string()),
-                            origin_flag: Some("class_probe_hooks".to_string()),
-                            fn_name: Some(fn_name),
-                            receiver: None,
-                            raw: parsed.raw.clone(),
-                        };
-                        let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-                    }
-                }
-            } else if fn_name.ends_with(":GetChallengeQueueTimeRemaining") {
-                if let Some(value) = ret_f32 {
-                    if value.is_finite() && value >= 0.0 {
-                        let synthetic = super::BridgeParsedEvent {
-                            ev: "pull_queue_time_remaining".to_string(),
-                            value: Some(value),
-                            total: None,
-                            delta: None,
-                            field: None,
-                            source: Some(fn_name.clone()),
-                            method: Some("class_hook_ret_f32".to_string()),
-                            origin: Some("class_hook_probe".to_string()),
-                            origin_flag: Some("class_probe_hooks".to_string()),
-                            fn_name: Some(fn_name),
-                            receiver: None,
-                            raw: parsed.raw.clone(),
-                        };
-                        let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
                     }
                 }
             }
@@ -2107,138 +1954,10 @@ mod imp {
         }
 
         if parsed.ev == "scenario_metadata" {
+            // scenario_metadata is an identity channel only.
+            // Pull/lifecycle streams remain the sole writers for live state to avoid stale overrides.
             if let Some(name) = parse_state_manager_scenario_name_from_metadata(&parsed.raw) {
                 apply_scenario_name_update(app, name, "state_manager", &parsed.raw);
-            }
-            let metadata_is_in_challenge =
-                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_challenge");
-            let metadata_is_in_scenario =
-                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_scenario");
-            let metadata_is_in_scenario_editor =
-                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_scenario_editor");
-            let metadata_is_in_trainer =
-                parse_state_manager_bool_from_metadata(&parsed.raw, "is_in_trainer");
-            let mut state_changed = false;
-            if let Ok(mut state) = bridge_compat_state().lock() {
-                let now = Instant::now();
-                if let Some(next) = metadata_is_in_challenge {
-                    state.challenge_lifecycle_active = next;
-                    state.challenge_lifecycle_at = Some(now);
-                    if state.stats.is_in_challenge != Some(next) {
-                        state.stats.is_in_challenge = Some(next);
-                        state_changed = true;
-                    }
-                }
-                if let Some(next) = metadata_is_in_scenario {
-                    if state.stats.is_in_scenario != Some(next) {
-                        state.stats.is_in_scenario = Some(next);
-                        state_changed = true;
-                    }
-                }
-                if let Some(next) = metadata_is_in_scenario_editor {
-                    if state.stats.is_in_scenario_editor != Some(next) {
-                        state.stats.is_in_scenario_editor = Some(next);
-                        state_changed = true;
-                    }
-                }
-                if let Some(next) = metadata_is_in_trainer {
-                    if state.stats.is_in_trainer != Some(next) {
-                        state.stats.is_in_trainer = Some(next);
-                        state_changed = true;
-                    }
-                }
-                if state_changed {
-                    let (next_game_state_code, next_game_state) = derive_game_state(&state, now);
-                    if state.stats.game_state != next_game_state
-                        || state.stats.game_state_code != next_game_state_code
-                    {
-                        state.stats.game_state_code = next_game_state_code;
-                        state.stats.game_state = next_game_state.to_string();
-                    }
-                    let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
-                }
-            }
-            let emit_state_manager_bool_metric = |ev: &str, value: bool| {
-                let synthetic = super::BridgeParsedEvent {
-                    ev: ev.to_string(),
-                    value: Some(if value { 1.0 } else { 0.0 }),
-                    total: None,
-                    delta: None,
-                    field: None,
-                    source: Some("state_manager".to_string()),
-                    method: Some("scenario_metadata".to_string()),
-                    origin: Some("scenario_metadata".to_string()),
-                    origin_flag: Some("state_manager".to_string()),
-                    fn_name: None,
-                    receiver: None,
-                    raw: parsed.raw.clone(),
-                };
-                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-            };
-            if let Some(value) = metadata_is_in_challenge {
-                emit_state_manager_bool_metric("pull_is_in_challenge", value);
-            }
-            if let Some(value) = metadata_is_in_scenario {
-                emit_state_manager_bool_metric("pull_is_in_scenario", value);
-            }
-            if let Some(value) = metadata_is_in_scenario_editor {
-                emit_state_manager_bool_metric("pull_is_in_scenario_editor", value);
-            }
-            if let Some(value) = metadata_is_in_trainer {
-                emit_state_manager_bool_metric("pull_is_in_trainer", value);
-            }
-            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw) {
-                let mut queue_changed = false;
-                if let Ok(mut state) = bridge_compat_state().lock() {
-                    let now = Instant::now();
-                    if qrem > 0.0001 {
-                        if let Some(prev) = state.queue_last_value {
-                            if (prev - qrem) > 0.0001 {
-                                state.queue_last_progress_at = Some(now);
-                            }
-                        }
-                        state.queue_last_seen_at = Some(now);
-                        state.queue_last_value = Some(qrem);
-                    } else {
-                        state.queue_last_seen_at = None;
-                        state.queue_last_progress_at = None;
-                        state.queue_last_value = None;
-                    }
-                    if !state
-                        .stats
-                        .queue_time_remaining
-                        .map_or(false, |prev| (prev - qrem).abs() <= 0.0001)
-                    {
-                        state.stats.queue_time_remaining = Some(qrem);
-                        let (next_game_state_code, next_game_state) =
-                            derive_game_state(&state, now);
-                        if state.stats.game_state != next_game_state
-                            || state.stats.game_state_code != next_game_state_code
-                        {
-                            state.stats.game_state_code = next_game_state_code;
-                            state.stats.game_state = next_game_state.to_string();
-                        }
-                        queue_changed = true;
-                        let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
-                    }
-                }
-                if queue_changed {
-                    let synthetic = super::BridgeParsedEvent {
-                        ev: "pull_queue_time_remaining".to_string(),
-                        value: Some(qrem),
-                        total: None,
-                        delta: None,
-                        field: None,
-                        source: Some("state_manager".to_string()),
-                        method: Some("scenario_metadata".to_string()),
-                        origin: Some("scenario_metadata".to_string()),
-                        origin_flag: Some("state_manager".to_string()),
-                        fn_name: None,
-                        receiver: None,
-                        raw: parsed.raw.clone(),
-                    };
-                    let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-                }
             }
             return;
         }
@@ -2318,26 +2037,15 @@ mod imp {
                 }
                 "pull_is_in_challenge" | "is_in_challenge" => {
                     let next = value >= 0.5;
-                    const START_FALSE_GRACE: Duration = Duration::from_millis(1800);
-                    let suppress_false = !next
-                        && state.challenge_lifecycle_active
-                        && state
-                            .challenge_lifecycle_at
-                            .map_or(false, |ts| now.duration_since(ts) <= START_FALSE_GRACE);
-                    if suppress_false {
-                        // Lifecycle start/restart is authoritative for a short window.
-                        // Ignore transient pull=false jitter immediately after transitions.
+                    if next {
+                        state.challenge_lifecycle_active = true;
                     } else {
-                        if next {
-                            state.challenge_lifecycle_active = true;
-                        } else {
-                            state.challenge_lifecycle_active = false;
-                        }
-                        state.challenge_lifecycle_at = Some(now);
-                        if state.stats.is_in_challenge != Some(next) {
-                            state.stats.is_in_challenge = Some(next);
-                            should_emit_stats = true;
-                        }
+                        state.challenge_lifecycle_active = false;
+                    }
+                    state.challenge_lifecycle_at = Some(now);
+                    if state.stats.is_in_challenge != Some(next) {
+                        state.stats.is_in_challenge = Some(next);
+                        should_emit_stats = true;
                     }
                 }
                 "pull_is_in_scenario_editor" => {
