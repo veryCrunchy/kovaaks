@@ -1792,19 +1792,6 @@ mod imp {
         (0, "menu")
     }
 
-    fn game_state_label_from_code(code: i32) -> &'static str {
-        match code {
-            1 => "trainer_menu",
-            2 => "queued",
-            3 => "freeplay",
-            4 => "challenge",
-            5 => "paused",
-            6 => "editor",
-            7 => "replay",
-            _ => "menu",
-        }
-    }
-
     fn normalize_scenario_name(raw: &str) -> Option<String> {
         let trimmed = raw.trim();
         if trimmed.len() < 3 || trimmed.len() > 160 {
@@ -2117,39 +2104,6 @@ mod imp {
                 }
             }
 
-            let ch_metric = super::BridgeParsedEvent {
-                ev: "ch".to_string(),
-                value: Some(if active { 1.0 } else { 0.0 }),
-                total: None,
-                delta: None,
-                field: Some("is_in_challenge".to_string()),
-                source: parsed.source.clone(),
-                method: Some("challenge_transition".to_string()),
-                origin: Some("bridge_session_tracking".to_string()),
-                origin_flag: Some("compat".to_string()),
-                fn_name: parsed.fn_name.clone(),
-                receiver: parsed.receiver.clone(),
-                raw: parsed.raw.clone(),
-            };
-            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &ch_metric);
-
-            if !active {
-                let qrem_metric = super::BridgeParsedEvent {
-                    ev: "qrem".to_string(),
-                    value: Some(0.0),
-                    total: None,
-                    delta: None,
-                    field: Some("queue_time_remaining".to_string()),
-                    source: parsed.source.clone(),
-                    method: Some("challenge_transition".to_string()),
-                    origin: Some("bridge_session_tracking".to_string()),
-                    origin_flag: Some("compat".to_string()),
-                    fn_name: parsed.fn_name.clone(),
-                    receiver: parsed.receiver.clone(),
-                    raw: parsed.raw.clone(),
-                };
-                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &qrem_metric);
-            }
         }
 
         if parsed.ev == "scenario_metadata" {
@@ -2316,8 +2270,7 @@ mod imp {
             || parsed.ev == "is_in_challenge"
             || parsed.ev == "queue_time_remaining"
             || parsed.ev == "challenge_queue_time_remaining"
-            || parsed.ev == "qrem"
-            || parsed.ev == "ch";
+            ;
         if !is_compat_metric {
             return;
         }
@@ -2352,8 +2305,6 @@ mod imp {
 
         let now = Instant::now();
         let mut should_emit_stats = false;
-        let mut emit_alias_qrem: Option<f64> = None;
-        let mut emit_alias_ch: Option<f64> = None;
         let mut recovery_signal: Option<(bool, bool)> = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
@@ -2386,7 +2337,6 @@ mod imp {
                         if state.stats.is_in_challenge != Some(next) {
                             state.stats.is_in_challenge = Some(next);
                             should_emit_stats = true;
-                            emit_alias_ch = Some(if next { 1.0 } else { 0.0 });
                         }
                     }
                 }
@@ -2664,7 +2614,6 @@ mod imp {
                     {
                         state.stats.queue_time_remaining = Some(value);
                         should_emit_stats = true;
-                        emit_alias_qrem = Some(value);
                     }
                 }
                 "pull_score_total" => {
@@ -2691,30 +2640,6 @@ mod imp {
                     if value.is_finite() && value >= 0.0 && (value <= 0.000001 || challenge_context)
                     {
                         state.score_total_derived = Some(value);
-                    }
-                }
-                "pull_game_state_code" => {
-                    let next_code = value.round() as i32;
-                    if state.stats.game_state_code != next_code {
-                        state.stats.game_state_code = next_code;
-                        state.stats.game_state = game_state_label_from_code(next_code).to_string();
-                        should_emit_stats = true;
-                    }
-                }
-                "pull_game_state" => {
-                    let next_code = value.round() as i32;
-                    let next_label = parsed
-                        .field
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or_else(|| game_state_label_from_code(next_code));
-                    if state.stats.game_state_code != next_code
-                        || state.stats.game_state != next_label
-                    {
-                        state.stats.game_state_code = next_code;
-                        state.stats.game_state = next_label.to_string();
-                        should_emit_stats = true;
                     }
                 }
                 _ => {}
@@ -2795,41 +2720,6 @@ mod imp {
             }
         }
 
-        if let Some(ch) = emit_alias_ch {
-            let synthetic = super::BridgeParsedEvent {
-                ev: "ch".to_string(),
-                value: Some(ch),
-                total: None,
-                delta: None,
-                field: Some("is_in_challenge".to_string()),
-                source: parsed.source.clone(),
-                method: Some("compat_alias".to_string()),
-                origin: Some("bridge_compat".to_string()),
-                origin_flag: Some("bridge_compat".to_string()),
-                fn_name: parsed.fn_name.clone(),
-                receiver: parsed.receiver.clone(),
-                raw: parsed.raw.clone(),
-            };
-            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-        }
-
-        if let Some(qrem) = emit_alias_qrem {
-            let synthetic = super::BridgeParsedEvent {
-                ev: "qrem".to_string(),
-                value: Some(qrem),
-                total: None,
-                delta: None,
-                field: Some("queue_time_remaining".to_string()),
-                source: parsed.source.clone(),
-                method: Some("compat_alias".to_string()),
-                origin: Some("bridge_compat".to_string()),
-                origin_flag: Some("bridge_compat".to_string()),
-                fn_name: parsed.fn_name.clone(),
-                receiver: parsed.receiver.clone(),
-                raw: parsed.raw.clone(),
-            };
-            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
-        }
     }
 
     fn log_ring() -> &'static Mutex<VecDeque<String>> {

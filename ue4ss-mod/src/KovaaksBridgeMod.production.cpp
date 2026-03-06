@@ -833,7 +833,11 @@ private:
             return -1.0f;
         };
         const bool has_active_runtime_context =
-            current_is_in_challenge > 0 || current_is_in_scenario > 0;
+            current_is_in_challenge > 0
+            || current_is_in_scenario > 0
+            || (std::isfinite(current_time_remaining) && current_time_remaining > 0.05f)
+            || (current_challenge_tick_count > 0)
+            || (std::isfinite(current_seconds) && current_seconds > 0.05f);
         const auto sanitize_temporal_metric = [has_active_runtime_context](float current, float fallback) -> float {
             if (std::isfinite(current) && current >= 0.0f) {
                 return current;
@@ -1766,6 +1770,16 @@ private:
         const bool active_now =
             current_is_in_challenge > 0
             || current_is_in_scenario > 0;
+        const bool runtime_progress_hint =
+            current_challenge_tick_count > 0
+            || current_shots_fired > 0
+            || current_shots_hit > 0
+            || current_kills_total > 0
+            || (std::isfinite(current_seconds) && current_seconds > 0.05f)
+            || (std::isfinite(current_time_remaining) && current_time_remaining > 0.05f)
+            || (std::isfinite(current_score_total) && current_score_total > 0.05f)
+            || (std::isfinite(current_score_total_derived) && current_score_total_derived > 0.05f);
+        const bool effective_active_now = active_now || runtime_progress_hint;
         const bool active_prev =
             prev_is_in_challenge > 0
             || prev_is_in_scenario > 0;
@@ -1829,7 +1843,7 @@ private:
             pull_receiver_metrics(receiver);
         }
 
-        if (!active_now) {
+        if (!effective_active_now) {
             current_kills_total = -1;
             current_shots_fired = -1;
             current_shots_hit = -1;
@@ -1847,7 +1861,7 @@ private:
             current_time_remaining = -1.0f;
         }
 
-        if (active_now) {
+        if (effective_active_now) {
             emit_pull_i32("pull_kills_total", last_kills_total_, current_kills_total, last_nonzero_kills_total_ms_, now);
             emit_pull_i32("pull_shots_fired_total", last_shots_fired_, current_shots_fired, last_nonzero_shots_fired_ms_, now);
             emit_pull_i32("pull_shots_hit_total", last_shots_hit_, current_shots_hit, last_nonzero_shots_hit_ms_, now);
