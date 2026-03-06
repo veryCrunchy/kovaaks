@@ -23,10 +23,22 @@ interface BridgeMetricEvent {
   field?: string | null;
 }
 
+interface CursorPos {
+  x: number;
+  y: number;
+}
+
+interface OverlayOrigin {
+  x: number;
+  y: number;
+  scale_factor: number;
+}
+
 export default function App() {
   const [mode, setMode] = useState<Mode>("overlay");
   const [currentScenario, setCurrentScenario] = useState<string | null>(null);
   const [returnMode, setReturnMode] = useState<"overlay" | "settings">("overlay");
+  const [postSessionDismissRect, setPostSessionDismissRect] = useState<DOMRect | null>(null);
   const [debugHudVisible, setDebugHudVisible] = useState<boolean>(() => {
     try {
       return localStorage.getItem("hud-debug-state-visible") === "1";
@@ -136,9 +148,74 @@ export default function App() {
 
   // Manage mouse click-through: active in overlay mode
   useEffect(() => {
-    const passthrough = mode === "overlay";
-    invoke("set_mouse_passthrough", { enabled: passthrough }).catch(console.error);
-  }, [mode]);
+    let cancelled = false;
+    let overlayOrigin: OverlayOrigin | null = null;
+    let lastPassthrough: boolean | null = null;
+    let intervalId: number | null = null;
+
+    const setPassthrough = (enabled: boolean) => {
+      if (cancelled || lastPassthrough === enabled) return;
+      lastPassthrough = enabled;
+      invoke("set_mouse_passthrough", { enabled }).catch(console.error);
+    };
+
+    const refreshOverlayOrigin = async () => {
+      try {
+        overlayOrigin = await invoke<OverlayOrigin>("get_overlay_origin");
+      } catch (error) {
+        console.error(error);
+        overlayOrigin = null;
+      }
+    };
+
+    const isCursorOverDismissButton = async () => {
+      if (!postSessionDismissRect) return false;
+      if (!overlayOrigin) {
+        await refreshOverlayOrigin();
+      }
+      if (!overlayOrigin) return false;
+
+      const cursor = await invoke<CursorPos>("get_cursor_pos");
+      const padding = 8 * overlayOrigin.scale_factor;
+      const left = overlayOrigin.x + postSessionDismissRect.left * overlayOrigin.scale_factor - padding;
+      const top = overlayOrigin.y + postSessionDismissRect.top * overlayOrigin.scale_factor - padding;
+      const right = overlayOrigin.x + postSessionDismissRect.right * overlayOrigin.scale_factor + padding;
+      const bottom = overlayOrigin.y + postSessionDismissRect.bottom * overlayOrigin.scale_factor + padding;
+
+      return cursor.x >= left && cursor.x <= right && cursor.y >= top && cursor.y <= bottom;
+    };
+
+    const tick = async () => {
+      if (mode !== "overlay") {
+        setPassthrough(false);
+        return;
+      }
+
+      if (!postSessionDismissRect) {
+        setPassthrough(true);
+        return;
+      }
+
+      try {
+        setPassthrough(!(await isCursorOverDismissButton()));
+      } catch (error) {
+        console.error(error);
+        setPassthrough(true);
+      }
+    };
+
+    refreshOverlayOrigin().then(() => { void tick(); });
+    intervalId = window.setInterval(() => { void tick(); }, 30);
+    window.addEventListener("resize", refreshOverlayOrigin);
+
+    return () => {
+      cancelled = true;
+      if (intervalId != null) {
+        window.clearInterval(intervalId);
+      }
+      window.removeEventListener("resize", refreshOverlayOrigin);
+    };
+  }, [mode, postSessionDismissRect]);
 
   return (
     <div
@@ -187,8 +264,16 @@ export default function App() {
             </DraggableHUD>
           )}
           {hudVis.postSession && (
-            <DraggableHUD storageKey="post-session" defaultPos={{ x: Math.round(window.innerWidth / 2) - 150, y: Math.round(window.innerHeight / 2) - 200 }} layoutMode={mode === "layout"}>
-              <PostSessionOverview preview={mode === "layout"} />
+            <DraggableHUD
+              storageKey="post-session"
+              defaultPos={{ x: Math.round(window.innerWidth / 2) - 150, y: Math.round(window.innerHeight / 2) - 200 }}
+              layoutMode={mode === "layout"}
+              interactive={postSessionDismissRect !== null}
+            >
+              <PostSessionOverview
+                preview={mode === "layout"}
+                onDismissButtonRectChange={setPostSessionDismissRect}
+              />
             </DraggableHUD>
           )}
           {debugHudVisible && (

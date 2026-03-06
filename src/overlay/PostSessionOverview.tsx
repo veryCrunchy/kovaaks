@@ -1,4 +1,5 @@
 import { motion, AnimatePresence } from "framer-motion";
+import { useEffect, useRef } from "react";
 import { useSessionSummary } from "../hooks/useSessionSummary";
 
 // ── Colour palette (shared with StatsHUD) ─────────────────────────────────────
@@ -124,10 +125,51 @@ function SmoothnessBar({ label, value, lowerBetter = false, accent }: Smoothness
 interface PostSessionOverviewProps {
   /** Always render an empty state so the HUD can be repositioned. */
   preview?: boolean;
+  onDismissButtonRectChange?: (rect: DOMRect | null) => void;
 }
 
-export function PostSessionOverview({ preview = false }: PostSessionOverviewProps) {
+export function PostSessionOverview({
+  preview = false,
+  onDismissButtonRectChange,
+}: PostSessionOverviewProps) {
   const { summary, dismiss, dismissProgress } = useSessionSummary();
+  const dismissButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!summary || !onDismissButtonRectChange) {
+      onDismissButtonRectChange?.(null);
+      return;
+    }
+
+    const updateRect = () => {
+      onDismissButtonRectChange(dismissButtonRef.current?.getBoundingClientRect() ?? null);
+    };
+
+    updateRect();
+    const interval = window.setInterval(updateRect, 100);
+    window.addEventListener("resize", updateRect);
+
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("resize", updateRect);
+      onDismissButtonRectChange(null);
+    };
+  }, [onDismissButtonRectChange, summary]);
+
+  useEffect(() => {
+    if (!summary || preview) return;
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      dismiss();
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [dismiss, preview, summary]);
 
   if (!summary && !preview) return null;
 
@@ -211,6 +253,7 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
               </div>
               {summary && (
                 <button
+                  ref={dismissButtonRef}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={(e) => {
                     e.stopPropagation();

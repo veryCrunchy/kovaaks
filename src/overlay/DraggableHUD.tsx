@@ -14,6 +14,8 @@ interface DraggableHUDProps {
   defaultScale?: number;
   /** When true, shows drag outline and scale controls */
   layoutMode?: boolean;
+  /** When true, allows this HUD to receive pointer input outside layout mode. */
+  interactive?: boolean;
   children: React.ReactNode;
 }
 
@@ -36,6 +38,7 @@ export function DraggableHUD({
   defaultPos,
   defaultScale = 1,
   layoutMode = false,
+  interactive = false,
   children,
 }: DraggableHUDProps) {
   const [pos, setPos] = useState<Pos>(() => {
@@ -125,7 +128,7 @@ export function DraggableHUD({
         top: pos.y,
         transform: `scale(${scale})`,
         transformOrigin: "top left",
-        pointerEvents: layoutMode ? "auto" : "none",
+        pointerEvents: layoutMode || interactive ? "auto" : "none",
         cursor: layoutMode ? (isDragging.current ? "grabbing" : "grab") : "default",
         userSelect: "none",
         zIndex: 50,
