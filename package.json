@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "npm run build:frontend",
+    "build:frontend": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "pipeline:win": "pwsh ./scripts/dev-pipeline.ps1 -RuntimeProfile minimal",
