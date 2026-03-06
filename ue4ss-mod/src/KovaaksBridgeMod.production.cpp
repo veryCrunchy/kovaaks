@@ -542,6 +542,14 @@ void collect_objects_by_class(RC::Unreal::UClass* target_class, std::vector<RC::
 
 class KovaaksBridgeModProduction final : public RC::CppUserModBase {
 public:
+    enum class LiveMetricHookKind : uintptr_t {
+        Seconds = 1,
+        Score = 2,
+        ShotsFired = 3,
+        ShotsHit = 4,
+        ChallengeTickCount = 5,
+    };
+
     KovaaksBridgeModProduction(const KovaaksBridgeModProduction&) = delete;
     KovaaksBridgeModProduction& operator=(const KovaaksBridgeModProduction&) = delete;
 
@@ -552,6 +560,7 @@ public:
         ModAuthors = STR("veryCrunchy");
 
         verbose_logs_ = false;
+        s_instance_ = this;
 
         if (kovaaks::RustBridge::startup()) {
             rust_ready_ = true;
@@ -568,6 +577,7 @@ public:
 
     ~KovaaksBridgeModProduction() override {
         updates_disabled_ = true;
+        unregister_live_metric_hooks();
         if (text_set_hook_registered_ && text_set_fn_ && is_likely_valid_object_ptr(text_set_fn_)) {
             text_set_fn_->UnregisterHook(text_set_hook_id_);
             text_set_hook_registered_ = false;
@@ -577,6 +587,9 @@ public:
         rust_ready_ = false;
         if (had_rust) {
             kovaaks::RustBridge::shutdown();
+        }
+        if (s_instance_ == this) {
+            s_instance_ = nullptr;
         }
     }
 
@@ -1186,6 +1199,161 @@ private:
         }
     };
 
+    static auto try_read_hook_param_i32(void* params, size_t offset, int32_t& out_value) -> bool {
+        if (!params) {
+            return false;
+        }
+        auto* ptr = reinterpret_cast<const uint8_t*>(params) + offset;
+        if (!is_likely_readable_region(ptr, sizeof(int32_t))) {
+            return false;
+        }
+        std::memcpy(&out_value, ptr, sizeof(int32_t));
+        return true;
+    }
+
+    static auto try_read_hook_param_f32(void* params, size_t offset, float& out_value) -> bool {
+        if (!params) {
+            return false;
+        }
+        auto* ptr = reinterpret_cast<const uint8_t*>(params) + offset;
+        if (!is_likely_readable_region(ptr, sizeof(float))) {
+            return false;
+        }
+        std::memcpy(&out_value, ptr, sizeof(float));
+        return std::isfinite(out_value);
+    }
+
+    void handle_live_metric_hook(LiveMetricHookKind kind, RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx) {
+        if (updates_disabled_ || !rust_ready_) {
+            return;
+        }
+        auto* frame = reinterpret_cast<RC::Unreal::FFrame_50_AndBelow*>(&call_ctx.TheStack);
+        void* params = frame ? static_cast<void*>(frame->Locals) : nullptr;
+        if (!params) {
+            return;
+        }
+
+        const uint64_t now = GetTickCount64();
+        EmitTagScope hook_scope(*this, "receiver_hook", "non_ui_live_hook");
+
+        switch (kind) {
+        case LiveMetricHookKind::Seconds: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32("pull_seconds_total", last_seconds_, value, last_nonzero_seconds_ms_, now);
+            emit_pull_f32(
+                "pull_challenge_seconds_total",
+                last_challenge_seconds_total_,
+                value,
+                last_nonzero_challenge_seconds_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
+            last_observed_seconds_value_ = value;
+            break;
+        }
+        case LiveMetricHookKind::Score: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32("pull_score_total", last_score_total_, value, last_nonzero_score_total_ms_, now);
+            break;
+        }
+        case LiveMetricHookKind::ShotsFired: {
+            int32_t value = -1;
+            if (!try_read_hook_param_i32(params, 0x20, value) || value < 0) {
+                return;
+            }
+            emit_pull_i32("pull_shots_fired_total", last_shots_fired_, value, last_nonzero_shots_fired_ms_, now);
+            break;
+        }
+        case LiveMetricHookKind::ShotsHit: {
+            int32_t value = -1;
+            if (!try_read_hook_param_i32(params, 0x20, value) || value < 0) {
+                return;
+            }
+            emit_pull_i32("pull_shots_hit_total", last_shots_hit_, value, last_nonzero_shots_hit_ms_, now);
+            break;
+        }
+        case LiveMetricHookKind::ChallengeTickCount: {
+            int32_t value = -1;
+            if (!try_read_hook_param_i32(params, 0x20, value) || value < 0) {
+                return;
+            }
+            emit_pull_i32(
+                "pull_challenge_tick_count_total",
+                last_challenge_tick_count_,
+                value,
+                last_nonzero_challenge_tick_count_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
+            last_observed_challenge_tick_count_ = value;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    void register_live_metric_hooks() {
+        if (live_metric_hooks_registered_) {
+            return;
+        }
+
+        auto bind = [&](RC::Unreal::UFunction* fn, LiveMetricHookKind kind) {
+            if (!fn || !is_likely_valid_object_ptr(fn)) {
+                return;
+            }
+            for (const auto& existing : live_metric_hook_bindings_) {
+                if (existing.first == fn) {
+                    return;
+                }
+            }
+            const auto callback_id = fn->RegisterPostHook(
+                [](RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx, void* custom_data) {
+                    auto* self = s_instance_;
+                    if (!self) {
+                        return;
+                    }
+                    const auto raw = reinterpret_cast<uintptr_t>(custom_data);
+                    self->handle_live_metric_hook(static_cast<LiveMetricHookKind>(raw), call_ctx);
+                },
+                reinterpret_cast<void*>(static_cast<uintptr_t>(kind))
+            );
+            live_metric_hook_bindings_.emplace_back(fn, callback_id);
+        };
+
+        bind(targets_.receive_seconds, LiveMetricHookKind::Seconds);
+        bind(targets_.receive_score, LiveMetricHookKind::Score);
+        bind(targets_.receive_score_single, LiveMetricHookKind::Score);
+        bind(targets_.receive_score_value_else, LiveMetricHookKind::Score);
+        bind(targets_.receive_shots_fired, LiveMetricHookKind::ShotsFired);
+        bind(targets_.receive_shots_fired_single, LiveMetricHookKind::ShotsFired);
+        bind(targets_.receive_shots_fired_value_else, LiveMetricHookKind::ShotsFired);
+        bind(targets_.receive_shots_hit, LiveMetricHookKind::ShotsHit);
+        bind(targets_.receive_shots_hit_single, LiveMetricHookKind::ShotsHit);
+        bind(targets_.receive_shots_hit_value_else, LiveMetricHookKind::ShotsHit);
+        bind(targets_.receive_challenge_tick_count, LiveMetricHookKind::ChallengeTickCount);
+        bind(targets_.receive_challenge_tick_count_single, LiveMetricHookKind::ChallengeTickCount);
+        bind(targets_.receive_challenge_tick_count_value_else, LiveMetricHookKind::ChallengeTickCount);
+
+        live_metric_hooks_registered_ = !live_metric_hook_bindings_.empty();
+    }
+
+    void unregister_live_metric_hooks() {
+        for (auto& binding : live_metric_hook_bindings_) {
+            if (binding.first && is_likely_valid_object_ptr(binding.first)) {
+                binding.first->UnregisterHook(binding.second);
+            }
+        }
+        live_metric_hook_bindings_.clear();
+        live_metric_hooks_registered_ = false;
+    }
+
     auto on_update_impl() -> void {
         const uint64_t now = GetTickCount64();
         if (now < fault_backoff_until_ms_) {
@@ -1690,11 +1858,22 @@ private:
                 last_runtime_progress_ms_ = now;
             }
         }
+        const bool entering_active_edge =
+            (current_is_in_challenge > 0 || current_is_in_scenario > 0)
+            && !(prev_is_in_challenge > 0 || prev_is_in_scenario > 0);
+        const bool leaving_active_edge =
+            !(current_is_in_challenge > 0 || current_is_in_scenario > 0)
+            && (prev_is_in_challenge > 0 || prev_is_in_scenario > 0);
         if ((challenge_state_edge || scenario_state_edge)
             && (last_state_transition_refresh_ms_ == 0
-                || (now - last_state_transition_refresh_ms_) > 250)) {
+                || safe_elapsed_ms(now, last_state_transition_refresh_ms_) > 250)) {
             last_state_transition_refresh_ms_ = now;
-            reset_runtime_resolvers();
+            if (leaving_active_edge) {
+                reset_runtime_resolvers();
+            } else if (entering_active_edge) {
+                next_receiver_resolve_ms_ = 0;
+                next_receiver_live_rebind_allowed_ms_ = 0;
+            }
         }
         }
 
@@ -2255,6 +2434,7 @@ private:
     bool lifecycle_queued_{false};
     bool lifecycle_seen_progress_{false};
     uint64_t last_lifecycle_signal_ms_{0};
+    uint64_t last_lifecycle_start_ms_{0};
     uint64_t pending_lifecycle_end_ms_{0};
     uint64_t last_state_change_emit_ms_{0};
     uint64_t last_state_transition_refresh_ms_{0};
@@ -2276,6 +2456,10 @@ private:
     bool last_bridge_connected_{false};
     const char* emit_method_{"unknown"};
     const char* emit_origin_flag_{"unknown"};
+    std::vector<std::pair<RC::Unreal::UFunction*, uint64_t>> live_metric_hook_bindings_{};
+    bool live_metric_hooks_registered_{false};
+
+    static inline KovaaksBridgeModProduction* s_instance_{nullptr};
 
     void reset_runtime_resolvers() {
         meta_game_instance_ = nullptr;
@@ -2305,9 +2489,14 @@ private:
         lifecycle_active_ = true;
         lifecycle_queued_ = false;
         lifecycle_seen_progress_ = false;
+        last_lifecycle_start_ms_ = now;
         replay_capture_disabled_ = false;
         last_lifecycle_signal_ms_ = now;
         pending_lifecycle_end_ms_ = 0;
+        next_receiver_resolve_ms_ = 0;
+        next_receiver_live_rebind_allowed_ms_ = 0;
+        last_observed_seconds_value_ = std::numeric_limits<float>::quiet_NaN();
+        last_observed_challenge_tick_count_ = std::numeric_limits<int32_t>::min();
         emit_simple_event("session_start");
         emit_simple_event("challenge_start");
         emit_simple_event("scenario_start");
@@ -2316,6 +2505,7 @@ private:
 
     void emit_lifecycle_end(bool completed, uint64_t now) {
         lifecycle_active_ = false;
+        last_lifecycle_start_ms_ = 0;
         replay_capture_disabled_ = false;
         pending_lifecycle_end_ms_ = 0;
         emit_simple_event("challenge_end");
@@ -2548,6 +2738,7 @@ private:
         targets_.scenario_is_in_scenario = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsInScenario"));
         targets_.scenario_is_in_scenario_editor = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsInScenarioEditor"));
         targets_.scenario_is_currently_in_benchmark = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsCurrentlyInBenchmark"));
+        register_live_metric_hooks();
     }
 
     RC::Unreal::UClass* resolve_function_owner_class(RC::Unreal::UFunction* fn) {
@@ -3032,6 +3223,9 @@ private:
             || last_is_in_scenario_ == 1
             || lifecycle_active_
             || (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.25f);
+        const bool recent_lifecycle_start =
+            last_lifecycle_start_ms_ > 0
+            && safe_elapsed_ms(now, last_lifecycle_start_ms_) <= 1500;
         next_receiver_resolve_ms_ = now + (prefer_live_activity ? 250 : 2000);
 
         auto* meta = resolve_meta_game_instance(now);
@@ -3081,20 +3275,31 @@ private:
                 if (safe_probe_state_receiver_activity(obj, probe) && probe.valid) {
                     if (std::isfinite(probe.seconds) && probe.seconds >= 0.0f) {
                         score += std::min<int>(500, static_cast<int>(std::llround(probe.seconds * 25.0)));
-                        if (std::isfinite(last_seconds_) && last_seconds_ > 0.25f
+                        if (!recent_lifecycle_start
+                            && std::isfinite(last_seconds_) && last_seconds_ > 0.25f
                             && (static_cast<double>(probe.seconds) + 0.20) >= static_cast<double>(last_seconds_)) {
                             score += 250;
+                        }
+                        if (recent_lifecycle_start && probe.seconds <= 3.0f) {
+                            score += 180;
                         }
                     }
                     if (probe.challenge_tick_count >= 0) {
                         score += std::min<int>(600, probe.challenge_tick_count / 2);
-                        if (last_challenge_tick_count_ > 10
+                        if (!recent_lifecycle_start
+                            && last_challenge_tick_count_ > 10
                             && probe.challenge_tick_count + 10 >= last_challenge_tick_count_) {
                             score += 250;
+                        }
+                        if (recent_lifecycle_start && probe.challenge_tick_count > 0) {
+                            score += 220;
                         }
                     }
                     if (std::isfinite(probe.score_total) && probe.score_total > 0.0f) {
                         score += std::min<int>(250, static_cast<int>(std::llround(probe.score_total / 10.0)));
+                        if (recent_lifecycle_start && probe.score_total >= 0.0f) {
+                            score += 100;
+                        }
                     }
                 }
             }

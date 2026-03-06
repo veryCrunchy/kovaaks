@@ -1947,7 +1947,6 @@ static auto replay_ingame_playback_handle_command(const BridgeCommand& command, 
 
     switch (command.kind) {
     case BridgeCommandKind::ReplayLoadBegin:
-        replay_ingame_request_ui_release(state, now_ms);
         replay_ingame_reset_runtime_state(state, now_ms, "loading");
         replay_ingame_clear_loaded_replay(state);
         state.loaded_session_id = command.session_id;
@@ -2012,6 +2011,10 @@ static auto replay_ingame_playback_handle_command(const BridgeCommand& command, 
             replay_ingame_emit_status_if_due(state, now_ms, true);
             replay_ingame_log("[replay_playback] duplicate start ignored (same session)");
             break;
+        }
+        if (!state.active && !state.load_in_progress && state.ui_unlock_pending) {
+            state.ui_unlock_pending = false;
+            state.ui_unlock_deadline_ms = 0;
         }
         if (state.active || state.load_in_progress || state.ui_unlock_pending) {
             state.debug_last_command = "play_start_busy_rejected";
