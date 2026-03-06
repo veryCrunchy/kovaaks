@@ -211,7 +211,11 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
               </div>
               {summary && (
                 <button
-                  onClick={dismiss}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    dismiss();
+                  }}
                   style={{
                     background: "transparent",
                     border: "none",
@@ -221,6 +225,7 @@ export function PostSessionOverview({ preview = false }: PostSessionOverviewProp
                     lineHeight: 1,
                     padding: "0 2px",
                     fontFamily: "inherit",
+                    pointerEvents: "auto",
                   }}
                   title="Dismiss"
                 >
