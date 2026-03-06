@@ -415,6 +415,86 @@ mod imp {
         removes: Vec<String>,
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct InGameReplayBootstrapContext {
+        map_name: Option<String>,
+        map_scale: Option<f64>,
+        hide_ui: bool,
+        force_freeplay: bool,
+        bootstrap_timeout_ms: u64,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct InGameReplayReadyState {
+        session_id: String,
+        ready: bool,
+        ok: bool,
+        reason: String,
+        ts_ms: u64,
+    }
+
+    fn in_game_replay_ready_state() -> &'static Mutex<InGameReplayReadyState> {
+        static STATE: OnceLock<Mutex<InGameReplayReadyState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(InGameReplayReadyState::default()))
+    }
+
+    fn reset_in_game_replay_ready_state(session_id: &str) {
+        if let Ok(mut state) = in_game_replay_ready_state().lock() {
+            state.session_id = session_id.to_string();
+            state.ready = false;
+            state.ok = false;
+            state.reason.clear();
+            state.ts_ms = 0;
+        }
+    }
+
+    fn note_in_game_replay_ready_event(raw: &str) {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
+            return;
+        };
+        let Some(obj) = value.as_object() else {
+            return;
+        };
+        let Some(ev) = obj.get("ev").and_then(|v| v.as_str()) else {
+            return;
+        };
+        if ev != "replay_playback_ready" {
+            return;
+        }
+
+        let session_id = obj
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if session_id.is_empty() {
+            return;
+        }
+
+        let ok = obj
+            .get("ok")
+            .and_then(replay_json_boolish)
+            .unwrap_or(false);
+        let reason = obj
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let ts_ms = obj.get("ts_ms").and_then(replay_json_u64).unwrap_or(0);
+
+        if let Ok(mut state) = in_game_replay_ready_state().lock() {
+            if !state.session_id.is_empty() && state.session_id != session_id {
+                return;
+            }
+            state.session_id = session_id;
+            state.ready = true;
+            state.ok = ok;
+            state.reason = reason;
+            state.ts_ms = ts_ms;
+        }
+    }
+
     fn replay_json_boolish(value: &serde_json::Value) -> Option<bool> {
         match value {
             serde_json::Value::Bool(v) => Some(*v),
@@ -569,6 +649,90 @@ mod imp {
         frames
     }
 
+    fn parse_replay_bootstrap_context(stream: &super::BridgeTickStreamV1) -> InGameReplayBootstrapContext {
+        let mut bootstrap = InGameReplayBootstrapContext {
+            map_name: None,
+            map_scale: None,
+            hide_ui: true,
+            force_freeplay: true,
+            bootstrap_timeout_ms: 12_000,
+        };
+
+        if let Some(obj) = stream.context.as_ref().and_then(|v| v.as_object()) {
+            if bootstrap.map_name.is_none() {
+                if let Some(value) = obj.get("map_name").and_then(|v| v.as_str()) {
+                    let trimmed = value.trim();
+                    if !trimmed.is_empty() {
+                        bootstrap.map_name = Some(trimmed.to_string());
+                    }
+                }
+            }
+            if bootstrap.map_scale.is_none() {
+                if let Some(value) = obj.get("map_scale").and_then(replay_json_number) {
+                    if value.is_finite() && value > 0.0 {
+                        bootstrap.map_scale = Some(value);
+                    }
+                }
+            }
+        }
+
+        if bootstrap.map_name.is_none() || bootstrap.map_scale.is_none() {
+            for value in &stream.keyframes {
+                let Some(frame_obj) = value.as_object() else {
+                    continue;
+                };
+                let Some(context_obj) = frame_obj.get("context").and_then(|v| v.as_object()) else {
+                    continue;
+                };
+
+                if bootstrap.map_name.is_none() {
+                    if let Some(value) = context_obj.get("map_name").and_then(|v| v.as_str()) {
+                        let trimmed = value.trim();
+                        if !trimmed.is_empty() {
+                            bootstrap.map_name = Some(trimmed.to_string());
+                        }
+                    }
+                }
+                if bootstrap.map_scale.is_none() {
+                    if let Some(value) = context_obj.get("map_scale").and_then(replay_json_number) {
+                        if value.is_finite() && value > 0.0 {
+                            bootstrap.map_scale = Some(value);
+                        }
+                    }
+                }
+
+                if bootstrap.map_name.is_some() && bootstrap.map_scale.is_some() {
+                    break;
+                }
+            }
+        }
+
+        bootstrap
+    }
+
+    fn wait_for_in_game_replay_ready(
+        session_id: &str,
+        stop_flag: &Arc<AtomicBool>,
+        timeout: Duration,
+    ) -> Option<(bool, String)> {
+        let start = Instant::now();
+        while start.elapsed() < timeout {
+            if stop_flag.load(Ordering::SeqCst) {
+                return None;
+            }
+
+            if let Ok(state) = in_game_replay_ready_state().lock() {
+                if state.ready && state.session_id == session_id {
+                    return Some((state.ok, state.reason.clone()));
+                }
+            }
+
+            std::thread::sleep(Duration::from_millis(40));
+        }
+
+        None
+    }
+
     pub fn stop_in_game_replay_stream() -> Result<(), String> {
         if let Ok(mut slot) = in_game_replay_stop_flag().lock() {
             if let Some(flag) = slot.take() {
@@ -594,6 +758,7 @@ mod imp {
         if frames.is_empty() {
             return Err("replay has no tick_stream_v1 frame data".to_string());
         }
+        let bootstrap = parse_replay_bootstrap_context(&stream);
 
         stop_in_game_replay_stream()?;
 
@@ -615,14 +780,56 @@ mod imp {
         std::thread::Builder::new()
             .name("bridge-in-game-replay".into())
             .spawn(move || {
+                reset_in_game_replay_ready_state(&safe_session_id);
+
                 let start_cmd = serde_json::json!({
                     "cmd": "replay_play_start",
                     "session_id": safe_session_id,
-                    "speed": speed
+                    "speed": speed,
+                    "map_name": bootstrap.map_name.clone().unwrap_or_default(),
+                    "map_scale": bootstrap.map_scale.unwrap_or(1.0),
+                    "hide_ui": if bootstrap.hide_ui { 1 } else { 0 },
+                    "force_freeplay": if bootstrap.force_freeplay { 1 } else { 0 },
+                    "bootstrap_timeout_ms": bootstrap.bootstrap_timeout_ms
                 })
                 .to_string();
                 if !enqueue_bridge_command_blocking(start_cmd) {
                     return;
+                }
+
+                match wait_for_in_game_replay_ready(
+                    &safe_session_id,
+                    &stop_flag,
+                    Duration::from_millis(bootstrap.bootstrap_timeout_ms.saturating_add(3000)),
+                ) {
+                    Some((ok, reason)) => {
+                        if ok {
+                            log::info!("bridge: in-game replay ready (session={}, reason={reason})", safe_session_id);
+                        } else {
+                            log::warn!(
+                                "bridge: in-game replay bootstrap failed (session={}, reason={reason}); aborting stream",
+                                safe_session_id
+                            );
+                            let stop_cmd = serde_json::json!({
+                                "cmd": "replay_play_stop"
+                            })
+                            .to_string();
+                            let _ = enqueue_bridge_command_blocking(stop_cmd);
+                            return;
+                        }
+                    }
+                    None => {
+                        log::warn!(
+                            "bridge: in-game replay ready wait timed out (session={}); aborting stream",
+                            safe_session_id
+                        );
+                        let stop_cmd = serde_json::json!({
+                            "cmd": "replay_play_stop"
+                        })
+                        .to_string();
+                        let _ = enqueue_bridge_command_blocking(stop_cmd);
+                        return;
+                    }
                 }
 
                 let mut known_entities: HashSet<String> = HashSet::new();
@@ -3161,6 +3368,7 @@ mod imp {
                     while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                         let chunk: Vec<u8> = buf.drain(..=nl).collect();
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
+                            note_in_game_replay_ready_event(s);
                             observe_replay_stream_raw(s);
                             let parsed_event = super::parse_bridge_payload(s);
                             let is_noisy_bridge_event = |ev: &str| {

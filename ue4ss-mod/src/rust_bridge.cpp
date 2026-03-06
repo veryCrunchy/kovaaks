@@ -145,11 +145,12 @@ bool RustBridge::startup() {
     if (!g_api.init) {
         return false;
     }
-    const bool ok = g_api.init();
-    if (!ok) {
+    const bool connected = g_api.init();
+    if (!connected) {
         refresh_transport_error();
     }
-    return ok;
+    // API is usable even if first transport connect fails; emit/reconnect paths can recover.
+    return true;
 }
 
 bool RustBridge::reconnect() {

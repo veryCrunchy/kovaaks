@@ -8,6 +8,9 @@
             || std::filesystem::exists(std::filesystem::path(game_bin_dir() + L"kovaaks_in_game_overlay.flag"))) {
             return true;
         }
+        if (kmod_replay::replay_ingame_debug_overlay_enabled()) {
+            return true;
+        }
         return false;
     }
 
@@ -1640,6 +1643,8 @@
         } else {
             overlay_text += STR(" | waiting for live challenge metrics");
         }
+
+        (void)kmod_replay::replay_ingame_append_debug_overlay_text(overlay_text);
 
         if (overlay_text == s_last_text) {
             return;

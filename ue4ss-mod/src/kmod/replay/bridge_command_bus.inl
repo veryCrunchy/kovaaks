@@ -182,6 +182,37 @@ static auto bridge_command_extract_json_i32(
     return true;
 }
 
+static auto bridge_command_extract_json_boolish(
+    const std::string& json,
+    const char* key,
+    bool& out
+) -> bool {
+    out = false;
+
+    int32_t value_i32 = 0;
+    if (bridge_command_extract_json_i32(json, key, value_i32)) {
+        out = value_i32 != 0;
+        return true;
+    }
+
+    std::string value_str{};
+    if (!bridge_command_extract_json_string(json, key, value_str)) {
+        return false;
+    }
+    for (auto& ch : value_str) {
+        ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    }
+    if (value_str == "1" || value_str == "true") {
+        out = true;
+        return true;
+    }
+    if (value_str == "0" || value_str == "false") {
+        out = false;
+        return true;
+    }
+    return false;
+}
+
 static auto poll_bridge_command(BridgeCommand& out_command) -> bool {
     out_command = BridgeCommand{};
 
@@ -217,6 +248,24 @@ static auto poll_bridge_command(BridgeCommand& out_command) -> bool {
         std::string session_id{};
         if (bridge_command_extract_json_string(json_line, "session_id", session_id)) {
             out_command.session_id = bridge_command_sanitize_token(session_id);
+        }
+
+        (void)bridge_command_extract_json_string(json_line, "map_name", out_command.map_name);
+        double map_scale = 0.0;
+        if (bridge_command_extract_json_number(json_line, "map_scale", map_scale) && std::isfinite(map_scale)) {
+            out_command.map_scale = static_cast<float>(map_scale);
+        }
+
+        bool boolish = false;
+        if (bridge_command_extract_json_boolish(json_line, "force_freeplay", boolish)) {
+            out_command.force_freeplay = boolish ? 1 : 0;
+        }
+        if (bridge_command_extract_json_boolish(json_line, "hide_ui", boolish)) {
+            out_command.hide_ui = boolish ? 1 : 0;
+        }
+        int32_t timeout_ms = 0;
+        if (bridge_command_extract_json_i32(json_line, "bootstrap_timeout_ms", timeout_ms) && timeout_ms > 0) {
+            out_command.bootstrap_timeout_ms = timeout_ms;
         }
         return true;
     }

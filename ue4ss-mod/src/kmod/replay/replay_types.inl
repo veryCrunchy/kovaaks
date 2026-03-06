@@ -120,6 +120,11 @@ struct BridgeCommand {
     std::string raw{};
     std::string reason{};
     std::string session_id{};
+    std::string map_name{};
+    float map_scale{-1.0f};
+    int32_t force_freeplay{1};
+    int32_t hide_ui{1};
+    int32_t bootstrap_timeout_ms{12000};
     ReplayEntity entity{};
     std::string entity_id{};
 };

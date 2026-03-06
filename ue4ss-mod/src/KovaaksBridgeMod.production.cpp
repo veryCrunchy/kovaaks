@@ -555,16 +555,14 @@ public:
 
         if (kovaaks::RustBridge::startup()) {
             rust_ready_ = true;
-            kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_mod_loaded\"}");
-            kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_mode\",\"mode\":\"production_stripped\"}");
-            kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_prod_diag\",\"enabled\":0}");
-            RC::Output::send<RC::LogLevel::Warning>(STR("[KovaaksBridgeMod] Rust bridge loaded (production stripped).\n"));
+            emit_bridge_ready_banner();
         } else {
             RC::Output::send<RC::LogLevel::Error>(
                 STR("[KovaaksBridgeMod] Failed to load Rust bridge DLL. path={} win32_error={}\n"),
                 RC::StringType(kovaaks::RustBridge::last_dll_path()),
                 kovaaks::RustBridge::last_win32_error()
             );
+            next_rust_startup_retry_ms_ = GetTickCount64() + 1000;
         }
     }
 
@@ -641,8 +639,27 @@ public:
     }
 
     auto on_update() -> void override {
-        if (!rust_ready_ || updates_disabled_) {
+        if (updates_disabled_) {
             return;
+        }
+
+        const uint64_t now_ms = GetTickCount64();
+        if (!rust_ready_) {
+            if (now_ms >= next_rust_startup_retry_ms_) {
+                next_rust_startup_retry_ms_ = now_ms + 1000;
+                if (kovaaks::RustBridge::startup()) {
+                    rust_ready_ = true;
+                    emit_bridge_ready_banner();
+                }
+            }
+            if (!rust_ready_) {
+                return;
+            }
+        }
+
+        if (!kovaaks::RustBridge::is_connected() && now_ms >= next_rust_reconnect_retry_ms_) {
+            next_rust_reconnect_retry_ms_ = now_ms + 500;
+            (void)kovaaks::RustBridge::reconnect();
         }
 #if defined(_MSC_VER)
         __try {
@@ -656,6 +673,13 @@ public:
     }
 
 private:
+    void emit_bridge_ready_banner() {
+        kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_mod_loaded\"}");
+        kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_mode\",\"mode\":\"production_stripped\"}");
+        kovaaks::RustBridge::emit_json("{\"ev\":\"ue4ss_prod_diag\",\"enabled\":0}");
+        RC::Output::send<RC::LogLevel::Warning>(STR("[KovaaksBridgeMod] Rust bridge loaded (production stripped).\n"));
+    }
+
     static auto enumerate_properties(RC::Unreal::UStruct* owner) -> std::vector<RC::Unreal::FProperty*> {
         std::vector<RC::Unreal::FProperty*> out{};
         if (!owner || !is_likely_valid_object_ptr(owner)) {
@@ -1770,6 +1794,8 @@ private:
     uint64_t next_receiver_resolve_ms_{0};
     uint64_t next_scenario_resolve_ms_{0};
     uint64_t fault_backoff_until_ms_{0};
+    uint64_t next_rust_startup_retry_ms_{0};
+    uint64_t next_rust_reconnect_retry_ms_{0};
     uint32_t zero_signal_streak_{0};
 
     int32_t last_kills_total_{std::numeric_limits<int32_t>::min()};
