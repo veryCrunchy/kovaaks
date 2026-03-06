@@ -1100,7 +1100,8 @@ private:
             );
             kovaaks::RustBridge::emit_json(json.data());
         }
-        reset_runtime_resolvers();
+        // Replay faults must not poison the live state pipeline. Keep replay isolated
+        // and let normal state resolvers continue emitting.
     }
 
     auto replay_playback_tick_safe(uint64_t now_ms) -> bool {
@@ -1122,6 +1123,9 @@ private:
     }
 
     auto replay_tick_safe(uint64_t now_ms, const kmod_replay::ReplayTickInput& input) -> bool {
+        if (replay_capture_disabled_) {
+            return false;
+        }
         if (replay_fault_latched_ || now_ms < replay_fault_backoff_until_ms_) {
             return false;
         }
@@ -1130,6 +1134,7 @@ private:
             kmod_replay::replay_tick(input);
             return true;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
+            replay_capture_disabled_ = true;
             note_replay_runtime_fault(now_ms, "replay_tick");
             return false;
         }
@@ -1229,8 +1234,11 @@ private:
         {
             EmitTagScope state_scope(*this, "state_get", "non_ui_probe");
 
-        if (receiver) {
-            if (try_read_int(receiver, {
+        auto pull_receiver_metrics = [&](RC::Unreal::UObject* active_receiver) {
+            if (!active_receiver || !is_likely_valid_object_ptr(active_receiver)) {
+                return;
+            }
+            if (try_read_int(active_receiver, {
                     targets_.get_kills_value_else,
                     targets_.get_kills_value_or,
                     targets_.receive_kills_value_else,
@@ -1240,7 +1248,7 @@ private:
                 current_kills_total = iv;
                 emit_pull_i32("pull_kills_total", last_kills_total_, iv, last_nonzero_kills_total_ms_, now);
             }
-            if (try_read_int(receiver, {
+            if (try_read_int(active_receiver, {
                     targets_.get_shots_fired_value_else,
                     targets_.get_shots_fired_value_or,
                     targets_.receive_shots_fired_value_else,
@@ -1250,7 +1258,7 @@ private:
                 current_shots_fired = iv;
                 emit_pull_i32("pull_shots_fired_total", last_shots_fired_, iv, last_nonzero_shots_fired_ms_, now);
             }
-            if (try_read_int(receiver, {
+            if (try_read_int(active_receiver, {
                     targets_.get_shots_hit_value_else,
                     targets_.get_shots_hit_value_or,
                     targets_.receive_shots_hit_value_else,
@@ -1260,7 +1268,7 @@ private:
                 current_shots_hit = iv;
                 emit_pull_i32("pull_shots_hit_total", last_shots_hit_, iv, last_nonzero_shots_hit_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_score_value_else,
                     targets_.get_score_value_or,
                     targets_.receive_score_value_else,
@@ -1271,7 +1279,7 @@ private:
                 current_score_total = fv;
                 emit_pull_f32("pull_score_total", last_score_total_, fv, last_nonzero_score_total_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_accuracy_value_else,
                     targets_.get_accuracy_value_or,
                     targets_.receive_accuracy_value_else,
@@ -1281,7 +1289,7 @@ private:
                 current_accuracy = fv;
                 emit_pull_f32("pull_accuracy", last_accuracy_, fv, last_nonzero_accuracy_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_score_per_minute_value_else,
                     targets_.get_score_per_minute_value_or,
                     targets_.receive_score_per_minute_value_else,
@@ -1290,7 +1298,7 @@ private:
                 current_score_per_minute = fv;
                 emit_pull_f32("pull_score_per_minute", last_score_per_minute_, fv, last_nonzero_spm_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_challenge_average_fps_value_else,
                     targets_.get_challenge_average_fps_value_or,
                     targets_.receive_challenge_average_fps_value_else,
@@ -1301,7 +1309,7 @@ private:
                 current_challenge_average_fps = fv;
                 emit_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, fv, last_nonzero_challenge_average_fps_ms_, now);
             }
-            if (try_read_int(receiver, {
+            if (try_read_int(active_receiver, {
                     targets_.get_challenge_tick_count_value_else,
                     targets_.get_challenge_tick_count_value_or,
                     targets_.receive_challenge_tick_count_value_else,
@@ -1313,7 +1321,7 @@ private:
                 current_challenge_tick_count = iv;
                 emit_pull_i32("pull_challenge_tick_count_total", last_challenge_tick_count_, iv, last_nonzero_challenge_tick_count_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_damage_done_value_else,
                     targets_.get_damage_done_value_or,
                     targets_.receive_damage_done_value_else,
@@ -1322,7 +1330,7 @@ private:
                 current_damage_done = fv;
                 emit_pull_f32("pull_damage_done", last_damage_done_, fv, last_nonzero_damage_done_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_damage_possible_value_else,
                     targets_.get_damage_possible_value_or,
                     targets_.receive_damage_possible_value_else,
@@ -1331,7 +1339,7 @@ private:
                 current_damage_possible = fv;
                 emit_pull_f32("pull_damage_possible", last_damage_possible_, fv, last_nonzero_damage_possible_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_kills_per_second_value_else,
                     targets_.get_kills_per_second_value_or,
                     targets_.receive_kills_per_second_value_else,
@@ -1340,7 +1348,7 @@ private:
                 current_kills_per_second = fv;
                 emit_pull_f32("pull_kills_per_second", last_kills_per_second_, fv, last_nonzero_kills_per_second_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_damage_efficiency_value_else,
                     targets_.get_damage_efficiency_value_or,
                     targets_.receive_damage_efficiency_value_else,
@@ -1349,7 +1357,7 @@ private:
                 current_damage_efficiency = fv;
                 emit_pull_f32("pull_damage_efficiency", last_damage_efficiency_, fv, last_nonzero_damage_efficiency_ms_, now);
             }
-            if (try_read_float(receiver, {
+            if (try_read_float(active_receiver, {
                     targets_.get_seconds_value_else,
                     targets_.get_seconds_value_or,
                     targets_.receive_seconds
@@ -1359,7 +1367,8 @@ private:
                 emit_pull_f32("pull_seconds_total", last_seconds_, fv, last_nonzero_seconds_ms_, now);
                 emit_pull_f32("pull_challenge_seconds_total", last_challenge_seconds_total_, fv, last_nonzero_challenge_seconds_ms_, now);
             }
-        }
+        };
+        pull_receiver_metrics(receiver);
 
         auto pull_bool_state = [&](RC::Unreal::UObject* source,
                                    const char* ev,
@@ -1380,7 +1389,7 @@ private:
                 || (std::isfinite(current_time_remaining) && current_time_remaining > 1.0f);
             const bool recent_state_change =
                 last_state_change_emit_ms_ > 0
-                && (now - last_state_change_emit_ms_) < k_recent_state_change_ms;
+                && safe_elapsed_ms(now, last_state_change_emit_ms_) < k_recent_state_change_ms;
             const bool recent_lifecycle_signal =
                 last_lifecycle_signal_ms_ > 0
                 && (now - last_lifecycle_signal_ms_) < k_recent_true_window_ms;
@@ -1433,7 +1442,7 @@ private:
             }
 
             current_value = bool_value ? 1 : 0;
-            emit_state_i32(ev, last_value, current_value);
+            emit_state_i32(ev, last_value, current_value, now);
         };
 
         meta = resolve_meta_game_instance(now);
@@ -1540,6 +1549,47 @@ private:
             }
         }
 
+        const bool challenge_live_expected =
+            current_is_in_challenge > 0
+            || prev_is_in_challenge > 0
+            || current_is_in_scenario > 0
+            || prev_is_in_scenario > 0
+            || lifecycle_active_;
+        const bool had_recent_critical_progress =
+            last_runtime_progress_ms_ > 0 && safe_elapsed_ms(now, last_runtime_progress_ms_) <= 300;
+        const bool stalled_live_receiver =
+            receiver
+            && challenge_live_expected
+            && !had_recent_critical_progress
+            && now >= next_receiver_live_rebind_allowed_ms_
+            && (
+                ((!has_critical_seconds_read || !has_critical_tick_read)
+                    && ((std::isfinite(last_seconds_) && last_seconds_ > 0.50f) || last_challenge_tick_count_ > 15))
+                || (safe_elapsed_ms(now, last_runtime_progress_ms_) > 300
+                    && ((std::isfinite(last_seconds_) && last_seconds_ > 0.50f)
+                        || last_challenge_tick_count_ > 15))
+            );
+        if (stalled_live_receiver) {
+            state_receiver_instance_ = nullptr;
+            next_receiver_resolve_ms_ = 0;
+            next_receiver_live_rebind_allowed_ms_ = now + 250;
+            auto* rebound_receiver = resolve_state_receiver_instance(now);
+            if (rebound_receiver && rebound_receiver != receiver) {
+                receiver = rebound_receiver;
+                pull_receiver_metrics(receiver);
+                if (rust_ready_) {
+                    std::array<char, 192> json{};
+                    std::snprintf(
+                        json.data(),
+                        json.size(),
+                        "{\"ev\":\"ue4ss_prod_receiver_rebind\",\"reason\":\"critical_progress_stalled\",\"ts_ms\":%llu}",
+                        static_cast<unsigned long long>(now)
+                    );
+                    kovaaks::RustBridge::emit_json(json.data());
+                }
+            }
+        }
+
         challenge_state_edge =
             current_is_in_challenge >= 0
             && prev_is_in_challenge >= 0
@@ -1550,6 +1600,68 @@ private:
             && current_is_in_scenario != prev_is_in_scenario;
         if (challenge_state_edge || scenario_state_edge) {
             last_runtime_progress_ms_ = now;
+        }
+        const bool recently_active_challenge =
+            current_is_in_challenge > 0
+            || prev_is_in_challenge > 0
+            || current_is_in_scenario > 0
+            || prev_is_in_scenario > 0
+            || lifecycle_active_
+            || (last_in_challenge_true_ms_ > 0 && safe_elapsed_ms(now, last_in_challenge_true_ms_) < 2500);
+        const bool suspicious_false_transition =
+            current_is_in_challenge == 0
+            && current_is_in_scenario == 0
+            && prev_is_in_challenge > 0;
+        const bool severe_seconds_regression =
+            std::isfinite(current_seconds)
+            && std::isfinite(last_seconds_)
+            && last_seconds_ > 5.0f
+            && current_seconds >= 0.0f
+            && (static_cast<double>(current_seconds) + 2.0) < static_cast<double>(last_seconds_)
+            && static_cast<double>(current_seconds) < (static_cast<double>(last_seconds_) * 0.5);
+        const bool severe_tick_regression =
+            current_challenge_tick_count >= 0
+            && last_challenge_tick_count_ > 300
+            && current_challenge_tick_count + 200 < last_challenge_tick_count_;
+        const bool severe_counter_regression =
+            current_shots_fired == 0
+            && current_shots_hit == 0
+            && last_shots_fired_ > 50
+            && last_shots_hit_ > 10;
+        if (recently_active_challenge
+            && suspicious_false_transition
+            && (severe_seconds_regression || severe_tick_regression || severe_counter_regression)) {
+            current_is_in_challenge = prev_is_in_challenge > 0 ? prev_is_in_challenge : current_is_in_challenge;
+            current_is_in_scenario = prev_is_in_scenario > 0 ? prev_is_in_scenario : current_is_in_scenario;
+            if (severe_seconds_regression) {
+                current_seconds = last_seconds_;
+            }
+            if (severe_tick_regression) {
+                current_challenge_tick_count = last_challenge_tick_count_;
+            }
+            if (severe_counter_regression) {
+                current_shots_fired = last_shots_fired_;
+                current_shots_hit = last_shots_hit_;
+                current_kills_total = last_kills_total_;
+            }
+            challenge_state_edge = false;
+            scenario_state_edge = false;
+            if (now >= next_critical_recover_allowed_ms_) {
+                next_critical_recover_allowed_ms_ = now + 1500;
+                fault_state_guard_until_ms_ = now + 2500;
+                reset_runtime_resolvers();
+                if (rust_ready_) {
+                    std::array<char, 256> json{};
+                    std::snprintf(
+                        json.data(),
+                        json.size(),
+                        "{\"ev\":\"ue4ss_prod_stale_refresh\",\"reason\":\"receiver_regression\",\"seconds\":%.6f,\"last_seconds\":%.6f}",
+                        static_cast<double>(std::isfinite(current_seconds) ? current_seconds : -1.0f),
+                        static_cast<double>(std::isfinite(last_seconds_) ? last_seconds_ : -1.0f)
+                    );
+                    kovaaks::RustBridge::emit_json(json.data());
+                }
+            }
         }
         if (std::isfinite(current_seconds) && current_seconds >= 0.0f) {
             if (!std::isfinite(last_observed_seconds_value_)
@@ -1692,11 +1804,12 @@ private:
         if (last_state_change_emit_ms_ > stream_activity_ms) {
             stream_activity_ms = last_state_change_emit_ms_;
         }
-        if (likely_active_stream && stream_activity_ms > 0) {
+        if (likely_active_stream && stream_activity_ms > 0 && !kmod_replay::replay_ingame_playback_is_active()) {
             constexpr uint64_t k_stream_stall_ms = 1250;
-            if ((now - stream_activity_ms) > k_stream_stall_ms
+            const uint64_t stall_ms = safe_elapsed_ms(now, stream_activity_ms);
+            if (stall_ms > k_stream_stall_ms
                 && now >= next_stream_stall_recover_allowed_ms_) {
-                next_stream_stall_recover_allowed_ms_ = now + 850;
+                next_stream_stall_recover_allowed_ms_ = now + 1500;
                 fault_state_guard_until_ms_ = now + 2000;
                 reset_runtime_resolvers();
                 if (bridge_connected) {
@@ -1708,7 +1821,7 @@ private:
                         json.data(),
                         json.size(),
                         "{\"ev\":\"ue4ss_prod_stale_refresh\",\"reason\":\"stream_stall\",\"stall_ms\":%llu}",
-                        static_cast<unsigned long long>(now - stream_activity_ms)
+                        static_cast<unsigned long long>(stall_ms)
                     );
                     kovaaks::RustBridge::emit_json(json.data());
                 }
@@ -1820,11 +1933,11 @@ private:
                 // If state sources go silent for a sustained period, emit an
                 // explicit idle reset so frontend state doesn't stay latched.
                 EmitTagScope idle_scope(*this, "idle_fallback", "state_inferred");
-                emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, 0);
-                emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, 0);
-                emit_state_i32("pull_is_in_scenario_editor", last_is_in_scenario_editor_, 0);
-                emit_state_i32("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_, 0);
-                emit_state_i32("pull_is_in_trainer", last_is_in_trainer_, 0);
+                emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, 0, now);
+                emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, 0, now);
+                emit_state_i32("pull_is_in_scenario_editor", last_is_in_scenario_editor_, 0, now);
+                emit_state_i32("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_, 0, now);
+                emit_state_i32("pull_is_in_trainer", last_is_in_trainer_, 0, now);
                 emit_pull_f32("pull_time_remaining", last_time_remaining_, 0.0f, last_nonzero_time_remaining_ms_, now);
                 emit_pull_f32(
                     "pull_queue_time_remaining",
@@ -2028,6 +2141,13 @@ private:
         bool value{false};
     };
 
+    struct ReceiverActivityProbe {
+        bool valid{false};
+        float seconds{-1.0f};
+        int32_t challenge_tick_count{-1};
+        float score_total{-1.0f};
+    };
+
     static inline std::atomic<bool> s_disable_direct_invoke_path{false};
     static inline std::atomic<uint64_t> s_direct_invoke_faults{0};
     static inline std::atomic<uint64_t> s_direct_poll_errors{0};
@@ -2140,6 +2260,7 @@ private:
     uint64_t last_state_transition_refresh_ms_{0};
     uint64_t last_runtime_progress_ms_{0};
     uint64_t next_stream_stall_recover_allowed_ms_{0};
+    uint64_t next_receiver_live_rebind_allowed_ms_{0};
     float last_observed_seconds_value_{std::numeric_limits<float>::quiet_NaN()};
     int32_t last_observed_challenge_tick_count_{std::numeric_limits<int32_t>::min()};
     float last_observed_queue_time_remaining_{std::numeric_limits<float>::quiet_NaN()};
@@ -2147,6 +2268,7 @@ private:
     uint64_t replay_fault_backoff_until_ms_{0};
     uint32_t replay_fault_count_{0};
     bool replay_fault_latched_{false};
+    bool replay_capture_disabled_{false};
     bool verbose_logs_{false};
     uint64_t next_diag_log_ms_{0};
     bool updates_disabled_{false};
@@ -2163,6 +2285,7 @@ private:
         next_receiver_resolve_ms_ = 0;
         next_scenario_resolve_ms_ = 0;
         next_targets_resolve_ms_ = 0;
+        next_receiver_live_rebind_allowed_ms_ = 0;
     }
 
     static void emit_simple_event(const char* ev) {
@@ -2171,10 +2294,18 @@ private:
         kovaaks::RustBridge::emit_json(json.data());
     }
 
+    static auto safe_elapsed_ms(uint64_t now_ms, uint64_t then_ms) -> uint64_t {
+        if (then_ms == 0 || then_ms > now_ms) {
+            return 0;
+        }
+        return now_ms - then_ms;
+    }
+
     void emit_lifecycle_start(uint64_t now) {
         lifecycle_active_ = true;
         lifecycle_queued_ = false;
         lifecycle_seen_progress_ = false;
+        replay_capture_disabled_ = false;
         last_lifecycle_signal_ms_ = now;
         pending_lifecycle_end_ms_ = 0;
         emit_simple_event("session_start");
@@ -2185,6 +2316,7 @@ private:
 
     void emit_lifecycle_end(bool completed, uint64_t now) {
         lifecycle_active_ = false;
+        replay_capture_disabled_ = false;
         pending_lifecycle_end_ms_ = 0;
         emit_simple_event("challenge_end");
         emit_simple_event("scenario_end");
@@ -2246,7 +2378,7 @@ private:
             has_positive_float(damage_possible);
         const bool queue_signal = has_positive_float(queue_time_remaining);
         const bool recent_stream_activity =
-            last_state_change_emit_ms_ > 0 && (now - last_state_change_emit_ms_) < 1200;
+            last_state_change_emit_ms_ > 0 && safe_elapsed_ms(now, last_state_change_emit_ms_) < 1200;
         const bool runtime_active_hint =
             (progress_signal || has_positive_float(time_remaining)) && recent_stream_activity;
         const bool known_in_challenge = is_in_challenge >= 0;
@@ -2766,6 +2898,63 @@ private:
         return false;
     }
 
+    bool probe_state_receiver_activity_impl(RC::Unreal::UObject* receiver, ReceiverActivityProbe& out) {
+        out = {};
+        if (!receiver || !is_likely_valid_object_ptr(receiver)) {
+            return false;
+        }
+
+        float value_f = -1.0f;
+        int32_t value_i = -1;
+        bool any = false;
+
+        if (try_read_float(receiver, {
+                targets_.get_seconds_value_else,
+                targets_.get_seconds_value_or,
+                targets_.receive_seconds
+            }, value_f)) {
+            out.seconds = value_f;
+            any = true;
+        }
+        if (try_read_int(receiver, {
+                targets_.get_challenge_tick_count_value_else,
+                targets_.get_challenge_tick_count_value_or,
+                targets_.receive_challenge_tick_count_value_else,
+                targets_.receive_challenge_tick_count_value_or,
+                targets_.receive_challenge_tick_count_single,
+                targets_.receive_challenge_tick_count
+            }, value_i)) {
+            out.challenge_tick_count = value_i;
+            any = true;
+        }
+        if (try_read_float(receiver, {
+                targets_.get_score_value_else,
+                targets_.get_score_value_or,
+                targets_.receive_score_value_else,
+                targets_.receive_score_single,
+                targets_.receive_score
+            }, value_f)) {
+            out.score_total = value_f;
+            any = true;
+        }
+
+        out.valid = any;
+        return any;
+    }
+
+    bool safe_probe_state_receiver_activity(RC::Unreal::UObject* receiver, ReceiverActivityProbe& out) {
+#if defined(_MSC_VER)
+        __try {
+            return probe_state_receiver_activity_impl(receiver, out);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            out = {};
+            return false;
+        }
+#else
+        return probe_state_receiver_activity_impl(receiver, out);
+#endif
+    }
+
     RC::Unreal::UClass* resolve_class_cached(
         RC::Unreal::UClass*& cache,
         std::initializer_list<const wchar_t*> candidate_paths
@@ -2838,7 +3027,12 @@ private:
         if (state_receiver_instance_ && is_likely_valid_object_ptr(state_receiver_instance_) && now < next_receiver_resolve_ms_) {
             return state_receiver_instance_;
         }
-        next_receiver_resolve_ms_ = now + 2000;
+        const bool prefer_live_activity =
+            last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1
+            || lifecycle_active_
+            || (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.25f);
+        next_receiver_resolve_ms_ = now + (prefer_live_activity ? 250 : 2000);
 
         auto* meta = resolve_meta_game_instance(now);
         RC::StringType meta_path{};
@@ -2882,6 +3076,28 @@ private:
             if (full_name.find(STR("/Engine/Transient.")) != RC::StringType::npos) score += 60;
             if (full_name.find(STR("TheMetaGameInstance")) != RC::StringType::npos) score += 200;
             if (full_name.find(STR("PerformanceIndicatorsStateReceiver_")) != RC::StringType::npos) score += 120;
+            if (prefer_live_activity) {
+                ReceiverActivityProbe probe{};
+                if (safe_probe_state_receiver_activity(obj, probe) && probe.valid) {
+                    if (std::isfinite(probe.seconds) && probe.seconds >= 0.0f) {
+                        score += std::min<int>(500, static_cast<int>(std::llround(probe.seconds * 25.0)));
+                        if (std::isfinite(last_seconds_) && last_seconds_ > 0.25f
+                            && (static_cast<double>(probe.seconds) + 0.20) >= static_cast<double>(last_seconds_)) {
+                            score += 250;
+                        }
+                    }
+                    if (probe.challenge_tick_count >= 0) {
+                        score += std::min<int>(600, probe.challenge_tick_count / 2);
+                        if (last_challenge_tick_count_ > 10
+                            && probe.challenge_tick_count + 10 >= last_challenge_tick_count_) {
+                            score += 250;
+                        }
+                    }
+                    if (std::isfinite(probe.score_total) && probe.score_total > 0.0f) {
+                        score += std::min<int>(250, static_cast<int>(std::llround(probe.score_total / 10.0)));
+                    }
+                }
+            }
             if (score > best_score) {
                 best = obj;
                 best_score = score;
@@ -3208,7 +3424,7 @@ private:
         return true;
     }
 
-    void emit_state_i32(const char* ev, int32_t& last_value, int32_t value) {
+    void emit_state_i32(const char* ev, int32_t& last_value, int32_t value, uint64_t now) {
         if (value != 0 && value != 1) {
             return;
         }
@@ -3227,7 +3443,7 @@ private:
             emit_origin_flag_ ? emit_origin_flag_ : "unknown"
         );
         kovaaks::RustBridge::emit_json(json.data());
-        last_state_change_emit_ms_ = GetTickCount64();
+        last_state_change_emit_ms_ = now;
     }
 
     void emit_pull_i32(const char* ev, int32_t& last_value, int32_t value, uint64_t& last_nonzero_ms, uint64_t now) {

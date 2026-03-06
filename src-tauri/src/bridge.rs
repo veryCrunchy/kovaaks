@@ -17,6 +17,7 @@ pub const BRIDGE_PARSED_EVENT: &str = "bridge-parsed-event";
 #[cfg(target_os = "windows")]
 pub const BRIDGE_METRIC_EVENT: &str = "bridge-metric";
 pub const UE4SS_LOG_EVENT: &str = "ue4ss-log-line";
+const INJECTION_DEFERRED_ERROR_PREFIX: &str = "KovaaK's process is not ready for injection";
 #[cfg(target_os = "windows")]
 const EVENT_STATS_PANEL_UPDATE: &str = "stats-panel-update";
 #[cfg(target_os = "windows")]
@@ -269,7 +270,7 @@ mod imp {
 
     use tauri::{AppHandle, Emitter};
 
-    use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM};
     use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Diagnostics::ToolHelp::{
@@ -285,7 +286,8 @@ mod imp {
         PIPE_TYPE_BYTE, PIPE_WAIT,
     };
     use windows::Win32::System::Threading::{
-        CreateRemoteThread, OpenProcess, PROCESS_ALL_ACCESS, WaitForSingleObject,
+        CreateRemoteThread, GetProcessTimes, OpenProcess, PROCESS_ALL_ACCESS,
+        PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
     };
     use windows::Win32::UI::Input::KeyboardAndMouse::{
         INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_KEYUP, SendInput,
@@ -317,6 +319,7 @@ mod imp {
     const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
+    const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(5);
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
 
@@ -342,6 +345,90 @@ mod imp {
     fn in_game_replay_stop_flag() -> &'static Mutex<Option<Arc<AtomicBool>>> {
         static STOP_FLAG: OnceLock<Mutex<Option<Arc<AtomicBool>>>> = OnceLock::new();
         STOP_FLAG.get_or_init(|| Mutex::new(None))
+    }
+
+    fn in_game_replay_active_flag() -> &'static AtomicBool {
+        static ACTIVE: AtomicBool = AtomicBool::new(false);
+        &ACTIVE
+    }
+
+    fn in_game_replay_session_id_slot() -> &'static Mutex<Option<String>> {
+        static SESSION_ID: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+        SESSION_ID.get_or_init(|| Mutex::new(None))
+    }
+
+    fn bridge_dll_connected_flag() -> &'static AtomicBool {
+        static CONNECTED: AtomicBool = AtomicBool::new(false);
+        &CONNECTED
+    }
+
+    fn mark_bridge_dll_connected(connected: bool) {
+        bridge_dll_connected_flag().store(connected, Ordering::SeqCst);
+        if connected {
+            return;
+        }
+        if let Ok(slot) = in_game_replay_stop_flag().lock() {
+            if let Some(flag) = slot.as_ref() {
+                flag.store(true, Ordering::SeqCst);
+            }
+        }
+        if let Ok(mut slot) = in_game_replay_session_id_slot().lock() {
+            *slot = None;
+        }
+        in_game_replay_active_flag().store(false, Ordering::SeqCst);
+    }
+
+    fn filetime_to_unix_duration(value: FILETIME) -> Option<Duration> {
+        const WINDOWS_TO_UNIX_EPOCH_100NS: u64 = 116_444_736_000_000_000;
+        let ticks_100ns = ((value.dwHighDateTime as u64) << 32) | u64::from(value.dwLowDateTime);
+        if ticks_100ns < WINDOWS_TO_UNIX_EPOCH_100NS {
+            return None;
+        }
+        let unix_100ns = ticks_100ns - WINDOWS_TO_UNIX_EPOCH_100NS;
+        let secs = unix_100ns / 10_000_000;
+        let nanos = ((unix_100ns % 10_000_000) * 100) as u32;
+        Some(Duration::new(secs, nanos))
+    }
+
+    fn process_age(pid: u32) -> Option<Duration> {
+        let proc = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut created = FILETIME::default();
+        let mut exited = FILETIME::default();
+        let mut kernel = FILETIME::default();
+        let mut user = FILETIME::default();
+        let result =
+            unsafe { GetProcessTimes(proc, &mut created, &mut exited, &mut kernel, &mut user) };
+        let _ = unsafe { CloseHandle(proc) };
+        if result.is_err() {
+            return None;
+        }
+
+        let created_at = filetime_to_unix_duration(created)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?;
+        now.checked_sub(created_at)
+    }
+
+    fn ensure_game_ready_for_injection(pid: u32) -> Result<(), String> {
+        if find_main_window_for_pid(pid).is_none() {
+            return Err(format!(
+                "{}: waiting for KovaaK's main window",
+                super::INJECTION_DEFERRED_ERROR_PREFIX
+            ));
+        }
+
+        if let Some(age) = process_age(pid) {
+            if age < INJECTION_MIN_PROCESS_AGE {
+                return Err(format!(
+                    "{}: waiting for process warmup (pid {pid}, age={} ms)",
+                    super::INJECTION_DEFERRED_ERROR_PREFIX,
+                    age.as_millis()
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn enqueue_bridge_command(json_line: String) -> bool {
@@ -390,531 +477,9 @@ mod imp {
         log::info!("bridge: queued mod state sync request ({})", reason);
     }
 
-    #[derive(Clone, Debug)]
-    struct InGameReplayEntityCommand {
-        id: String,
-        profile: String,
-        is_player: bool,
-        is_bot: bool,
-        x: f64,
-        y: f64,
-        z: f64,
-        pitch: f64,
-        yaw: f64,
-        roll: f64,
-        vx: f64,
-        vy: f64,
-        vz: f64,
-    }
-
-    #[derive(Clone, Debug)]
-    struct InGameReplayFrameCommand {
-        ts_ms: u64,
-        seq: u64,
-        upserts: Vec<InGameReplayEntityCommand>,
-        removes: Vec<String>,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct InGameReplayBootstrapContext {
-        map_name: Option<String>,
-        map_scale: Option<f64>,
-        hide_ui: bool,
-        force_freeplay: bool,
-        bootstrap_timeout_ms: u64,
-    }
-
-    #[derive(Clone, Debug, Default)]
-    struct InGameReplayReadyState {
-        session_id: String,
-        ready: bool,
-        ok: bool,
-        reason: String,
-        ts_ms: u64,
-    }
-
-    fn in_game_replay_ready_state() -> &'static Mutex<InGameReplayReadyState> {
-        static STATE: OnceLock<Mutex<InGameReplayReadyState>> = OnceLock::new();
-        STATE.get_or_init(|| Mutex::new(InGameReplayReadyState::default()))
-    }
-
-    fn reset_in_game_replay_ready_state(session_id: &str) {
-        if let Ok(mut state) = in_game_replay_ready_state().lock() {
-            state.session_id = session_id.to_string();
-            state.ready = false;
-            state.ok = false;
-            state.reason.clear();
-            state.ts_ms = 0;
-        }
-    }
-
-    fn note_in_game_replay_ready_event(raw: &str) {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) else {
-            return;
-        };
-        let Some(obj) = value.as_object() else {
-            return;
-        };
-        let Some(ev) = obj.get("ev").and_then(|v| v.as_str()) else {
-            return;
-        };
-        if ev != "replay_playback_ready" {
-            return;
-        }
-
-        let session_id = obj
-            .get("session_id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if session_id.is_empty() {
-            return;
-        }
-
-        let ok = obj
-            .get("ok")
-            .and_then(replay_json_boolish)
-            .unwrap_or(false);
-        let reason = obj
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        let ts_ms = obj.get("ts_ms").and_then(replay_json_u64).unwrap_or(0);
-
-        if let Ok(mut state) = in_game_replay_ready_state().lock() {
-            if !state.session_id.is_empty() && state.session_id != session_id {
-                return;
-            }
-            state.session_id = session_id;
-            state.ready = true;
-            state.ok = ok;
-            state.reason = reason;
-            state.ts_ms = ts_ms;
-        }
-    }
-
-    fn replay_json_boolish(value: &serde_json::Value) -> Option<bool> {
-        match value {
-            serde_json::Value::Bool(v) => Some(*v),
-            serde_json::Value::Number(n) => n.as_f64().map(|v| v >= 0.5),
-            serde_json::Value::String(s) => {
-                let t = s.trim().to_ascii_lowercase();
-                if t == "1" || t == "true" {
-                    Some(true)
-                } else if t == "0" || t == "false" {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn replay_json_u64(value: &serde_json::Value) -> Option<u64> {
-        replay_json_number(value).and_then(|v| {
-            if v.is_finite() && v >= 0.0 {
-                Some(v.round() as u64)
-            } else {
-                None
-            }
-        })
-    }
-
-    fn parse_replay_entity_command(value: &serde_json::Value) -> Option<InGameReplayEntityCommand> {
-        let obj = value.as_object()?;
-        let id = obj.get("id")?.as_str()?.trim().to_string();
-        if id.is_empty() {
-            return None;
-        }
-
-        let profile = obj
-            .get("profile")
-            .and_then(|v| v.as_str())
-            .map(|s| s.trim().to_string())
-            .unwrap_or_default();
-        let is_player = obj
-            .get("is_player")
-            .and_then(replay_json_boolish)
-            .unwrap_or(false);
-        let is_bot = obj
-            .get("is_bot")
-            .and_then(replay_json_boolish)
-            .unwrap_or(false);
-
-        let location = obj.get("location").and_then(|v| v.as_object())?;
-        let rotation = obj.get("rotation").and_then(|v| v.as_object())?;
-        let velocity = obj.get("velocity").and_then(|v| v.as_object());
-
-        let x = location.get("x").and_then(replay_json_number).unwrap_or(0.0);
-        let y = location.get("y").and_then(replay_json_number).unwrap_or(0.0);
-        let z = location.get("z").and_then(replay_json_number).unwrap_or(0.0);
-        let pitch = rotation
-            .get("pitch")
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-        let yaw = rotation
-            .get("yaw")
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-        let roll = rotation
-            .get("roll")
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-
-        let vx = velocity
-            .and_then(|v| v.get("x"))
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-        let vy = velocity
-            .and_then(|v| v.get("y"))
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-        let vz = velocity
-            .and_then(|v| v.get("z"))
-            .and_then(replay_json_number)
-            .unwrap_or(0.0);
-
-        Some(InGameReplayEntityCommand {
-            id,
-            profile,
-            is_player,
-            is_bot,
-            x,
-            y,
-            z,
-            pitch,
-            yaw,
-            roll,
-            vx,
-            vy,
-            vz,
-        })
-    }
-
-    fn parse_replay_frame_command(
-        value: &serde_json::Value,
-        entity_field: &str,
-    ) -> Option<InGameReplayFrameCommand> {
-        let obj = value.as_object()?;
-        let ts_ms = obj.get("ts_ms").and_then(replay_json_u64).unwrap_or(0);
-        let seq = obj.get("seq").and_then(replay_json_u64).unwrap_or(ts_ms);
-
-        let mut upserts = Vec::new();
-        if let Some(entries) = obj.get(entity_field).and_then(|v| v.as_array()) {
-            upserts.reserve(entries.len());
-            for entry in entries {
-                if let Some(entity) = parse_replay_entity_command(entry) {
-                    upserts.push(entity);
-                }
-            }
-        }
-
-        let mut removes = Vec::new();
-        if let Some(entries) = obj.get("remove").and_then(|v| v.as_array()) {
-            removes.reserve(entries.len());
-            for entry in entries {
-                if let Some(id) = entry.as_str() {
-                    let id = id.trim();
-                    if !id.is_empty() {
-                        removes.push(id.to_string());
-                    }
-                }
-            }
-        }
-
-        Some(InGameReplayFrameCommand {
-            ts_ms,
-            seq,
-            upserts,
-            removes,
-        })
-    }
-
-    fn build_in_game_replay_frames(stream: &super::BridgeTickStreamV1) -> Vec<InGameReplayFrameCommand> {
-        let mut frames = Vec::with_capacity(stream.keyframes.len() + stream.deltas.len());
-        for value in &stream.keyframes {
-            if let Some(frame) = parse_replay_frame_command(value, "entities") {
-                frames.push(frame);
-            }
-        }
-        for value in &stream.deltas {
-            if let Some(frame) = parse_replay_frame_command(value, "upserts") {
-                frames.push(frame);
-            }
-        }
-        frames.sort_by_key(|frame| (frame.ts_ms, frame.seq));
-        frames
-    }
-
-    fn parse_replay_bootstrap_context(stream: &super::BridgeTickStreamV1) -> InGameReplayBootstrapContext {
-        let mut bootstrap = InGameReplayBootstrapContext {
-            map_name: None,
-            map_scale: None,
-            hide_ui: true,
-            force_freeplay: true,
-            bootstrap_timeout_ms: 12_000,
-        };
-
-        if let Some(obj) = stream.context.as_ref().and_then(|v| v.as_object()) {
-            if bootstrap.map_name.is_none() {
-                if let Some(value) = obj.get("map_name").and_then(|v| v.as_str()) {
-                    let trimmed = value.trim();
-                    if !trimmed.is_empty() {
-                        bootstrap.map_name = Some(trimmed.to_string());
-                    }
-                }
-            }
-            if bootstrap.map_scale.is_none() {
-                if let Some(value) = obj.get("map_scale").and_then(replay_json_number) {
-                    if value.is_finite() && value > 0.0 {
-                        bootstrap.map_scale = Some(value);
-                    }
-                }
-            }
-        }
-
-        if bootstrap.map_name.is_none() || bootstrap.map_scale.is_none() {
-            for value in &stream.keyframes {
-                let Some(frame_obj) = value.as_object() else {
-                    continue;
-                };
-                let Some(context_obj) = frame_obj.get("context").and_then(|v| v.as_object()) else {
-                    continue;
-                };
-
-                if bootstrap.map_name.is_none() {
-                    if let Some(value) = context_obj.get("map_name").and_then(|v| v.as_str()) {
-                        let trimmed = value.trim();
-                        if !trimmed.is_empty() {
-                            bootstrap.map_name = Some(trimmed.to_string());
-                        }
-                    }
-                }
-                if bootstrap.map_scale.is_none() {
-                    if let Some(value) = context_obj.get("map_scale").and_then(replay_json_number) {
-                        if value.is_finite() && value > 0.0 {
-                            bootstrap.map_scale = Some(value);
-                        }
-                    }
-                }
-
-                if bootstrap.map_name.is_some() && bootstrap.map_scale.is_some() {
-                    break;
-                }
-            }
-        }
-
-        bootstrap
-    }
-
-    fn wait_for_in_game_replay_ready(
-        session_id: &str,
-        stop_flag: &Arc<AtomicBool>,
-        timeout: Duration,
-    ) -> Option<(bool, String)> {
-        let start = Instant::now();
-        while start.elapsed() < timeout {
-            if stop_flag.load(Ordering::SeqCst) {
-                return None;
-            }
-
-            if let Ok(state) = in_game_replay_ready_state().lock() {
-                if state.ready && state.session_id == session_id {
-                    return Some((state.ok, state.reason.clone()));
-                }
-            }
-
-            std::thread::sleep(Duration::from_millis(40));
-        }
-
-        None
-    }
-
-    pub fn stop_in_game_replay_stream() -> Result<(), String> {
-        if let Ok(mut slot) = in_game_replay_stop_flag().lock() {
-            if let Some(flag) = slot.take() {
-                flag.store(true, Ordering::SeqCst);
-            }
-        }
-        let stop_cmd = serde_json::json!({
-            "cmd": "replay_play_stop"
-        })
-        .to_string();
-        if !enqueue_bridge_command_blocking(stop_cmd) {
-            return Err("bridge command queue saturated".to_string());
-        }
-        Ok(())
-    }
-
-    pub fn start_in_game_replay_stream(
-        session_id: &str,
-        stream: super::BridgeTickStreamV1,
-        speed: f64,
-    ) -> Result<(), String> {
-        let frames = build_in_game_replay_frames(&stream);
-        if frames.is_empty() {
-            return Err("replay has no tick_stream_v1 frame data".to_string());
-        }
-        let bootstrap = parse_replay_bootstrap_context(&stream);
-
-        stop_in_game_replay_stream()?;
-
-        let stop_flag = Arc::new(AtomicBool::new(false));
-        {
-            let mut slot = in_game_replay_stop_flag()
-                .lock()
-                .map_err(|e| format!("replay stop lock poisoned: {e}"))?;
-            *slot = Some(stop_flag.clone());
-        }
-
-        let safe_session_id = sanitize_state_request_reason(session_id);
-        let speed = if speed.is_finite() {
-            speed.clamp(0.1, 4.0)
-        } else {
-            1.0
-        };
-
-        std::thread::Builder::new()
-            .name("bridge-in-game-replay".into())
-            .spawn(move || {
-                reset_in_game_replay_ready_state(&safe_session_id);
-
-                let start_cmd = serde_json::json!({
-                    "cmd": "replay_play_start",
-                    "session_id": safe_session_id,
-                    "speed": speed,
-                    "map_name": bootstrap.map_name.clone().unwrap_or_default(),
-                    "map_scale": bootstrap.map_scale.unwrap_or(1.0),
-                    "hide_ui": if bootstrap.hide_ui { 1 } else { 0 },
-                    "force_freeplay": if bootstrap.force_freeplay { 1 } else { 0 },
-                    "bootstrap_timeout_ms": bootstrap.bootstrap_timeout_ms
-                })
-                .to_string();
-                if !enqueue_bridge_command_blocking(start_cmd) {
-                    return;
-                }
-
-                match wait_for_in_game_replay_ready(
-                    &safe_session_id,
-                    &stop_flag,
-                    Duration::from_millis(bootstrap.bootstrap_timeout_ms.saturating_add(3000)),
-                ) {
-                    Some((ok, reason)) => {
-                        if ok {
-                            log::info!("bridge: in-game replay ready (session={}, reason={reason})", safe_session_id);
-                        } else {
-                            log::warn!(
-                                "bridge: in-game replay bootstrap failed (session={}, reason={reason}); aborting stream",
-                                safe_session_id
-                            );
-                            let stop_cmd = serde_json::json!({
-                                "cmd": "replay_play_stop"
-                            })
-                            .to_string();
-                            let _ = enqueue_bridge_command_blocking(stop_cmd);
-                            return;
-                        }
-                    }
-                    None => {
-                        log::warn!(
-                            "bridge: in-game replay ready wait timed out (session={}); aborting stream",
-                            safe_session_id
-                        );
-                        let stop_cmd = serde_json::json!({
-                            "cmd": "replay_play_stop"
-                        })
-                        .to_string();
-                        let _ = enqueue_bridge_command_blocking(stop_cmd);
-                        return;
-                    }
-                }
-
-                let mut known_entities: HashSet<String> = HashSet::new();
-                let mut last_ts_ms: Option<u64> = None;
-
-                for frame in frames {
-                    if stop_flag.load(Ordering::SeqCst) {
-                        break;
-                    }
-
-                    if let Some(prev) = last_ts_ms {
-                        if frame.ts_ms > prev {
-                            let dt_ms = ((frame.ts_ms - prev) as f64 / speed).round();
-                            if dt_ms > 0.0 {
-                                std::thread::sleep(Duration::from_millis(dt_ms as u64));
-                            }
-                        }
-                    }
-                    last_ts_ms = Some(frame.ts_ms);
-
-                    for id in &frame.removes {
-                        if stop_flag.load(Ordering::SeqCst) {
-                            break;
-                        }
-                        let cmd = serde_json::json!({
-                            "cmd": "replay_remove_entity",
-                            "id": id
-                        })
-                        .to_string();
-                        if !enqueue_bridge_command_blocking(cmd) {
-                            break;
-                        }
-                        known_entities.remove(id);
-                    }
-
-                    for entity in &frame.upserts {
-                        if stop_flag.load(Ordering::SeqCst) {
-                            break;
-                        }
-
-                        if !known_entities.contains(&entity.id) {
-                            let meta_cmd = serde_json::json!({
-                                "cmd": "replay_entity_meta",
-                                "id": entity.id,
-                                "profile": entity.profile,
-                                "is_player": if entity.is_player { 1 } else { 0 },
-                                "is_bot": if entity.is_bot { 1 } else { 0 }
-                            })
-                            .to_string();
-                            if !enqueue_bridge_command_blocking(meta_cmd) {
-                                break;
-                            }
-                            known_entities.insert(entity.id.clone());
-                        }
-
-                        let pose_cmd = serde_json::json!({
-                            "cmd": "replay_entity_pose",
-                            "id": entity.id,
-                            "x": entity.x,
-                            "y": entity.y,
-                            "z": entity.z,
-                            "pitch": entity.pitch,
-                            "yaw": entity.yaw,
-                            "roll": entity.roll,
-                            "vx": entity.vx,
-                            "vy": entity.vy,
-                            "vz": entity.vz
-                        })
-                        .to_string();
-                        if !enqueue_bridge_command_blocking(pose_cmd) {
-                            break;
-                        }
-                    }
-                }
-
-                let stop_cmd = serde_json::json!({
-                    "cmd": "replay_play_stop"
-                })
-                .to_string();
-                let _ = enqueue_bridge_command_blocking(stop_cmd);
-            })
-            .map_err(|e| format!("failed to spawn in-game replay thread: {e}"))?;
-
-        Ok(())
-    }
+    include!("bridge/replay_protocol.rs");
+    include!("bridge/replay_handshake.rs");
+    include!("bridge/replay_streamer.rs");
 
     #[derive(Clone, Debug)]
     struct BridgeCompatState {
@@ -938,6 +503,7 @@ mod imp {
         last_stats_flow_at: Option<Instant>,
         last_pull_event_at: Option<Instant>,
         last_state_resync_request_at: Option<Instant>,
+        state_resync_pending: bool,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1475,7 +1041,10 @@ mod imp {
         scalars_obj: &serde_json::Map<String, serde_json::Value>,
         state: &mut RunCaptureState,
     ) -> Option<f64> {
-        if let Some(v) = scalars_obj.get("score_metric_total").and_then(replay_json_number) {
+        if let Some(v) = scalars_obj
+            .get("score_metric_total")
+            .and_then(replay_json_number)
+        {
             if v.is_finite() && v >= 0.0 {
                 state.metrics.score_total = Some(v);
             }
@@ -1485,7 +1054,10 @@ mod imp {
                 state.metrics.score_total = Some(v);
             }
         }
-        if let Some(v) = scalars_obj.get("score_total_derived").and_then(replay_json_number) {
+        if let Some(v) = scalars_obj
+            .get("score_total_derived")
+            .and_then(replay_json_number)
+        {
             if v.is_finite() && v >= 0.0 {
                 state.metrics.score_total_derived = Some(v);
             }
@@ -1658,6 +1230,7 @@ mod imp {
             state.last_stats_flow_at = Some(now);
             state.last_pull_event_at = Some(now);
             state.last_state_resync_request_at = None;
+            state.state_resync_pending = false;
         }
         reset_bridge_stats_snapshot();
         if let Ok(mut run_state) = run_capture_state().lock() {
@@ -1880,6 +1453,7 @@ mod imp {
             state.last_pull_event_at = Some(now);
             state.tracking_paused_by_idle = false;
             state.last_state_resync_request_at = None;
+            state.state_resync_pending = false;
             if challenge_active && !state.challenge_active {
                 state.challenge_active = true;
                 emit_challenge = true;
@@ -1969,6 +1543,7 @@ mod imp {
             state.last_stats_flow_at = None;
             state.last_pull_event_at = None;
             state.last_state_resync_request_at = None;
+            state.state_resync_pending = false;
             (emit_session, emit_challenge)
         };
 
@@ -2030,86 +1605,7 @@ mod imp {
         }
     }
 
-    fn request_state_sync_if_flow_stalled() {
-        const RESYNC_STALL_AFTER: Duration = Duration::from_millis(1200);
-        const RESYNC_COOLDOWN: Duration = Duration::from_millis(900);
-
-        let should_request = {
-            let mut state = bridge_session_state().lock().unwrap();
-            if !state.session_active {
-                return;
-            }
-
-            let now = Instant::now();
-            let last_flow = state.last_pull_event_at.or(state.last_stats_flow_at);
-            let Some(last_flow) = last_flow else {
-                return;
-            };
-
-            if now.duration_since(last_flow) < RESYNC_STALL_AFTER {
-                return;
-            }
-
-            if let Some(last_req) = state.last_state_resync_request_at {
-                if now.duration_since(last_req) < RESYNC_COOLDOWN {
-                    return;
-                }
-            }
-
-            state.last_state_resync_request_at = Some(now);
-            true
-        };
-
-        if should_request {
-            request_mod_state_sync("bridge:pull_flow_stall");
-        }
-    }
-
-    fn pause_tracking_if_stats_idle() {
-        let should_pause = {
-            let mut state = bridge_session_state().lock().unwrap();
-            if !state.session_active || state.tracking_paused_by_idle {
-                return;
-            }
-            if state.challenge_active {
-                return;
-            }
-
-            let Some(last_flow) = state.last_stats_flow_at else {
-                return;
-            };
-
-            if Instant::now().duration_since(last_flow) < SESSION_IDLE_PAUSE_AFTER {
-                return;
-            }
-
-            state.tracking_paused_by_idle = true;
-            true
-        };
-
-        if should_pause {
-            crate::mouse_hook::pause_session_tracking();
-            crate::screen_recorder::pause();
-            log::info!("bridge: paused tracking due to stats-flow silence");
-        }
-    }
-
-    fn start_session_idle_watchdog() {
-        if SESSION_IDLE_WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
-            return;
-        }
-
-        std::thread::Builder::new()
-            .name("bridge-session-idle-watchdog".into())
-            .spawn(move || {
-                loop {
-                    pause_tracking_if_stats_idle();
-                    request_state_sync_if_flow_stalled();
-                    std::thread::sleep(SESSION_IDLE_WATCHDOG_TICK);
-                }
-            })
-            .ok();
-    }
+    include!("bridge/session_watchdog.rs");
 
     fn is_stats_flow_event(parsed: &super::BridgeParsedEvent) -> bool {
         if super::is_metric_event_name(&parsed.ev)
@@ -2706,7 +2202,8 @@ mod imp {
                         .map_or(false, |prev| (prev - qrem).abs() <= 0.0001)
                     {
                         state.stats.queue_time_remaining = Some(qrem);
-                        let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                        let (next_game_state_code, next_game_state) =
+                            derive_game_state(&state.stats);
                         if state.stats.game_state != next_game_state
                             || state.stats.game_state_code != next_game_state_code
                         {
@@ -2733,6 +2230,17 @@ mod imp {
                         raw: parsed.raw.clone(),
                     };
                     let _ = app.emit(super::BRIDGE_METRIC_EVENT, &synthetic);
+                }
+            }
+            return;
+        }
+
+        if parsed.ev == "state_snapshot" {
+            if let Ok(mut state) = bridge_session_state().lock() {
+                state.state_resync_pending = false;
+                state.last_state_resync_request_at = None;
+                if state.session_active {
+                    state.last_pull_event_at = Some(Instant::now());
                 }
             }
             return;
@@ -3109,7 +2617,9 @@ mod imp {
                         .map(str::trim)
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(|| game_state_label_from_code(next_code));
-                    if state.stats.game_state_code != next_code || state.stats.game_state != next_label {
+                    if state.stats.game_state_code != next_code
+                        || state.stats.game_state != next_label
+                    {
                         state.stats.game_state_code = next_code;
                         state.stats.game_state = next_label.to_string();
                         should_emit_stats = true;
@@ -3383,6 +2893,7 @@ mod imp {
             return;
         }
 
+        mark_bridge_dll_connected(false);
         loop {
             log::debug!("bridge: waiting for DLL connection");
             unsafe {
@@ -3396,9 +2907,11 @@ mod imp {
                 }
             }
 
+            mark_bridge_dll_connected(true);
             log::info!("bridge: DLL connected — reading events");
             request_mod_state_sync("bridge_connected");
             read_events(pipe, &app);
+            mark_bridge_dll_connected(false);
             log::info!("bridge: pipe disconnected — waiting for next connection");
 
             unsafe {
@@ -3423,9 +2936,9 @@ mod imp {
                     while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                         let chunk: Vec<u8> = buf.drain(..=nl).collect();
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
-                            let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
-                                || {
-                                    note_in_game_replay_ready_event(s);
+                            let processed =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    note_in_game_replay_event(s);
                                     observe_replay_stream_raw(s);
                                     let parsed_event = super::parse_bridge_payload(s);
                                     let is_noisy_bridge_event = |ev: &str| {
@@ -3467,8 +2980,7 @@ mod imp {
                                             let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
                                         }
                                     }
-                                },
-                            ));
+                                }));
                             if processed.is_err() {
                                 log::error!(
                                     "bridge: panic while processing bridge event line; continuing"
@@ -3725,6 +3237,11 @@ mod imp {
         if find_loaded_module(pid, UE4SS_DLL).is_some() {
             log::info!("bridge: UE4SS already loaded in pid {pid} — skipping injection");
             return Ok(());
+        }
+
+        if let Err(reason) = ensure_game_ready_for_injection(pid) {
+            log::info!("bridge: deferring injection into pid {pid}: {reason}");
+            return Err(reason);
         }
 
         match inject_dll(pid, dll_path) {
@@ -5160,6 +4677,10 @@ pub fn start(_app: tauri::AppHandle) {}
 #[cfg(target_os = "windows")]
 pub fn inject(dll_path: &str) -> Result<(), String> {
     imp::inject(dll_path)
+}
+
+pub fn is_injection_deferred_error(err: &str) -> bool {
+    err.starts_with(INJECTION_DEFERRED_ERROR_PREFIX)
 }
 
 #[cfg(not(target_os = "windows"))]

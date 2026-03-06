@@ -170,9 +170,15 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
                                         );
                                     }
                                     Err(e) => {
-                                        log::warn!(
-                                            "UE4SS deploy/inject attempt failed for KovaaK pid {pid}: {e}"
-                                        );
+                                        if bridge::is_injection_deferred_error(&e) {
+                                            log::info!(
+                                                "UE4SS deploy/inject deferred for KovaaK pid {pid}: {e}"
+                                            );
+                                        } else {
+                                            log::warn!(
+                                                "UE4SS deploy/inject attempt failed for KovaaK pid {pid}: {e}"
+                                            );
+                                        }
                                     }
                                 }
                                 last_attempt = Some((pid, std::time::Instant::now()));
@@ -1228,7 +1234,11 @@ pub fn run() {
             }
             // Deploy UE4SS runtime/mod payload and manually inject UE4SS.dll.
             if let Err(e) = deploy_and_inject_ue4ss(app.handle(), &loaded.stats_dir) {
-                log::error!("Failed to deploy/inject UE4SS runtime: {e}");
+                if bridge::is_injection_deferred_error(&e) {
+                    log::info!("Deferred UE4SS injection: {e}");
+                } else {
+                    log::error!("Failed to deploy/inject UE4SS runtime: {e}");
+                }
             }
             start_ue4ss_reinject_monitor(app.handle().clone(), loaded.stats_dir.clone());
 
