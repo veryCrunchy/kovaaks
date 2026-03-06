@@ -491,6 +491,9 @@ mod imp {
         last_nonzero_score_total: Option<Instant>,
         score_metric_total: Option<f64>,
         score_total_derived: Option<f64>,
+        queue_last_seen_at: Option<Instant>,
+        queue_last_progress_at: Option<Instant>,
+        queue_last_value: Option<f64>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1233,6 +1236,7 @@ mod imp {
             state.state_resync_pending = false;
         }
         reset_bridge_stats_snapshot();
+        emit_current_stats_snapshot(app);
         if let Ok(mut run_state) = run_capture_state().lock() {
             begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
         }
@@ -1374,6 +1378,9 @@ mod imp {
                 last_nonzero_score_total: None,
                 score_metric_total: None,
                 score_total_derived: None,
+                queue_last_seen_at: None,
+                queue_last_progress_at: None,
+                queue_last_value: None,
             })
         })
     }
@@ -1427,6 +1434,15 @@ mod imp {
             state.last_nonzero_score_total = None;
             state.score_metric_total = None;
             state.score_total_derived = None;
+            state.queue_last_seen_at = None;
+            state.queue_last_progress_at = None;
+            state.queue_last_value = None;
+        }
+    }
+
+    fn emit_current_stats_snapshot(app: &AppHandle) {
+        if let Ok(state) = bridge_compat_state().lock() {
+            let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
         }
     }
 
@@ -1489,6 +1505,7 @@ mod imp {
         }
         if emit_session {
             reset_bridge_stats_snapshot();
+            emit_current_stats_snapshot(app);
             if let Ok(mut run_state) = run_capture_state().lock() {
                 begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
             }
@@ -1575,6 +1592,8 @@ mod imp {
             mark_run_capture_end(run_time_hint);
             crate::mouse_hook::stop_session_tracking();
             crate::screen_recorder::stop();
+            reset_bridge_stats_snapshot();
+            emit_current_stats_snapshot(app);
             log::info!("bridge: session tracking stopped ({reason})");
         }
     }
@@ -1726,7 +1745,8 @@ mod imp {
         "Unknown"
     }
 
-    fn derive_game_state(stats: &BridgeStatsPanelEvent) -> (i32, &'static str) {
+    fn derive_game_state(state: &BridgeCompatState, now: Instant) -> (i32, &'static str) {
+        let stats = &state.stats;
         if stats.is_in_scenario_editor == Some(true) {
             return (6, "editor");
         }
@@ -1738,23 +1758,32 @@ mod imp {
         let in_trainer = stats.is_in_trainer == Some(true);
         let has_queue_timer = stats.queue_time_remaining.map_or(false, |v| v > 0.0001);
         let has_challenge_timer = stats.time_remaining.map_or(false, |v| v > 0.0001);
+        let queue_recent_window = Duration::from_millis(1400);
+        let queue_progress_window = Duration::from_millis(2600);
+        let queue_seen_recent = state
+            .queue_last_seen_at
+            .map_or(false, |ts| now.duration_since(ts) <= queue_recent_window);
+        let queue_progress_recent = state
+            .queue_last_progress_at
+            .map_or(false, |ts| now.duration_since(ts) <= queue_progress_window);
+        let queue_authoritative = has_queue_timer && queue_progress_recent;
 
         if in_challenge || has_challenge_timer {
             return (4, "challenge");
         }
         if in_scenario {
-            if has_queue_timer {
+            if queue_authoritative {
                 return (2, "queued");
             }
             return (3, "freeplay");
         }
         if in_trainer {
-            if has_queue_timer {
+            if queue_authoritative {
                 return (2, "queued");
             }
             return (1, "trainer_menu");
         }
-        if has_queue_timer {
+        if queue_authoritative {
             return (2, "queued");
         }
         (0, "menu")
@@ -2064,9 +2093,12 @@ mod imp {
                         .map_or(false, |prev| prev.abs() > 0.0001)
                 {
                     state.stats.queue_time_remaining = Some(0.0);
+                    state.queue_last_seen_at = None;
+                    state.queue_last_progress_at = None;
+                    state.queue_last_value = None;
                     should_emit_stats = true;
                 }
-                let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                let (next_game_state_code, next_game_state) = derive_game_state(&state, Instant::now());
                 if state.stats.game_state != next_game_state
                     || state.stats.game_state_code != next_game_state_code
                 {
@@ -2153,7 +2185,7 @@ mod imp {
                     }
                 }
                 if state_changed {
-                    let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+                    let (next_game_state_code, next_game_state) = derive_game_state(&state, Instant::now());
                     if state.stats.game_state != next_game_state
                         || state.stats.game_state_code != next_game_state_code
                     {
@@ -2192,10 +2224,25 @@ mod imp {
             if let Some(value) = metadata_is_in_trainer {
                 emit_state_manager_bool_metric("pull_is_in_trainer", value);
             }
-            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw)
-            {
+            if let Some(qrem) = parse_state_manager_queue_time_remaining_from_metadata(&parsed.raw) {
                 let mut queue_changed = false;
                 if let Ok(mut state) = bridge_compat_state().lock() {
+                    let now = Instant::now();
+                    if qrem > 0.0001 {
+                        if let Some(prev) = state.queue_last_value {
+                            if (prev - qrem) > 0.0001 {
+                                state.queue_last_progress_at = Some(now);
+                            }
+                        } else {
+                            state.queue_last_progress_at = Some(now);
+                        }
+                        state.queue_last_seen_at = Some(now);
+                        state.queue_last_value = Some(qrem);
+                    } else {
+                        state.queue_last_seen_at = None;
+                        state.queue_last_progress_at = None;
+                        state.queue_last_value = None;
+                    }
                     if !state
                         .stats
                         .queue_time_remaining
@@ -2203,7 +2250,7 @@ mod imp {
                     {
                         state.stats.queue_time_remaining = Some(qrem);
                         let (next_game_state_code, next_game_state) =
-                            derive_game_state(&state.stats);
+                            derive_game_state(&state, now);
                         if state.stats.game_state != next_game_state
                             || state.stats.game_state_code != next_game_state_code
                         {
@@ -2566,6 +2613,21 @@ mod imp {
                 "pull_queue_time_remaining"
                 | "challenge_queue_time_remaining"
                 | "queue_time_remaining" => {
+                    if value > 0.0001 {
+                        if let Some(prev) = state.queue_last_value {
+                            if (prev - value) > 0.0001 {
+                                state.queue_last_progress_at = Some(now);
+                            }
+                        } else {
+                            state.queue_last_progress_at = Some(now);
+                        }
+                        state.queue_last_seen_at = Some(now);
+                        state.queue_last_value = Some(value);
+                    } else {
+                        state.queue_last_seen_at = None;
+                        state.queue_last_progress_at = None;
+                        state.queue_last_value = None;
+                    }
                     let suppress = low_confidence_zero
                         && value <= 0.000001
                         && state
@@ -2597,7 +2659,15 @@ mod imp {
                     }
                 }
                 "pull_score_total_derived" => {
-                    if value.is_finite() && value >= 0.0 {
+                    let challenge_context = state.stats.is_in_challenge == Some(true)
+                        || state.stats.is_in_scenario == Some(true)
+                        || state
+                            .stats
+                            .challenge_seconds_total
+                            .map_or(false, |v| v > 0.05)
+                        || state.stats.time_remaining.map_or(false, |v| v > 0.05);
+                    if value.is_finite() && value >= 0.0 && (value <= 0.000001 || challenge_context)
+                    {
                         state.score_total_derived = Some(value);
                     }
                 }
@@ -2650,7 +2720,7 @@ mod imp {
                 should_emit_stats = true;
             }
 
-            let (next_game_state_code, next_game_state) = derive_game_state(&state.stats);
+            let (next_game_state_code, next_game_state) = derive_game_state(&state, now);
             if state.stats.game_state != next_game_state
                 || state.stats.game_state_code != next_game_state_code
             {
@@ -2664,26 +2734,18 @@ mod imp {
                 let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
             }
 
-            let has_active_session_metrics = state.stats.is_in_challenge == Some(true)
+            let challenge_context = state.stats.is_in_challenge == Some(true)
                 || state.stats.is_in_scenario == Some(true)
                 || state
                     .stats
                     .challenge_seconds_total
                     .map_or(false, |v| v > 0.25)
-                || state.stats.time_remaining.map_or(false, |v| v > 0.25)
+                || state.stats.time_remaining.map_or(false, |v| v > 0.25);
+            let has_active_session_metrics = challenge_context
                 || state.stats.accuracy_shots.map_or(false, |v| v > 0)
                 || state.stats.kills.map_or(false, |v| v > 0)
-                || state.stats.damage_dealt.map_or(false, |v| v > 0.0)
-                || state
-                    .score_metric_total
-                    .or(state.score_total_derived)
-                    .map_or(false, |v| v > 0.0);
-            let recovery_challenge_active = state.stats.is_in_challenge == Some(true)
-                || state.stats.time_remaining.map_or(false, |v| v > 0.25)
-                || state
-                    .stats
-                    .challenge_seconds_total
-                    .map_or(false, |v| v > 0.25);
+                || state.stats.damage_dealt.map_or(false, |v| v > 0.0);
+            let recovery_challenge_active = challenge_context;
             recovery_signal = Some((has_active_session_metrics, recovery_challenge_active));
         }
 
@@ -4622,7 +4684,10 @@ mod imp {
     }
 
     fn is_permission_denied(e: &std::io::Error) -> bool {
-        e.kind() == std::io::ErrorKind::PermissionDenied || e.raw_os_error() == Some(5)
+        e.kind() == std::io::ErrorKind::PermissionDenied
+            || e.raw_os_error() == Some(5)
+            || e.raw_os_error() == Some(32)
+            || e.raw_os_error() == Some(33)
     }
 
     fn is_allowed_minimal_path(rel: &str, is_dir: bool) -> bool {

@@ -6,6 +6,7 @@ const BRIDGE_METRIC_EVENT = "bridge-metric";
 const SESSION_COMPLETE_EVENT = "session-complete";
 const SESSION_START_EVENT = "session-start";
 const SCORE_TOTAL_STALE_MS = 1500;
+const DERIVED_SCORE_FRESH_MS = 3000;
 
 interface BridgeMetricPayload {
   ev: string;
@@ -30,6 +31,8 @@ export function useLiveScore(): UseLiveScoreReturn {
   const elapsedTickInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastScoreTotal = useRef<number | null>(null);
   const lastScoreTotalAtMs = useRef<number>(0);
+  const lastScoreTotalDerived = useRef<number | null>(null);
+  const lastScoreTotalDerivedAtMs = useRef<number>(0);
 
   const sessionStartTime = useRef<number>(0); // ms timestamp; 0 = no active session
 
@@ -69,6 +72,8 @@ export function useLiveScore(): UseLiveScoreReturn {
       sessionStartTime.current = Date.now();
       lastScoreTotal.current = null;
       lastScoreTotalAtMs.current = 0;
+      lastScoreTotalDerived.current = null;
+      lastScoreTotalDerivedAtMs.current = 0;
       setLiveScore(0);
       setElapsedSeconds(0);
       setIsSessionActive(true);
@@ -89,6 +94,8 @@ export function useLiveScore(): UseLiveScoreReturn {
         sessionStartTime.current = now;
         lastScoreTotal.current = null;
         lastScoreTotalAtMs.current = 0;
+        lastScoreTotalDerived.current = null;
+        lastScoreTotalDerivedAtMs.current = 0;
         setElapsedSeconds(0);
         setLiveScore(0);
         setIsSessionActive(true);
@@ -105,6 +112,13 @@ export function useLiveScore(): UseLiveScoreReturn {
         || payload.ev === "challenge_canceled"
         || payload.ev === "challenge_quit"
       ) {
+        sessionStartTime.current = 0;
+        lastScoreTotal.current = null;
+        lastScoreTotalAtMs.current = 0;
+        lastScoreTotalDerived.current = null;
+        lastScoreTotalDerivedAtMs.current = 0;
+        setElapsedSeconds(0);
+        setLiveScore(0);
         setIsSessionActive(false);
         stopElapsedTicker();
         return;
@@ -120,13 +134,23 @@ export function useLiveScore(): UseLiveScoreReturn {
       }
 
       if (payload.ev === "pull_score_total") {
-        lastScoreTotal.current = value;
-        lastScoreTotalAtMs.current = now;
-        setLiveScore(Math.round(value));
+        const hasRecentPositiveDerived =
+          (lastScoreTotalDerived.current ?? 0) > 0
+          && (now - lastScoreTotalDerivedAtMs.current) <= DERIVED_SCORE_FRESH_MS;
+        const isLowConfidenceZeroTotal = value <= 0.000001 && hasRecentPositiveDerived;
+
+        if (!isLowConfidenceZeroTotal) {
+          lastScoreTotal.current = value;
+          lastScoreTotalAtMs.current = now;
+          setLiveScore(Math.round(value));
+        }
       } else {
-        const hasFreshTotal = lastScoreTotal.current != null
+        lastScoreTotalDerived.current = value;
+        lastScoreTotalDerivedAtMs.current = now;
+
+        const hasFreshPositiveTotal = (lastScoreTotal.current ?? 0) > 0
           && (now - lastScoreTotalAtMs.current) <= SCORE_TOTAL_STALE_MS;
-        if (!hasFreshTotal) {
+        if (!hasFreshPositiveTotal) {
           setLiveScore(Math.round(value));
         }
       }
@@ -138,6 +162,8 @@ export function useLiveScore(): UseLiveScoreReturn {
       sessionStartTime.current = 0;
       lastScoreTotal.current = null;
       lastScoreTotalAtMs.current = 0;
+      lastScoreTotalDerived.current = null;
+      lastScoreTotalDerivedAtMs.current = 0;
       setElapsedSeconds(0);
       setSessionResult(event.payload);
       setLiveScore(event.payload.score);

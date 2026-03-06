@@ -832,6 +832,20 @@ private:
             }
             return -1.0f;
         };
+        const bool has_active_runtime_context =
+            current_is_in_challenge > 0 || current_is_in_scenario > 0;
+        const auto sanitize_temporal_metric = [has_active_runtime_context](float current, float fallback) -> float {
+            if (std::isfinite(current) && current >= 0.0f) {
+                return current;
+            }
+            if (!has_active_runtime_context) {
+                return 0.0f;
+            }
+            if (std::isfinite(fallback) && fallback >= 0.0f) {
+                return fallback;
+            }
+            return -1.0f;
+        };
 
         s_last_pull_is_in_challenge = sanitize_state(current_is_in_challenge, last_is_in_challenge_);
         s_last_pull_is_in_scenario = sanitize_state(current_is_in_scenario, last_is_in_scenario_);
@@ -839,7 +853,10 @@ private:
         s_last_pull_scenario_is_in_editor = s_last_pull_is_in_scenario_editor;
         s_last_pull_scenario_is_paused = -1;
 
-        s_last_pull_queue_time_remaining = sanitize_metric(current_queue_time_remaining, last_queue_time_remaining_);
+        s_last_pull_queue_time_remaining = sanitize_temporal_metric(
+            current_queue_time_remaining,
+            last_queue_time_remaining_
+        );
         s_last_pull_score = sanitize_metric(current_score_total, last_score_total_);
         s_last_pull_score_derived = sanitize_metric(current_score_total_derived, last_score_total_derived_);
         s_last_pull_kills = sanitize_state(current_kills_total, last_kills_total_);
@@ -847,7 +864,7 @@ private:
         s_last_pull_challenge_seconds = sanitize_metric(current_seconds, last_challenge_seconds_total_);
         s_last_pull_challenge_average_fps = sanitize_metric(current_challenge_average_fps, last_challenge_average_fps_);
         s_last_pull_challenge_tick_count = sanitize_state(current_challenge_tick_count, last_challenge_tick_count_);
-        s_last_pull_time_remaining = sanitize_metric(current_time_remaining, last_time_remaining_);
+        s_last_pull_time_remaining = sanitize_temporal_metric(current_time_remaining, last_time_remaining_);
         s_last_run_scenario_name = last_scenario_name_;
     }
 
@@ -1223,6 +1240,27 @@ private:
         return std::isfinite(out_value);
     }
 
+    static auto safe_process_event_call(
+        RC::Unreal::UObject* caller,
+        RC::Unreal::UFunction* fn,
+        void* params
+    ) -> bool {
+        if (!caller || !fn) {
+            return false;
+        }
+#if defined(_MSC_VER)
+        __try {
+            caller->ProcessEvent(fn, params);
+            return true;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return false;
+        }
+#else
+        caller->ProcessEvent(fn, params);
+        return true;
+#endif
+    }
+
     void handle_live_metric_hook(LiveMetricHookKind kind, RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx) {
         if (updates_disabled_ || !rust_ready_) {
             return;
@@ -1370,6 +1408,23 @@ private:
             return;
         }
         next_poll_ms_ = now + 16; // ~60Hz
+
+        const bool expected_live_stream =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1;
+        if (expected_live_stream
+            && last_runtime_progress_ms_ > 0
+            && safe_elapsed_ms(now, last_runtime_progress_ms_) > 350
+            && now >= next_live_stream_refresh_ms_) {
+            next_live_stream_refresh_ms_ = now + 250;
+            live_metric_receiver_hint_ = nullptr;
+            live_metric_receiver_hint_ms_ = 0;
+            state_receiver_instance_ = nullptr;
+            scenario_manager_instance_ = nullptr;
+            next_receiver_resolve_ms_ = 0;
+            next_scenario_resolve_ms_ = 0;
+        }
 
         resolve_targets(false);
         auto* receiver = resolve_state_receiver_instance(now);
@@ -1714,12 +1769,72 @@ private:
         const bool active_prev =
             prev_is_in_challenge > 0
             || prev_is_in_scenario > 0;
+        const bool entering_active_edge_fast = active_now && !active_prev;
+        const float raw_queue_time_remaining = current_queue_time_remaining;
+
+        if (active_now) {
+            last_queue_countdown_edge_ms_ = 0;
+        } else if (std::isfinite(raw_queue_time_remaining) && raw_queue_time_remaining > 0.0001f) {
+            const bool had_raw_queue =
+                std::isfinite(last_raw_queue_time_remaining_)
+                && last_raw_queue_time_remaining_ > 0.0001f;
+            const bool raw_queue_changed =
+                !had_raw_queue
+                || std::fabs(
+                    static_cast<double>(last_raw_queue_time_remaining_)
+                    - static_cast<double>(raw_queue_time_remaining)
+                ) > 0.0001;
+
+            if (raw_queue_changed) {
+                last_queue_countdown_edge_ms_ = now;
+            }
+
+            // Real pre-run queues quickly move below 1.0. If we stay pinned at
+            // exactly 1.0 for too long while inactive, treat it as non-queue menu state.
+            const bool near_one_queue =
+                std::fabs(static_cast<double>(raw_queue_time_remaining) - 1.0) <= 0.0001;
+            const bool static_near_one_queue =
+                near_one_queue
+                && had_raw_queue
+                && !raw_queue_changed;
+            constexpr uint64_t k_static_queue_grace_ms = 1600;
+            const bool stale_static_queue =
+                static_near_one_queue
+                && last_queue_countdown_edge_ms_ > 0
+                && safe_elapsed_ms(now, last_queue_countdown_edge_ms_) > k_static_queue_grace_ms;
+            constexpr uint64_t k_stale_queue_value_ms = 2200;
+            const bool stale_frozen_queue =
+                had_raw_queue
+                && !raw_queue_changed
+                && last_queue_countdown_edge_ms_ > 0
+                && safe_elapsed_ms(now, last_queue_countdown_edge_ms_) > k_stale_queue_value_ms;
+            if (stale_static_queue || stale_frozen_queue) {
+                current_queue_time_remaining = 0.0f;
+            }
+        } else {
+            last_queue_countdown_edge_ms_ = 0;
+        }
+        last_raw_queue_time_remaining_ = raw_queue_time_remaining;
+        if (!active_now && (!std::isfinite(current_queue_time_remaining) || current_queue_time_remaining < 0.0f)) {
+            current_queue_time_remaining = 0.0f;
+        }
+
+        if (entering_active_edge_fast) {
+            state_receiver_instance_ = nullptr;
+            next_receiver_resolve_ms_ = 0;
+            auto* refreshed_receiver = resolve_state_receiver_instance(now);
+            if (refreshed_receiver && is_likely_valid_object_ptr(refreshed_receiver)) {
+                receiver = refreshed_receiver;
+            }
+            pull_receiver_metrics(receiver);
+        }
 
         if (!active_now) {
             current_kills_total = -1;
             current_shots_fired = -1;
             current_shots_hit = -1;
             current_score_total = -1.0f;
+            current_score_total_derived = -1.0f;
             current_score_per_minute = -1.0f;
             current_kills_per_second = -1.0f;
             current_accuracy = -1.0f;
@@ -1766,8 +1881,71 @@ private:
             if (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.0f) {
                 emit_pull_f32("pull_time_remaining", last_time_remaining_, 0.0f, last_nonzero_time_remaining_ms_, now);
             }
+            if (last_kills_total_ > 0) {
+                emit_pull_i32("pull_kills_total", last_kills_total_, 0, last_nonzero_kills_total_ms_, now);
+            }
+            if (last_shots_fired_ > 0) {
+                emit_pull_i32("pull_shots_fired_total", last_shots_fired_, 0, last_nonzero_shots_fired_ms_, now);
+            }
+            if (last_shots_hit_ > 0) {
+                emit_pull_i32("pull_shots_hit_total", last_shots_hit_, 0, last_nonzero_shots_hit_ms_, now);
+            }
             if (std::isfinite(last_score_total_) && last_score_total_ > 0.0f) {
                 emit_pull_f32("pull_score_total", last_score_total_, 0.0f, last_nonzero_score_total_ms_, now);
+            }
+            if (std::isfinite(last_score_total_derived_) && last_score_total_derived_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_score_total_derived",
+                    last_score_total_derived_,
+                    0.0f,
+                    last_nonzero_score_total_derived_ms_,
+                    now
+                );
+            }
+            if (std::isfinite(last_score_per_minute_) && last_score_per_minute_ > 0.0f) {
+                emit_pull_f32("pull_score_per_minute", last_score_per_minute_, 0.0f, last_nonzero_spm_ms_, now);
+            }
+            if (std::isfinite(last_kills_per_second_) && last_kills_per_second_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_kills_per_second",
+                    last_kills_per_second_,
+                    0.0f,
+                    last_nonzero_kills_per_second_ms_,
+                    now
+                );
+            }
+            if (std::isfinite(last_accuracy_) && last_accuracy_ > 0.0f) {
+                emit_pull_f32("pull_accuracy", last_accuracy_, 0.0f, last_nonzero_accuracy_ms_, now);
+            }
+            if (std::isfinite(last_damage_done_) && last_damage_done_ > 0.0f) {
+                emit_pull_f32("pull_damage_done", last_damage_done_, 0.0f, last_nonzero_damage_done_ms_, now);
+            }
+            if (std::isfinite(last_damage_possible_) && last_damage_possible_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_damage_possible",
+                    last_damage_possible_,
+                    0.0f,
+                    last_nonzero_damage_possible_ms_,
+                    now
+                );
+            }
+            if (std::isfinite(last_damage_efficiency_) && last_damage_efficiency_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_damage_efficiency",
+                    last_damage_efficiency_,
+                    0.0f,
+                    last_nonzero_damage_efficiency_ms_,
+                    now
+                );
+            }
+            if (std::isfinite(last_challenge_average_fps_) && last_challenge_average_fps_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_challenge_average_fps",
+                    last_challenge_average_fps_,
+                    0.0f,
+                    last_nonzero_challenge_average_fps_ms_,
+                    now
+                );
             }
             if (std::isfinite(last_challenge_seconds_total_) && last_challenge_seconds_total_ > 0.0f) {
                 emit_pull_f32(
@@ -1919,7 +2097,11 @@ private:
                 / static_cast<float>(current_shots_fired);
             emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
         }
-        if (std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
+        const bool allow_score_derivation =
+            current_is_in_challenge > 0
+            || (std::isfinite(current_time_remaining) && current_time_remaining > 0.25f);
+        if (allow_score_derivation
+            && std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
             && std::isfinite(current_seconds) && current_seconds > 0.0f) {
             const float derived_score_total = (current_score_per_minute * current_seconds) / 60.0f;
             if (std::isfinite(derived_score_total) && derived_score_total >= 0.0f) {
@@ -1933,6 +2115,13 @@ private:
                 );
                 if (current_score_total < 0.0f || current_score_total <= 0.0001f) {
                     current_score_total = derived_score_total;
+                    emit_pull_f32(
+                        "pull_score_total",
+                        last_score_total_,
+                        derived_score_total,
+                        last_nonzero_score_total_ms_,
+                        now
+                    );
                 }
             }
         }
@@ -2019,11 +2208,11 @@ private:
             stream_activity_ms = last_state_change_emit_ms_;
         }
         if (likely_active_stream && stream_activity_ms > 0 && !kmod_replay::replay_ingame_playback_is_active()) {
-            constexpr uint64_t k_stream_stall_ms = 1250;
+            constexpr uint64_t k_stream_stall_ms = 850;
             const uint64_t stall_ms = safe_elapsed_ms(now, stream_activity_ms);
             if (stall_ms > k_stream_stall_ms
                 && now >= next_stream_stall_recover_allowed_ms_) {
-                next_stream_stall_recover_allowed_ms_ = now + 1500;
+                next_stream_stall_recover_allowed_ms_ = now + 900;
                 fault_state_guard_until_ms_ = now + 2000;
                 reset_runtime_resolvers();
                 if (bridge_connected) {
@@ -2474,6 +2663,7 @@ private:
     uint64_t last_state_change_emit_ms_{0};
     uint64_t last_state_transition_refresh_ms_{0};
     uint64_t last_runtime_progress_ms_{0};
+    uint64_t next_live_stream_refresh_ms_{0};
     uint64_t next_stream_stall_recover_allowed_ms_{0};
     uint64_t last_true_start_transition_ms_{0};
     RC::Unreal::UObject* live_metric_receiver_hint_{nullptr};
@@ -2482,6 +2672,8 @@ private:
     int32_t last_observed_challenge_tick_count_{std::numeric_limits<int32_t>::min()};
     float last_observed_queue_time_remaining_{std::numeric_limits<float>::quiet_NaN()};
     float last_observed_time_remaining_{std::numeric_limits<float>::quiet_NaN()};
+    float last_raw_queue_time_remaining_{std::numeric_limits<float>::quiet_NaN()};
+    uint64_t last_queue_countdown_edge_ms_{0};
     uint64_t replay_fault_backoff_until_ms_{0};
     uint32_t replay_fault_count_{0};
     bool replay_fault_latched_{false};
@@ -2502,6 +2694,9 @@ private:
         meta_game_instance_ = nullptr;
         state_receiver_instance_ = nullptr;
         scenario_manager_instance_ = nullptr;
+        live_metric_receiver_hint_ = nullptr;
+        live_metric_receiver_hint_ms_ = 0;
+        next_live_stream_refresh_ms_ = 0;
         next_meta_resolve_ms_ = 0;
         next_receiver_resolve_ms_ = 0;
         next_scenario_resolve_ms_ = 0;
@@ -2783,7 +2978,13 @@ private:
             targets_.receive_seconds &&
             (targets_.receive_challenge_tick_count || targets_.receive_challenge_tick_count_single || targets_.receive_challenge_tick_count_value_else) &&
             (targets_.receive_score || targets_.receive_score_single || targets_.receive_score_value_else);
-        next_targets_resolve_ms_ = now + (core_live_hooks_ready ? 2000 : 250);
+        const bool active_live_window =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1
+            || (last_true_start_transition_ms_ > 0
+                && safe_elapsed_ms(now, last_true_start_transition_ms_) < 1500);
+        next_targets_resolve_ms_ = now + (core_live_hooks_ready ? 2000 : (active_live_window ? 100 : 250));
     }
 
     RC::Unreal::UClass* resolve_function_owner_class(RC::Unreal::UFunction* fn) {
@@ -2951,7 +3152,9 @@ private:
             return result;
         }
 
-        caller->ProcessEvent(fn, params.data());
+        if (!safe_process_event_call(caller, fn, params.data())) {
+            return result;
+        }
         void* output_ptr = safe_property_value_ptr(output_numeric, params.data());
         if (!output_ptr || !is_likely_readable_region(output_ptr, sizeof(double))) {
             return result;
@@ -3055,7 +3258,9 @@ private:
             return result;
         }
 
-        caller->ProcessEvent(fn, params.data());
+        if (!safe_process_event_call(caller, fn, params.data())) {
+            return result;
+        }
         void* output_ptr = safe_property_value_ptr(output_bool, params.data());
         if (!output_ptr || !is_likely_readable_region(output_ptr, sizeof(uint8_t))) {
             return result;
@@ -3264,6 +3469,24 @@ private:
             return state_receiver_instance_;
         }
 
+        const bool prefer_live_activity =
+            last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1
+            || lifecycle_active_
+            || (std::isfinite(last_queue_time_remaining_) && last_queue_time_remaining_ > 0.0001f)
+            || (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.25f);
+        const bool challenge_expected_live =
+            last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1
+            || lifecycle_active_;
+        const bool stream_selection_stale =
+            challenge_expected_live
+            && last_runtime_progress_ms_ > 0
+            && safe_elapsed_ms(now, last_runtime_progress_ms_) > 400;
+        const bool startup_hint_window =
+            last_true_start_transition_ms_ > 0
+            && safe_elapsed_ms(now, last_true_start_transition_ms_) < 900;
+
         if (live_metric_receiver_hint_
             && (!is_likely_valid_object_ptr(live_metric_receiver_hint_)
                 || safe_elapsed_ms(now, live_metric_receiver_hint_ms_) > 3000)) {
@@ -3275,22 +3498,48 @@ private:
             && is_likely_valid_object_ptr(live_metric_receiver_hint_)
             && safe_elapsed_ms(now, live_metric_receiver_hint_ms_) <= 1500;
         if (has_recent_live_metric_receiver_hint) {
-            state_receiver_instance_ = live_metric_receiver_hint_;
-            next_receiver_resolve_ms_ = now + 100;
-            return state_receiver_instance_;
+            bool use_hint_directly = true;
+            if (stream_selection_stale && !startup_hint_window) {
+                ReceiverActivityProbe hint_probe{};
+                if (safe_probe_state_receiver_activity(live_metric_receiver_hint_, hint_probe) && hint_probe.valid) {
+                    const bool hint_ahead_seconds =
+                        std::isfinite(hint_probe.seconds)
+                        && std::isfinite(last_seconds_)
+                        && hint_probe.seconds > (last_seconds_ + 0.020f);
+                    const bool hint_ahead_ticks =
+                        hint_probe.challenge_tick_count >= 0
+                        && last_challenge_tick_count_ >= 0
+                        && hint_probe.challenge_tick_count > last_challenge_tick_count_;
+                    const bool hint_ahead_score =
+                        std::isfinite(hint_probe.score_total)
+                        && std::isfinite(last_score_total_)
+                        && hint_probe.score_total > (last_score_total_ + 0.020f);
+                    if (!(hint_ahead_seconds || hint_ahead_ticks || hint_ahead_score)) {
+                        use_hint_directly = false;
+                    }
+                } else {
+                    use_hint_directly = false;
+                }
+            }
+            if (use_hint_directly) {
+                state_receiver_instance_ = live_metric_receiver_hint_;
+                next_receiver_resolve_ms_ = now + 100;
+                return state_receiver_instance_;
+            }
         }
 
-        const bool prefer_live_activity =
-            last_is_in_challenge_ == 1
-            || last_is_in_scenario_ == 1
-            || lifecycle_active_
-            || (std::isfinite(last_queue_time_remaining_) && last_queue_time_remaining_ > 0.0001f)
-            || (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.25f);
-        const bool challenge_expected_live =
-            last_is_in_challenge_ == 1
-            || last_is_in_scenario_ == 1
-            || lifecycle_active_;
-        next_receiver_resolve_ms_ = now + (prefer_live_activity ? 50 : 1000);
+        const bool fast_start_window =
+            last_true_start_transition_ms_ > 0
+            && safe_elapsed_ms(now, last_true_start_transition_ms_) < 1500;
+        const bool live_progress_stale =
+            prefer_live_activity
+            && (last_runtime_progress_ms_ == 0
+                || safe_elapsed_ms(now, last_runtime_progress_ms_) > 250);
+        const uint64_t receiver_resolve_interval_ms =
+            prefer_live_activity
+                ? ((fast_start_window || live_progress_stale) ? 35ULL : 50ULL)
+                : 1000ULL;
+        next_receiver_resolve_ms_ = now + receiver_resolve_interval_ms;
 
         auto* meta = resolve_meta_game_instance(now);
         RC::StringType meta_path{};
@@ -3365,6 +3614,46 @@ private:
                             score += 6000;
                         } else {
                             score -= 12000;
+                        }
+
+                        if (stream_selection_stale) {
+                            const bool seconds_ahead =
+                                std::isfinite(probe.seconds)
+                                && std::isfinite(last_seconds_)
+                                && probe.seconds > (last_seconds_ + 0.020f);
+                            const bool ticks_ahead =
+                                probe.challenge_tick_count >= 0
+                                && last_challenge_tick_count_ >= 0
+                                && probe.challenge_tick_count > last_challenge_tick_count_;
+                            const bool score_ahead =
+                                std::isfinite(probe.score_total)
+                                && std::isfinite(last_score_total_)
+                                && probe.score_total > (last_score_total_ + 0.020f);
+                            const bool matches_last_seconds =
+                                std::isfinite(probe.seconds)
+                                && std::isfinite(last_seconds_)
+                                && std::fabs(static_cast<double>(probe.seconds) - static_cast<double>(last_seconds_)) <= 0.0001;
+                            const bool matches_last_ticks =
+                                probe.challenge_tick_count >= 0
+                                && last_challenge_tick_count_ >= 0
+                                && probe.challenge_tick_count == last_challenge_tick_count_;
+                            const bool matches_last_score =
+                                std::isfinite(probe.score_total)
+                                && std::isfinite(last_score_total_)
+                                && std::fabs(static_cast<double>(probe.score_total) - static_cast<double>(last_score_total_)) <= 0.0001;
+                            const bool matches_last_snapshot =
+                                matches_last_seconds
+                                && matches_last_ticks
+                                && matches_last_score;
+
+                            if (seconds_ahead || ticks_ahead || score_ahead) {
+                                score += 14000;
+                            } else if (matches_last_snapshot) {
+                                score -= 18000;
+                                if (state_receiver_instance_ && obj == state_receiver_instance_) {
+                                    score -= 8000;
+                                }
+                            }
                         }
                     }
                 } else {
@@ -3714,7 +4003,11 @@ private:
         if (value < 0) {
             return;
         }
-        if (value == 0 && last_nonzero_ms == 0) {
+        const bool active_stream_expected =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1;
+        if (value == 0 && last_nonzero_ms == 0 && !active_stream_expected) {
             return;
         }
         if (value > 0) {
@@ -3768,7 +4061,11 @@ private:
             return;
         }
         const bool is_qrem = (std::strcmp(ev, "pull_queue_time_remaining") == 0);
-        if (value == 0.0f && last_nonzero_ms == 0 && !is_qrem) {
+        const bool active_stream_expected =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1;
+        if (value == 0.0f && last_nonzero_ms == 0 && !is_qrem && !active_stream_expected) {
             return;
         }
         if (value > 0.0f) {
