@@ -2041,10 +2041,9 @@ private:
         const bool log_all_events = env_flag_enabled("KOVAAKS_LOG_ALL_EVENTS") || log_all_events_flag_enabled();
         const bool object_debug = env_flag_enabled("KOVAAKS_OBJECT_DEBUG") || object_debug_flag_enabled();
         const bool non_ui_probe = env_flag_enabled("KOVAAKS_NON_UI_PROBE") || non_ui_probe_flag_enabled();
-        const bool ui_counter_fallback = env_flag_enabled("KOVAAKS_UI_COUNTER_FALLBACK")
-            || ui_counter_fallback_flag_enabled();
-        const bool score_ui_fallback = env_flag_enabled("KOVAAKS_SCORE_UI_FALLBACK")
-            || score_ui_fallback_flag_enabled();
+        // State-only data policy: UI-derived metric fallbacks are hard-disabled.
+        const bool ui_counter_fallback = false;
+        const bool score_ui_fallback = false;
         const bool enable_process_internal_script_hook =
             env_flag_enabled("KOVAAKS_HOOK_PROCESS_INTERNAL")
             || process_internal_script_hook_flag_enabled();
@@ -2069,9 +2068,7 @@ private:
         const bool allow_unsafe_hooks =
             env_flag_enabled("KOVAAKS_ALLOW_UNSAFE_HOOKS")
             || unsafe_hooks_flag_enabled();
-        const bool ui_settext_hook =
-            env_flag_enabled("KOVAAKS_UI_SETTEXT_HOOK")
-            || ui_settext_hook_flag_enabled();
+        const bool ui_settext_hook = false;
 
         // Stability-first defaults:
         // - PE callbacks require explicit enable, never implicit debug/discovery promotion.
@@ -7272,9 +7269,6 @@ private:
             receiver = nullptr;
         }
         if (!receiver) {
-            if (s_object_debug_enabled || s_ui_counter_fallback_enabled) {
-                poll_session_statistics_ui_text(now, s_object_debug_enabled);
-            }
             return;
         }
         const auto has_pull_targets = []() -> bool {
@@ -8980,19 +8974,6 @@ private:
                 any_value_read = true;
             }
         }
-        // Score can remain zero via direct state/scenario/stats calls in some runtime contexts.
-        // Fallback to live score text widgets without enabling full object debug/UI field spam.
-        if (s_score_ui_fallback_enabled && poll_live_score_ui_text(now, f32v)) {
-            if (f32v > 0.0f || s_last_pull_score <= 0.0f) {
-                consider_score_candidate("ui_score_widget", f32v, k_score_rank_ui);
-                any_value_read = true;
-            }
-        }
-        if (s_object_debug_enabled || s_ui_counter_fallback_enabled) {
-            if (poll_session_statistics_ui_text(now, s_object_debug_enabled)) {
-                any_value_read = true;
-            }
-        }
         // Derived score fallback from working metrics path.
         // When direct score sources are unstable/zero, SPM * seconds gives a usable live score signal.
         const bool spm_fresh = s_last_pull_spm > 0.0f && (now - s_last_nonzero_spm_ms) < 4000;
@@ -9930,106 +9911,8 @@ private:
         bind(s_targets.training_on_target_projectile_missed, EventKind::ShotMissed);
         bind(s_targets.training_on_player_projectile_spawned, EventKind::ShotFired);
 
-        // Focused fallback on SessionStatistics widget updates.
-        auto* text_set_fn = find_fn(STR("/Script/UMG.TextBlock:SetText"));
-        s_text_get_fn = find_fn(STR("/Script/UMG.TextBlock:GetText"));
-        if (text_set_fn) {
-            const auto callback_id = text_set_fn->RegisterPostHook(
-                [](RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx, void*) {
-                    if (!s_ui_settext_hook_enabled || !s_pe_events_enabled || !call_ctx.Context || !is_likely_valid_object_ptr(call_ctx.Context)) {
-                        return;
-                    }
-                    s_ui_settext_hook_calls.fetch_add(1, std::memory_order_relaxed);
-                    const auto ctx_name = call_ctx.Context->GetFullName();
-                    auto* frame_50 = reinterpret_cast<RC::Unreal::FFrame_50_AndBelow*>(&call_ctx.TheStack);
-                    void* locals = frame_50 ? static_cast<void*>(frame_50->Locals) : nullptr;
-                    RC::StringType text_value{};
-                    bool have_text_value = false;
-                    if (locals && is_likely_readable_region(locals, sizeof(RC::Unreal::FText))) {
-                        struct TextBlockSetTextParams {
-                            RC::Unreal::FText InText;
-                        };
-                        auto* set_params = reinterpret_cast<TextBlockSetTextParams*>(locals);
-                        text_value = set_params->InText.ToString();
-                        have_text_value = !text_value.empty();
-                    }
-                    if (!have_text_value && s_text_get_fn && is_likely_valid_object_ptr(s_text_get_fn)) {
-                        struct TextBlockGetTextParams {
-                            RC::Unreal::FText ReturnValue;
-                        } params{};
-                        (void)safe_process_event_call(call_ctx.Context, s_text_get_fn, &params, "ui_settext_gettext");
-                        text_value = params.ReturnValue.ToString();
-                        have_text_value = !text_value.empty();
-                    }
-                    if (s_log_all_events || s_object_debug_enabled) {
-                        std::array<char, 3072> buf{};
-                        std::snprintf(
-                            buf.data(),
-                            buf.size(),
-                            "[ui_settext] ctx=%ls text=%ls",
-                            ctx_name.c_str(),
-                            text_value.c_str()
-                        );
-                        events_log_line(buf.data());
-                    }
-                    const auto ui_field = classify_session_ui_field(ctx_name);
-                    if (ui_field != nullptr) {
-                        s_ui_field_update_calls.fetch_add(1, std::memory_order_relaxed);
-                        if (s_log_all_events || s_object_debug_enabled) {
-                            std::array<char, 160> lbuf{};
-                            std::snprintf(lbuf.data(), lbuf.size(), "[ui_field] field=%s", ui_field);
-                            events_log_line(lbuf.data());
-                        }
-                        const auto value_utf8 = escape_json(utf8_from_wide(text_value));
-                        std::string msg;
-                        if (value_utf8.empty()) {
-                            msg = std::string("{\"ev\":\"ui_field_update\",\"field\":\"") + ui_field + "\"}";
-                        } else {
-                            msg = std::string("{\"ev\":\"ui_field_update\",\"field\":\"") + ui_field
-                                + "\",\"value\":\"" + value_utf8 + "\"}";
-                        }
-                        kovaaks::RustBridge::emit_json(msg.c_str());
-                        if (std::strcmp(ui_field, "scenario_name") == 0) {
-                            (void)maybe_update_ui_scenario_name(text_value, "ui_settext");
-                        } else if (maybe_emit_derived_ui_counter(ui_field, text_value)) {
-                            s_ui_derived_emit_calls.fetch_add(1, std::memory_order_relaxed);
-                        } else if ((s_non_ui_probe_enabled || s_log_all_events || s_object_debug_enabled) && !text_value.empty()) {
-                            std::array<char, 256> pbuf{};
-                            std::snprintf(
-                                pbuf.data(),
-                                pbuf.size(),
-                                "[ui_field_parse_miss] field=%s text=%ls",
-                                ui_field,
-                                text_value.c_str()
-                            );
-                            events_log_line(pbuf.data());
-                        }
-                    }
-                    if (ctx_name.find(STR("SessionStatistics_C")) == RC::StringType::npos) {
-                        return;
-                    }
-
-                    if (ctx_name.find(STR("SessionHits")) != RC::StringType::npos) {
-                        emit_simple_event("session_hits_ui_update");
-                    } else if (ctx_name.find(STR("SessionShots")) != RC::StringType::npos) {
-                        emit_simple_event("session_shots_ui_update");
-                    } else if (ctx_name.find(STR("KillCounter")) != RC::StringType::npos) {
-                        emit_simple_event("session_kills_ui_update");
-                    } else if (ctx_name.find(STR("DamageDone")) != RC::StringType::npos) {
-                        emit_simple_event("session_damage_done_ui_update");
-                    } else if (ctx_name.find(STR("DamagePossible")) != RC::StringType::npos) {
-                        emit_simple_event("session_damage_possible_ui_update");
-                    } else {
-                        emit_simple_event("session_stats_ui_update");
-                    }
-
-                },
-                nullptr
-            );
-            s_native_hook_bindings.emplace_back(text_set_fn, callback_id);
-        } else {
-            runtime_log_line("[KovaaksBridgeMod] TextBlock:SetText function not found");
-        }
+        // State-only data policy: do not register TextBlock hooks.
+        s_text_get_fn = nullptr;
 
         register_diagnostic_probe_hooks();
 

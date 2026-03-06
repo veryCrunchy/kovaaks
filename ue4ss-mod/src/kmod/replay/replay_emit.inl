@@ -311,6 +311,38 @@ static auto replay_prepare_scalars(ReplayScalars& scalars) -> void {
     scalars.game_state = game_state_code_to_string(scalars.game_state_code);
 }
 
+static auto replay_context_has_valid_map(const ReplayContext& context) -> bool {
+    return !context.map_name.empty() && std::isfinite(context.map_scale) && context.map_scale > 0.0f;
+}
+
+static auto replay_apply_context_fallback(
+    const ReplayRuntimeState& runtime,
+    ReplayContext& context
+) -> void {
+    const bool current_has_map = replay_context_has_valid_map(context);
+    const bool baseline_has_map = replay_context_has_valid_map(runtime.last_context);
+    if (!current_has_map && baseline_has_map) {
+        context.map_name = runtime.last_context.map_name;
+        context.map_scale = runtime.last_context.map_scale;
+    }
+}
+
+static auto replay_apply_entity_fallback(
+    const ReplayRuntimeState& runtime,
+    const ReplayScalars& scalars,
+    std::vector<ReplayEntity>& entities
+) -> void {
+    const bool in_active_state = scalars.is_in_challenge == 1 || scalars.is_in_scenario == 1;
+    if (!in_active_state || !entities.empty() || runtime.last_entities.empty()) {
+        return;
+    }
+
+    entities.reserve(runtime.last_entities.size());
+    for (const auto& kv : runtime.last_entities) {
+        entities.push_back(kv.second);
+    }
+}
+
 static auto replay_tick(const ReplayTickInput& input) -> void {
     auto& runtime = replay_runtime_state();
     if (!runtime.initialized) {
@@ -366,12 +398,14 @@ static auto replay_tick(const ReplayTickInput& input) -> void {
         context.run_id = runtime.current_run_id;
     }
     replay_collect_map_context(context);
+    replay_apply_context_fallback(runtime, context);
 
     ReplayScalars scalars = input.scalars;
     replay_prepare_scalars(scalars);
 
     std::vector<ReplayEntity> entities{};
     replay_collect_entities(entities);
+    replay_apply_entity_fallback(runtime, scalars, entities);
 
     const bool context_changed = replay_context_changed(runtime.last_context, context);
     if (context_changed || runtime.keyframes_emitted == 0) {

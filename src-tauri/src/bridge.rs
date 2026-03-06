@@ -936,6 +936,8 @@ mod imp {
         recovery_start_streak: u8,
         tracking_paused_by_idle: bool,
         last_stats_flow_at: Option<Instant>,
+        last_pull_event_at: Option<Instant>,
+        last_state_resync_request_at: Option<Instant>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1654,6 +1656,8 @@ mod imp {
             state.recovery_start_streak = 0;
             state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = Some(now);
+            state.last_pull_event_at = Some(now);
+            state.last_state_resync_request_at = None;
         }
         reset_bridge_stats_snapshot();
         if let Ok(mut run_state) = run_capture_state().lock() {
@@ -1873,7 +1877,9 @@ mod imp {
             let mut emit_session = false;
             let mut emit_challenge = false;
             state.last_stats_flow_at = Some(now);
+            state.last_pull_event_at = Some(now);
             state.tracking_paused_by_idle = false;
+            state.last_state_resync_request_at = None;
             if challenge_active && !state.challenge_active {
                 state.challenge_active = true;
                 emit_challenge = true;
@@ -1961,6 +1967,8 @@ mod imp {
             state.recovery_start_streak = 0;
             state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = None;
+            state.last_pull_event_at = None;
+            state.last_state_resync_request_at = None;
             (emit_session, emit_challenge)
         };
 
@@ -1996,13 +2004,17 @@ mod imp {
         }
     }
 
-    fn mark_stats_flow_activity(source: &str) {
+    fn mark_stats_flow_activity(source: &str, is_pull_metric: bool) {
         let should_resume = {
             let mut state = bridge_session_state().lock().unwrap();
             if !state.session_active {
                 return;
             }
-            state.last_stats_flow_at = Some(Instant::now());
+            let now = Instant::now();
+            state.last_stats_flow_at = Some(now);
+            if is_pull_metric {
+                state.last_pull_event_at = Some(now);
+            }
             if state.tracking_paused_by_idle {
                 state.tracking_paused_by_idle = false;
                 true
@@ -2018,10 +2030,48 @@ mod imp {
         }
     }
 
+    fn request_state_sync_if_flow_stalled() {
+        const RESYNC_STALL_AFTER: Duration = Duration::from_millis(1200);
+        const RESYNC_COOLDOWN: Duration = Duration::from_millis(900);
+
+        let should_request = {
+            let mut state = bridge_session_state().lock().unwrap();
+            if !state.session_active {
+                return;
+            }
+
+            let now = Instant::now();
+            let last_flow = state.last_pull_event_at.or(state.last_stats_flow_at);
+            let Some(last_flow) = last_flow else {
+                return;
+            };
+
+            if now.duration_since(last_flow) < RESYNC_STALL_AFTER {
+                return;
+            }
+
+            if let Some(last_req) = state.last_state_resync_request_at {
+                if now.duration_since(last_req) < RESYNC_COOLDOWN {
+                    return;
+                }
+            }
+
+            state.last_state_resync_request_at = Some(now);
+            true
+        };
+
+        if should_request {
+            request_mod_state_sync("bridge:pull_flow_stall");
+        }
+    }
+
     fn pause_tracking_if_stats_idle() {
         let should_pause = {
             let mut state = bridge_session_state().lock().unwrap();
             if !state.session_active || state.tracking_paused_by_idle {
+                return;
+            }
+            if state.challenge_active {
                 return;
             }
 
@@ -2054,6 +2104,7 @@ mod imp {
             .spawn(move || {
                 loop {
                     pause_tracking_if_stats_idle();
+                    request_state_sync_if_flow_stalled();
                     std::thread::sleep(SESSION_IDLE_WATCHDOG_TICK);
                 }
             })
@@ -2088,6 +2139,10 @@ mod imp {
                 | "shot_fired"
                 | "shot_hit"
                 | "kill"
+                | "replay_context"
+                | "replay_tick_keyframe"
+                | "replay_tick_delta"
+                | "replay_tick_end"
                 | "class_hook_probe"
                 | "script_hook_probe"
                 | "hook_probe"
@@ -3368,44 +3423,56 @@ mod imp {
                     while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
                         let chunk: Vec<u8> = buf.drain(..=nl).collect();
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
-                            note_in_game_replay_ready_event(s);
-                            observe_replay_stream_raw(s);
-                            let parsed_event = super::parse_bridge_payload(s);
-                            let is_noisy_bridge_event = |ev: &str| {
-                                matches!(
-                                    ev,
-                                    "process_event_activity"
-                                        | "hook_probe"
-                                        | "hook_focus_probe"
-                                        | "hook_focus_probe_typed"
-                                        | "class_hook_probe"
-                                        | "script_hook_probe"
-                                )
-                            };
-                            let suppress_bridge_log_event = parsed_event
-                                .as_ref()
-                                .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
-                            if !suppress_bridge_log_event {
-                                log::info!("bridge event: {s}");
-                                emit_ue4ss_log(app, format!("[bridge] {s}"));
-                                let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
-                            }
-                            if let Some(parsed) = parsed_event {
-                                observe_run_metric_event(&parsed);
-                                // Always run compat handlers, even for noisy events
-                                // (e.g. class_hook_probe) because they can drive
-                                // lifecycle/state normalization.
-                                emit_bridge_compat_events(app, &parsed);
-                                if is_stats_flow_event(&parsed) {
-                                    mark_stats_flow_activity(parsed.ev.as_str());
-                                }
-                                if is_noisy_bridge_event(&parsed.ev) {
-                                    continue;
-                                }
-                                let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
-                                if super::is_metric_event_name(&parsed.ev) {
-                                    let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
-                                }
+                            let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(
+                                || {
+                                    note_in_game_replay_ready_event(s);
+                                    observe_replay_stream_raw(s);
+                                    let parsed_event = super::parse_bridge_payload(s);
+                                    let is_noisy_bridge_event = |ev: &str| {
+                                        matches!(
+                                            ev,
+                                            "process_event_activity"
+                                                | "hook_probe"
+                                                | "hook_focus_probe"
+                                                | "hook_focus_probe_typed"
+                                                | "class_hook_probe"
+                                                | "script_hook_probe"
+                                        )
+                                    };
+                                    let suppress_bridge_log_event = parsed_event
+                                        .as_ref()
+                                        .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
+                                    if !suppress_bridge_log_event {
+                                        log::info!("bridge event: {s}");
+                                        emit_ue4ss_log(app, format!("[bridge] {s}"));
+                                        let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
+                                    }
+                                    if let Some(parsed) = parsed_event {
+                                        observe_run_metric_event(&parsed);
+                                        // Always run compat handlers, even for noisy events
+                                        // (e.g. class_hook_probe) because they can drive
+                                        // lifecycle/state normalization.
+                                        emit_bridge_compat_events(app, &parsed);
+                                        if is_stats_flow_event(&parsed) {
+                                            mark_stats_flow_activity(
+                                                parsed.ev.as_str(),
+                                                parsed.ev.starts_with("pull_"),
+                                            );
+                                        }
+                                        if is_noisy_bridge_event(&parsed.ev) {
+                                            return;
+                                        }
+                                        let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
+                                        if super::is_metric_event_name(&parsed.ev) {
+                                            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
+                                        }
+                                    }
+                                },
+                            ));
+                            if processed.is_err() {
+                                log::error!(
+                                    "bridge: panic while processing bridge event line; continuing"
+                                );
                             }
                         }
                     }
