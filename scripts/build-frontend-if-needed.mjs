@@ -75,6 +75,24 @@ function distOutputsExist() {
   return requiredOutputs.every((filePath) => existsSync(filePath));
 }
 
+function buildVia(command, args, label) {
+  console.log(`Running frontend build via ${label}...`);
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    env: process.env,
+    stdio: "inherit",
+  });
+
+  if (result.error) {
+    const code = result.error?.code ?? "unknown";
+    console.warn(
+      `Failed to launch frontend build via ${label} (${command}): ${result.error.message} [${code}]`,
+    );
+  }
+
+  return result;
+}
+
 const inputFiles = inputEntries
   .flatMap((entry) => walkFiles(path.join(repoRoot, entry)))
   .sort((left, right) => toRepoRelative(left).localeCompare(toRepoRelative(right)));
@@ -98,15 +116,69 @@ if (
   process.exit(0);
 }
 
-const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
-const build = spawnSync(npmCommand, ["run", "build:frontend"], {
-  cwd: repoRoot,
-  env: process.env,
-  stdio: "inherit",
+const packageManagerCandidates = [];
+const npmExecPath = process.env.npm_execpath;
+if (typeof npmExecPath === "string" && npmExecPath.length > 0 && existsSync(npmExecPath)) {
+  packageManagerCandidates.push({
+    command: process.execPath,
+    args: [npmExecPath, "run", "build:frontend"],
+    label: "npm_execpath",
+  });
+}
+
+packageManagerCandidates.push({
+  command: process.platform === "win32" ? "pnpm.cmd" : "pnpm",
+  args: ["run", "build:frontend"],
+  label: "pnpm",
 });
 
-if (build.status !== 0) {
-  process.exit(build.status ?? 1);
+packageManagerCandidates.push({
+  command: process.platform === "win32" ? "npm.cmd" : "npm",
+  args: ["run", "build:frontend"],
+  label: "npm",
+});
+
+const seen = new Set();
+const uniqueCandidates = packageManagerCandidates.filter((candidate) => {
+  const key = `${candidate.command} ${candidate.args.join(" ")}`;
+  if (seen.has(key)) {
+    return false;
+  }
+  seen.add(key);
+  return true;
+});
+
+let buildSucceeded = false;
+let sawLaunchError = false;
+
+for (const candidate of uniqueCandidates) {
+  const build = buildVia(candidate.command, candidate.args, candidate.label);
+
+  if (build.error) {
+    sawLaunchError = true;
+    const code = build.error?.code;
+    if (code === "ENOENT" || code === "EACCES") {
+      continue;
+    }
+    process.exit(1);
+  }
+
+  if (build.status !== 0) {
+    process.exit(build.status ?? 1);
+  }
+
+  buildSucceeded = true;
+  break;
+}
+
+if (!buildSucceeded) {
+  if (sawLaunchError) {
+    console.error(
+      "Unable to launch frontend build command (tried npm_execpath/pnpm/npm). Check Node/pnpm/npm availability in CI PATH.",
+    );
+    console.error(`Working directory: ${repoRoot}`);
+  }
+  process.exit(1);
 }
 
 if (!distOutputsExist()) {

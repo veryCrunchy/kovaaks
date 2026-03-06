@@ -35,6 +35,22 @@ jobs:
         with:
           workspaces: src-tauri
 
+      - name: Cache UE4SS template/submodules
+        uses: actions/cache@v4
+        with:
+          path: external/UE4SSCPPTemplate
+          key: ${{ runner.os }}-ue4ss-template-v1
+
+      - name: Cache payload pipeline artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/pipeline
+            .cache/ue4ss-runtime
+          key: ${{ runner.os }}-payload-pipeline-${{ hashFiles('scripts/dev-pipeline.ps1', 'scripts/sync-ue4ss-payload.ps1') }}
+          restore-keys: |
+            ${{ runner.os }}-payload-pipeline-
+
       - name: Install frontend dependencies
         run: pnpm install
 
