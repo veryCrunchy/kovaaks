@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node ./scripts/build-frontend-if-needed.mjs",
+    "beforeBuildCommand": "node ../scripts/build-frontend-if-needed.mjs",
     "frontendDist": "../dist"
   },
   "app": {
