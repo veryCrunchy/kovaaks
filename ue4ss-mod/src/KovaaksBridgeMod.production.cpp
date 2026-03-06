@@ -1236,6 +1236,17 @@ private:
         const uint64_t now = GetTickCount64();
         EmitTagScope hook_scope(*this, "receiver_hook", "non_ui_live_hook");
 
+        if (call_ctx.Context && is_likely_valid_object_ptr(call_ctx.Context)) {
+            const auto context_name = call_ctx.Context->GetFullName();
+            if (!is_rejected_runtime_object_name(context_name)
+                && context_name.find(STR("PerformanceIndicatorsStateReceiver")) != RC::StringType::npos) {
+                live_metric_receiver_hint_ = call_ctx.Context;
+                live_metric_receiver_hint_ms_ = now;
+                state_receiver_instance_ = call_ctx.Context;
+                next_receiver_resolve_ms_ = now + 100;
+            }
+        }
+
         switch (kind) {
         case LiveMetricHookKind::Seconds: {
             float value = -1.0f;
@@ -1300,10 +1311,6 @@ private:
     }
 
     void register_live_metric_hooks() {
-        if (live_metric_hooks_registered_) {
-            return;
-        }
-
         auto bind = [&](RC::Unreal::UFunction* fn, LiveMetricHookKind kind) {
             if (!fn || !is_likely_valid_object_ptr(fn)) {
                 return;
@@ -1414,7 +1421,6 @@ private:
                     targets_.receive_kills
                 }, iv)) {
                 current_kills_total = iv;
-                emit_pull_i32("pull_kills_total", last_kills_total_, iv, last_nonzero_kills_total_ms_, now);
             }
             if (try_read_int(active_receiver, {
                     targets_.get_shots_fired_value_else,
@@ -1424,7 +1430,6 @@ private:
                     targets_.receive_shots_fired
                 }, iv)) {
                 current_shots_fired = iv;
-                emit_pull_i32("pull_shots_fired_total", last_shots_fired_, iv, last_nonzero_shots_fired_ms_, now);
             }
             if (try_read_int(active_receiver, {
                     targets_.get_shots_hit_value_else,
@@ -1434,7 +1439,6 @@ private:
                     targets_.receive_shots_hit
                 }, iv)) {
                 current_shots_hit = iv;
-                emit_pull_i32("pull_shots_hit_total", last_shots_hit_, iv, last_nonzero_shots_hit_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_score_value_else,
@@ -1445,7 +1449,6 @@ private:
                 }, fv)) {
                 has_critical_score_read = true;
                 current_score_total = fv;
-                emit_pull_f32("pull_score_total", last_score_total_, fv, last_nonzero_score_total_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_accuracy_value_else,
@@ -1455,7 +1458,6 @@ private:
                     targets_.receive_accuracy
                 }, fv)) {
                 current_accuracy = fv;
-                emit_pull_f32("pull_accuracy", last_accuracy_, fv, last_nonzero_accuracy_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_score_per_minute_value_else,
@@ -1464,7 +1466,6 @@ private:
                     targets_.receive_score_per_minute
                 }, fv)) {
                 current_score_per_minute = fv;
-                emit_pull_f32("pull_score_per_minute", last_score_per_minute_, fv, last_nonzero_spm_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_challenge_average_fps_value_else,
@@ -1475,7 +1476,6 @@ private:
                     targets_.receive_challenge_average_fps
                 }, fv)) {
                 current_challenge_average_fps = fv;
-                emit_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, fv, last_nonzero_challenge_average_fps_ms_, now);
             }
             if (try_read_int(active_receiver, {
                     targets_.get_challenge_tick_count_value_else,
@@ -1487,7 +1487,6 @@ private:
                 }, iv)) {
                 has_critical_tick_read = true;
                 current_challenge_tick_count = iv;
-                emit_pull_i32("pull_challenge_tick_count_total", last_challenge_tick_count_, iv, last_nonzero_challenge_tick_count_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_damage_done_value_else,
@@ -1496,7 +1495,6 @@ private:
                     targets_.receive_damage_done
                 }, fv)) {
                 current_damage_done = fv;
-                emit_pull_f32("pull_damage_done", last_damage_done_, fv, last_nonzero_damage_done_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_damage_possible_value_else,
@@ -1505,7 +1503,6 @@ private:
                     targets_.receive_damage_possible
                 }, fv)) {
                 current_damage_possible = fv;
-                emit_pull_f32("pull_damage_possible", last_damage_possible_, fv, last_nonzero_damage_possible_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_kills_per_second_value_else,
@@ -1514,7 +1511,6 @@ private:
                     targets_.receive_kills_per_second
                 }, fv)) {
                 current_kills_per_second = fv;
-                emit_pull_f32("pull_kills_per_second", last_kills_per_second_, fv, last_nonzero_kills_per_second_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_damage_efficiency_value_else,
@@ -1523,7 +1519,6 @@ private:
                     targets_.receive_damage_efficiency
                 }, fv)) {
                 current_damage_efficiency = fv;
-                emit_pull_f32("pull_damage_efficiency", last_damage_efficiency_, fv, last_nonzero_damage_efficiency_ms_, now);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_seconds_value_else,
@@ -1532,8 +1527,6 @@ private:
                 }, fv)) {
                 has_critical_seconds_read = true;
                 current_seconds = fv;
-                emit_pull_f32("pull_seconds_total", last_seconds_, fv, last_nonzero_seconds_ms_, now);
-                emit_pull_f32("pull_challenge_seconds_total", last_challenge_seconds_total_, fv, last_nonzero_challenge_seconds_ms_, now);
             }
         };
         pull_receiver_metrics(receiver);
@@ -1654,11 +1647,9 @@ private:
             );
             if (try_read_float(scenario_manager, {targets_.scenario_get_challenge_time_remaining}, fv)) {
                 current_time_remaining = fv;
-                emit_pull_f32("pull_time_remaining", last_time_remaining_, fv, last_nonzero_time_remaining_ms_, now);
             }
             if (try_read_float(scenario_manager, {targets_.scenario_get_challenge_queue_time_remaining}, fv)) {
                 current_queue_time_remaining = fv;
-                emit_pull_f32("pull_queue_time_remaining", last_queue_time_remaining_, fv, last_nonzero_queue_time_remaining_ms_, now);
             }
 
             if (now >= next_scenario_identity_refresh_ms_) {
@@ -1717,44 +1708,87 @@ private:
             }
         }
 
-        const bool challenge_live_expected =
+        const bool active_now =
             current_is_in_challenge > 0
-            || prev_is_in_challenge > 0
-            || current_is_in_scenario > 0
-            || prev_is_in_scenario > 0
-            || lifecycle_active_;
-        const bool had_recent_critical_progress =
-            last_runtime_progress_ms_ > 0 && safe_elapsed_ms(now, last_runtime_progress_ms_) <= 300;
-        const bool stalled_live_receiver =
-            receiver
-            && challenge_live_expected
-            && !had_recent_critical_progress
-            && now >= next_receiver_live_rebind_allowed_ms_
-            && (
-                ((!has_critical_seconds_read || !has_critical_tick_read)
-                    && ((std::isfinite(last_seconds_) && last_seconds_ > 0.50f) || last_challenge_tick_count_ > 15))
-                || (safe_elapsed_ms(now, last_runtime_progress_ms_) > 300
-                    && ((std::isfinite(last_seconds_) && last_seconds_ > 0.50f)
-                        || last_challenge_tick_count_ > 15))
+            || current_is_in_scenario > 0;
+        const bool active_prev =
+            prev_is_in_challenge > 0
+            || prev_is_in_scenario > 0;
+
+        if (!active_now) {
+            current_kills_total = -1;
+            current_shots_fired = -1;
+            current_shots_hit = -1;
+            current_score_total = -1.0f;
+            current_score_per_minute = -1.0f;
+            current_kills_per_second = -1.0f;
+            current_accuracy = -1.0f;
+            current_challenge_average_fps = -1.0f;
+            current_challenge_tick_count = -1;
+            current_damage_done = -1.0f;
+            current_damage_possible = -1.0f;
+            current_damage_efficiency = -1.0f;
+            current_seconds = -1.0f;
+            current_time_remaining = -1.0f;
+        }
+
+        if (active_now) {
+            emit_pull_i32("pull_kills_total", last_kills_total_, current_kills_total, last_nonzero_kills_total_ms_, now);
+            emit_pull_i32("pull_shots_fired_total", last_shots_fired_, current_shots_fired, last_nonzero_shots_fired_ms_, now);
+            emit_pull_i32("pull_shots_hit_total", last_shots_hit_, current_shots_hit, last_nonzero_shots_hit_ms_, now);
+            emit_pull_i32(
+                "pull_challenge_tick_count_total",
+                last_challenge_tick_count_,
+                current_challenge_tick_count,
+                last_nonzero_challenge_tick_count_ms_,
+                now
             );
-        if (stalled_live_receiver) {
-            state_receiver_instance_ = nullptr;
-            next_receiver_resolve_ms_ = 0;
-            next_receiver_live_rebind_allowed_ms_ = now + 250;
-            auto* rebound_receiver = resolve_state_receiver_instance(now);
-            if (rebound_receiver && rebound_receiver != receiver) {
-                receiver = rebound_receiver;
-                pull_receiver_metrics(receiver);
-                if (rust_ready_) {
-                    std::array<char, 192> json{};
-                    std::snprintf(
-                        json.data(),
-                        json.size(),
-                        "{\"ev\":\"ue4ss_prod_receiver_rebind\",\"reason\":\"critical_progress_stalled\",\"ts_ms\":%llu}",
-                        static_cast<unsigned long long>(now)
-                    );
-                    kovaaks::RustBridge::emit_json(json.data());
-                }
+            emit_pull_f32("pull_seconds_total", last_seconds_, current_seconds, last_nonzero_seconds_ms_, now);
+            emit_pull_f32(
+                "pull_challenge_seconds_total",
+                last_challenge_seconds_total_,
+                current_seconds,
+                last_nonzero_challenge_seconds_ms_,
+                now
+            );
+            emit_pull_f32("pull_score_total", last_score_total_, current_score_total, last_nonzero_score_total_ms_, now);
+            emit_pull_f32("pull_score_per_minute", last_score_per_minute_, current_score_per_minute, last_nonzero_spm_ms_, now);
+            emit_pull_f32("pull_kills_per_second", last_kills_per_second_, current_kills_per_second, last_nonzero_kills_per_second_ms_, now);
+            emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
+            emit_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, current_challenge_average_fps, last_nonzero_challenge_average_fps_ms_, now);
+            emit_pull_f32("pull_damage_done", last_damage_done_, current_damage_done, last_nonzero_damage_done_ms_, now);
+            emit_pull_f32("pull_damage_possible", last_damage_possible_, current_damage_possible, last_nonzero_damage_possible_ms_, now);
+            emit_pull_f32("pull_damage_efficiency", last_damage_efficiency_, current_damage_efficiency, last_nonzero_damage_efficiency_ms_, now);
+            emit_pull_f32("pull_time_remaining", last_time_remaining_, current_time_remaining, last_nonzero_time_remaining_ms_, now);
+            emit_pull_f32("pull_queue_time_remaining", last_queue_time_remaining_, current_queue_time_remaining, last_nonzero_queue_time_remaining_ms_, now);
+        } else {
+            emit_pull_f32("pull_queue_time_remaining", last_queue_time_remaining_, current_queue_time_remaining, last_nonzero_queue_time_remaining_ms_, now);
+            if (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.0f) {
+                emit_pull_f32("pull_time_remaining", last_time_remaining_, 0.0f, last_nonzero_time_remaining_ms_, now);
+            }
+            if (std::isfinite(last_score_total_) && last_score_total_ > 0.0f) {
+                emit_pull_f32("pull_score_total", last_score_total_, 0.0f, last_nonzero_score_total_ms_, now);
+            }
+            if (std::isfinite(last_challenge_seconds_total_) && last_challenge_seconds_total_ > 0.0f) {
+                emit_pull_f32(
+                    "pull_challenge_seconds_total",
+                    last_challenge_seconds_total_,
+                    0.0f,
+                    last_nonzero_challenge_seconds_ms_,
+                    now
+                );
+            }
+            if (std::isfinite(last_seconds_) && last_seconds_ > 0.0f) {
+                emit_pull_f32("pull_seconds_total", last_seconds_, 0.0f, last_nonzero_seconds_ms_, now);
+            }
+            if (last_challenge_tick_count_ > 0) {
+                emit_pull_i32(
+                    "pull_challenge_tick_count_total",
+                    last_challenge_tick_count_,
+                    0,
+                    last_nonzero_challenge_tick_count_ms_,
+                    now
+                );
             }
         }
 
@@ -1864,15 +1898,16 @@ private:
         const bool leaving_active_edge =
             !(current_is_in_challenge > 0 || current_is_in_scenario > 0)
             && (prev_is_in_challenge > 0 || prev_is_in_scenario > 0);
+        if (entering_active_edge) {
+            last_true_start_transition_ms_ = now;
+        }
         if ((challenge_state_edge || scenario_state_edge)
             && (last_state_transition_refresh_ms_ == 0
                 || safe_elapsed_ms(now, last_state_transition_refresh_ms_) > 250)) {
             last_state_transition_refresh_ms_ = now;
-            if (leaving_active_edge) {
-                reset_runtime_resolvers();
-            } else if (entering_active_edge) {
+            if (leaving_active_edge || entering_active_edge) {
+                state_receiver_instance_ = nullptr;
                 next_receiver_resolve_ms_ = 0;
-                next_receiver_live_rebind_allowed_ms_ = 0;
             }
         }
         }
@@ -2440,7 +2475,9 @@ private:
     uint64_t last_state_transition_refresh_ms_{0};
     uint64_t last_runtime_progress_ms_{0};
     uint64_t next_stream_stall_recover_allowed_ms_{0};
-    uint64_t next_receiver_live_rebind_allowed_ms_{0};
+    uint64_t last_true_start_transition_ms_{0};
+    RC::Unreal::UObject* live_metric_receiver_hint_{nullptr};
+    uint64_t live_metric_receiver_hint_ms_{0};
     float last_observed_seconds_value_{std::numeric_limits<float>::quiet_NaN()};
     int32_t last_observed_challenge_tick_count_{std::numeric_limits<int32_t>::min()};
     float last_observed_queue_time_remaining_{std::numeric_limits<float>::quiet_NaN()};
@@ -2469,7 +2506,6 @@ private:
         next_receiver_resolve_ms_ = 0;
         next_scenario_resolve_ms_ = 0;
         next_targets_resolve_ms_ = 0;
-        next_receiver_live_rebind_allowed_ms_ = 0;
     }
 
     static void emit_simple_event(const char* ev) {
@@ -2494,9 +2530,11 @@ private:
         last_lifecycle_signal_ms_ = now;
         pending_lifecycle_end_ms_ = 0;
         next_receiver_resolve_ms_ = 0;
-        next_receiver_live_rebind_allowed_ms_ = 0;
         last_observed_seconds_value_ = std::numeric_limits<float>::quiet_NaN();
         last_observed_challenge_tick_count_ = std::numeric_limits<int32_t>::min();
+        last_true_start_transition_ms_ = now;
+        live_metric_receiver_hint_ = nullptr;
+        live_metric_receiver_hint_ms_ = 0;
         emit_simple_event("session_start");
         emit_simple_event("challenge_start");
         emit_simple_event("scenario_start");
@@ -2508,6 +2546,8 @@ private:
         last_lifecycle_start_ms_ = 0;
         replay_capture_disabled_ = false;
         pending_lifecycle_end_ms_ = 0;
+        live_metric_receiver_hint_ = nullptr;
+        live_metric_receiver_hint_ms_ = 0;
         emit_simple_event("challenge_end");
         emit_simple_event("scenario_end");
         if (completed) {
@@ -2658,7 +2698,6 @@ private:
         if (!force && now < next_targets_resolve_ms_) {
             return;
         }
-        next_targets_resolve_ms_ = now + 2000;
 
         auto resolve_fn = [](const wchar_t* path) -> RC::Unreal::UFunction* {
             auto* fn = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
@@ -2739,6 +2778,12 @@ private:
         targets_.scenario_is_in_scenario_editor = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsInScenarioEditor"));
         targets_.scenario_is_currently_in_benchmark = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsCurrentlyInBenchmark"));
         register_live_metric_hooks();
+
+        const bool core_live_hooks_ready =
+            targets_.receive_seconds &&
+            (targets_.receive_challenge_tick_count || targets_.receive_challenge_tick_count_single || targets_.receive_challenge_tick_count_value_else) &&
+            (targets_.receive_score || targets_.receive_score_single || targets_.receive_score_value_else);
+        next_targets_resolve_ms_ = now + (core_live_hooks_ready ? 2000 : 250);
     }
 
     RC::Unreal::UClass* resolve_function_owner_class(RC::Unreal::UFunction* fn) {
@@ -3218,15 +3263,34 @@ private:
         if (state_receiver_instance_ && is_likely_valid_object_ptr(state_receiver_instance_) && now < next_receiver_resolve_ms_) {
             return state_receiver_instance_;
         }
+
+        if (live_metric_receiver_hint_
+            && (!is_likely_valid_object_ptr(live_metric_receiver_hint_)
+                || safe_elapsed_ms(now, live_metric_receiver_hint_ms_) > 3000)) {
+            live_metric_receiver_hint_ = nullptr;
+            live_metric_receiver_hint_ms_ = 0;
+        }
+        const bool has_recent_live_metric_receiver_hint =
+            live_metric_receiver_hint_
+            && is_likely_valid_object_ptr(live_metric_receiver_hint_)
+            && safe_elapsed_ms(now, live_metric_receiver_hint_ms_) <= 1500;
+        if (has_recent_live_metric_receiver_hint) {
+            state_receiver_instance_ = live_metric_receiver_hint_;
+            next_receiver_resolve_ms_ = now + 100;
+            return state_receiver_instance_;
+        }
+
         const bool prefer_live_activity =
             last_is_in_challenge_ == 1
             || last_is_in_scenario_ == 1
             || lifecycle_active_
+            || (std::isfinite(last_queue_time_remaining_) && last_queue_time_remaining_ > 0.0001f)
             || (std::isfinite(last_time_remaining_) && last_time_remaining_ > 0.25f);
-        const bool recent_lifecycle_start =
-            last_lifecycle_start_ms_ > 0
-            && safe_elapsed_ms(now, last_lifecycle_start_ms_) <= 1500;
-        next_receiver_resolve_ms_ = now + (prefer_live_activity ? 250 : 2000);
+        const bool challenge_expected_live =
+            last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1
+            || lifecycle_active_;
+        next_receiver_resolve_ms_ = now + (prefer_live_activity ? 50 : 1000);
 
         auto* meta = resolve_meta_game_instance(now);
         RC::StringType meta_path{};
@@ -3253,9 +3317,7 @@ private:
         }
 
         RC::Unreal::UObject* best = nullptr;
-        RC::Unreal::UObject* best_meta_scoped = nullptr;
         int best_score = -1000000;
-        int best_meta_scoped_score = -1000000;
         for (auto* obj : found) {
             if (!obj || !is_likely_valid_object_ptr(obj)) {
                 continue;
@@ -3270,55 +3332,52 @@ private:
             if (full_name.find(STR("/Engine/Transient.")) != RC::StringType::npos) score += 60;
             if (full_name.find(STR("TheMetaGameInstance")) != RC::StringType::npos) score += 200;
             if (full_name.find(STR("PerformanceIndicatorsStateReceiver_")) != RC::StringType::npos) score += 120;
+            if (!meta_path.empty()) {
+                RC::StringType prefix = meta_path;
+                prefix += STR(".");
+                if (object_path.rfind(prefix, 0) == 0) {
+                    score += 100;
+                }
+            }
+            ReceiverActivityProbe probe{};
+            if (has_recent_live_metric_receiver_hint && obj == live_metric_receiver_hint_) {
+                score += 500000;
+            }
             if (prefer_live_activity) {
-                ReceiverActivityProbe probe{};
                 if (safe_probe_state_receiver_activity(obj, probe) && probe.valid) {
+                    score += 20000;
                     if (std::isfinite(probe.seconds) && probe.seconds >= 0.0f) {
-                        score += std::min<int>(500, static_cast<int>(std::llround(probe.seconds * 25.0)));
-                        if (!recent_lifecycle_start
-                            && std::isfinite(last_seconds_) && last_seconds_ > 0.25f
-                            && (static_cast<double>(probe.seconds) + 0.20) >= static_cast<double>(last_seconds_)) {
-                            score += 250;
-                        }
-                        if (recent_lifecycle_start && probe.seconds <= 3.0f) {
-                            score += 180;
-                        }
+                        score += std::min<int>(12000, static_cast<int>(std::llround(probe.seconds * 120.0)));
                     }
                     if (probe.challenge_tick_count >= 0) {
-                        score += std::min<int>(600, probe.challenge_tick_count / 2);
-                        if (!recent_lifecycle_start
-                            && last_challenge_tick_count_ > 10
-                            && probe.challenge_tick_count + 10 >= last_challenge_tick_count_) {
-                            score += 250;
-                        }
-                        if (recent_lifecycle_start && probe.challenge_tick_count > 0) {
-                            score += 220;
-                        }
+                        score += std::min<int>(16000, probe.challenge_tick_count * 8);
                     }
                     if (std::isfinite(probe.score_total) && probe.score_total > 0.0f) {
-                        score += std::min<int>(250, static_cast<int>(std::llround(probe.score_total / 10.0)));
-                        if (recent_lifecycle_start && probe.score_total >= 0.0f) {
-                            score += 100;
+                        score += std::min<int>(6000, static_cast<int>(std::llround(probe.score_total * 40.0)));
+                    }
+
+                    const bool has_live_progress =
+                        (std::isfinite(probe.seconds) && probe.seconds > 0.050f)
+                        || (probe.challenge_tick_count > 0)
+                        || (std::isfinite(probe.score_total) && probe.score_total > 0.010f);
+                    if (challenge_expected_live) {
+                        if (has_live_progress) {
+                            score += 6000;
+                        } else {
+                            score -= 12000;
                         }
                     }
+                } else {
+                    score -= 2000;
                 }
             }
             if (score > best_score) {
                 best = obj;
                 best_score = score;
             }
-            if (!meta_path.empty()) {
-                RC::StringType prefix = meta_path;
-                prefix += STR(".");
-                if (object_path.rfind(prefix, 0) == 0 && score > best_meta_scoped_score) {
-                    best_meta_scoped = obj;
-                    best_meta_scoped_score = score;
-                }
-            }
         }
-        auto* chosen = best_meta_scoped ? best_meta_scoped : best;
-        if (chosen && is_likely_valid_object_ptr(chosen)) {
-            state_receiver_instance_ = chosen;
+        if (best && is_likely_valid_object_ptr(best)) {
+            state_receiver_instance_ = best;
         }
         return state_receiver_instance_;
     }
