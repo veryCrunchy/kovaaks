@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "node -e \"const fs=require('node:fs');const cp=require('node:child_process');const candidates=['./scripts/build-frontend-if-needed.mjs','../scripts/build-frontend-if-needed.mjs'];const script=candidates.find((p)=>fs.existsSync(p));if(script===undefined){console.error('Could not locate build-frontend-if-needed.mjs from current working directory.');process.exit(1);}const result=cp.spawnSync(process.execPath,[script],{stdio:'inherit'});process.exit(result.status===null?1:result.status);\"",
+    "beforeBuildCommand": "node ./scripts/build-frontend-if-needed.mjs",
     "frontendDist": "../dist"
   },
   "app": {
