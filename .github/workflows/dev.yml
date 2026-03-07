@@ -35,12 +35,6 @@ jobs:
         with:
           workspaces: src-tauri
 
-      - name: Cache UE4SS template/submodules
-        uses: actions/cache@v4
-        with:
-          path: external/UE4SSCPPTemplate
-          key: ${{ runner.os }}-ue4ss-template-v1
-
       - name: Cache payload pipeline artifacts
         uses: actions/cache@v4
         with:
@@ -53,6 +47,23 @@ jobs:
 
       - name: Install frontend dependencies
         run: pnpm install
+
+      - name: Reset staged payload workspace
+        shell: pwsh
+        run: |
+          $paths = @(
+            ".cache/pipeline",
+            ".cache/ue4ss-runtime",
+            "ue4ss-mod/build",
+            "ue4ss-mod/build-w64",
+            "src-tauri/ue4ss"
+          )
+
+          foreach ($path in $paths) {
+            if (Test-Path $path) {
+              Remove-Item -Path $path -Recurse -Force
+            }
+          }
 
       - name: Compute prerelease tags
         id: prerelease_meta
@@ -74,7 +85,7 @@ jobs:
         env:
           UE4SS_GITHUB_TOKEN: ${{ secrets.UE4SS_GITHUB_TOKEN }}
         run: |
-          ./scripts/dev-pipeline.ps1 -Configuration Release -ModConfiguration Release -RuntimeProfile minimal -SettingsProfile production -StrippedModBuild true -SkipFrontendInstall -SkipOverlayBuild
+          ./scripts/dev-pipeline.ps1 -Configuration Release -ModConfiguration Release -RuntimeProfile minimal -SettingsProfile production -StrippedModBuild true -NoCache -SkipFrontendInstall -SkipOverlayBuild
 
       - name: Verify staged stripped production AimMod runtime payload
         shell: pwsh
@@ -135,7 +146,7 @@ jobs:
         env:
           UE4SS_GITHUB_TOKEN: ${{ secrets.UE4SS_GITHUB_TOKEN }}
         run: |
-          ./scripts/dev-pipeline.ps1 -Configuration Release -ModConfiguration Release -RuntimeProfile minimal -SettingsProfile development -StrippedModBuild false -SkipFrontendInstall -SkipOverlayBuild
+          ./scripts/dev-pipeline.ps1 -Configuration Release -ModConfiguration Release -RuntimeProfile minimal -SettingsProfile development -StrippedModBuild false -NoCache -SkipFrontendInstall -SkipOverlayBuild
 
       - name: Verify staged development-profile AimMod runtime payload
         shell: pwsh
