@@ -525,6 +525,8 @@ mod imp {
         last_pull_event_at: Option<Instant>,
         last_state_resync_request_at: Option<Instant>,
         state_resync_pending: bool,
+        last_lifecycle_seq: Option<u64>,
+        last_lifecycle_ts_ms: Option<u64>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -1279,6 +1281,59 @@ mod imp {
         end_session_tracking(app, reason, false);
     }
 
+    fn is_lifecycle_transition_event(ev: &str) -> bool {
+        matches!(
+            ev,
+            "session_start"
+                | "session_end"
+                | "challenge_start"
+                | "scenario_start"
+                | "challenge_restart"
+                | "challenge_restarted"
+                | "scenario_restart"
+                | "scenario_restarted"
+                | "challenge_end"
+                | "scenario_end"
+                | "challenge_complete"
+                | "challenge_completed"
+                | "post_challenge_complete"
+                | "challenge_canceled"
+                | "challenge_quit"
+        )
+    }
+
+    fn should_ignore_stale_lifecycle_event(parsed: &super::BridgeParsedEvent) -> bool {
+        if !is_lifecycle_transition_event(parsed.ev.as_str()) {
+            return false;
+        }
+
+        let Ok(mut state) = bridge_session_state().lock() else {
+            return false;
+        };
+
+        if let Some(seq) = parsed.seq {
+            if state.last_lifecycle_seq.map_or(false, |prev| seq <= prev) {
+                return true;
+            }
+            state.last_lifecycle_seq = Some(seq);
+            if let Some(ts_ms) = parsed.ts_ms {
+                if state.last_lifecycle_ts_ms.map_or(true, |prev| ts_ms >= prev) {
+                    state.last_lifecycle_ts_ms = Some(ts_ms);
+                }
+            }
+            return false;
+        }
+
+        if let Some(ts_ms) = parsed.ts_ms {
+            if state.last_lifecycle_ts_ms.map_or(false, |prev| ts_ms < prev) {
+                return true;
+            }
+            state.last_lifecycle_ts_ms = Some(ts_ms);
+        }
+
+        false
+    }
+
     pub fn take_run_snapshot() -> Option<super::BridgeRunSnapshot> {
         let Ok(mut state) = run_capture_state().lock() else {
             return None;
@@ -1883,6 +1938,16 @@ mod imp {
     }
 
     fn emit_bridge_compat_events(app: &AppHandle, parsed: &super::BridgeParsedEvent) {
+        if should_ignore_stale_lifecycle_event(parsed) {
+            log::warn!(
+                "bridge: ignoring stale lifecycle event ev={} seq={:?} ts_ms={:?}",
+                parsed.ev,
+                parsed.seq,
+                parsed.ts_ms
+            );
+            return;
+        }
+
         if let Some((fn_name, ret_u32, ret_i32, _ret_f32)) = parse_class_hook_from_raw(&parsed.raw) {
             let bool_sample = ret_u32
                 .map(|v| (v & 1) == 1)

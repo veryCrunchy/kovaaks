@@ -14,6 +14,8 @@ interface BridgeMetricPayload {
   ev: string;
   value?: number | null;
   field?: string | null;
+  ts_ms?: number | null;
+  seq?: number | null;
 }
 
 export interface UseLiveScoreReturn {
@@ -39,6 +41,8 @@ export function useLiveScore(): UseLiveScoreReturn {
   const lastBridgeActivityAtMs = useRef<number>(0);
   const isInScenario = useRef(false);
   const isInChallenge = useRef(false);
+  const lastStateSeq = useRef<number>(0);
+  const lastStateTsMs = useRef<number>(0);
 
   const sessionStartTime = useRef<number>(0); // ms timestamp; 0 = no active session
 
@@ -59,6 +63,30 @@ export function useLiveScore(): UseLiveScoreReturn {
       inactivityTimer.current = null;
     }
     stopElapsedTicker();
+  };
+
+  const shouldIgnoreStaleStateEvent = (payload: BridgeMetricPayload) => {
+    const seq = payload.seq;
+    if (seq != null && Number.isFinite(seq)) {
+      if (seq <= lastStateSeq.current) {
+        return true;
+      }
+      lastStateSeq.current = seq;
+      if (payload.ts_ms != null && Number.isFinite(payload.ts_ms)) {
+        lastStateTsMs.current = Math.max(lastStateTsMs.current, payload.ts_ms);
+      }
+      return false;
+    }
+
+    const tsMs = payload.ts_ms;
+    if (tsMs != null && Number.isFinite(tsMs)) {
+      if (tsMs < lastStateTsMs.current) {
+        return true;
+      }
+      lastStateTsMs.current = tsMs;
+    }
+
+    return false;
   };
 
   const armSessionHeartbeat = () => {
@@ -143,6 +171,9 @@ export function useLiveScore(): UseLiveScoreReturn {
         || payload.ev === "scenario_restart"
         || payload.ev === "scenario_restarted"
       ) {
+        if (shouldIgnoreStaleStateEvent(payload)) {
+          return;
+        }
         isInChallenge.current = true;
         isInScenario.current = true;
         handleExplicitSessionStart(now);
@@ -158,11 +189,17 @@ export function useLiveScore(): UseLiveScoreReturn {
         || payload.ev === "challenge_canceled"
         || payload.ev === "challenge_quit"
       ) {
+        if (shouldIgnoreStaleStateEvent(payload)) {
+          return;
+        }
         handleExplicitSessionEnd();
         return;
       }
 
       if (payload.ev === "pull_is_in_challenge") {
+        if (shouldIgnoreStaleStateEvent(payload)) {
+          return;
+        }
         const next = (payload.value ?? 0) > 0.5;
         isInChallenge.current = next;
         if (next) {
@@ -174,6 +211,9 @@ export function useLiveScore(): UseLiveScoreReturn {
       }
 
       if (payload.ev === "pull_is_in_scenario") {
+        if (shouldIgnoreStaleStateEvent(payload)) {
+          return;
+        }
         const next = (payload.value ?? 0) > 0.5;
         isInScenario.current = next;
         if (next) {
