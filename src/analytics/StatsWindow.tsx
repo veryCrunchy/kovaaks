@@ -1941,8 +1941,8 @@ function ReplayTab({
   );
   const [replayData, setReplayData] = useState<ReplayData | null>(null);
   const [loading, setLoading] = useState(false);
-  const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
-  const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
+  // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
+  // const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
 
   useEffect(() => {
     if (!selectedId) { setReplayData(null); return; }
@@ -1962,9 +1962,9 @@ function ReplayTab({
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
   const runSnapshot: BridgeRunSnapshot | null = replayData?.run_snapshot ?? null;
   const selectedShotTiming = selectedRecord?.shot_timing ?? null;
-  const hasInGameTickStream =
-    (runSnapshot?.tick_stream_v1?.keyframes?.length ?? 0) > 0
-    || (runSnapshot?.tick_stream_v1?.deltas?.length ?? 0) > 0;
+  // const hasInGameTickStream =
+  //   (runSnapshot?.tick_stream_v1?.keyframes?.length ?? 0) > 0
+  //   || (runSnapshot?.tick_stream_v1?.deltas?.length ?? 0) > 0;
   const runTimeline = useMemo(() => runSnapshot?.timeline ?? [], [runSnapshot]);
   const hasRunTimelineSignal = useMemo(
     () => runTimeline.some((point) =>
@@ -2014,33 +2014,33 @@ function ReplayTab({
       : null
     );
 
-  const handlePlayInGameReplay = async () => {
-    if (!selectedId) return;
-    setInGameReplayBusy(true);
-    setInGameReplayStatus(null);
-    try {
-      await invoke("replay_play_in_game", { sessionId: selectedId, speed: 1.0 });
-      setInGameReplayStatus("Streaming replay to game...");
-    } catch (err) {
-      setInGameReplayStatus(String(err));
-    } finally {
-      setInGameReplayBusy(false);
-    }
-  };
+  // In-game replay logic disabled for development. Logic is preserved but not executed.
+  // const handlePlayInGameReplay = async () => {
+  //   if (!selectedId) return;
+  //   setInGameReplayBusy(true);
+  //   setInGameReplayStatus(null);
+  //   try {
+  //     await invoke("replay_play_in_game", { sessionId: selectedId, speed: 1.0 });
+  //     setInGameReplayStatus("Streaming replay to game...");
+  //   } catch (err) {
+  //     setInGameReplayStatus(String(err));
+  //   } finally {
+  //     setInGameReplayBusy(false);
+  //   }
+  // };
 
-  const handleStopInGameReplay = async () => {
-    setInGameReplayBusy(true);
-    setInGameReplayStatus(null);
-    try {
-      await invoke("replay_stop_in_game");
-      setInGameReplayStatus("Stopped in-game replay.");
-    } catch (err) {
-      setInGameReplayStatus(String(err));
-    } finally {
-      setInGameReplayBusy(false);
-    }
-  };
-  // Worst-moment clips removed — full interactive viewer is shown instead
+  // const handleStopInGameReplay = async () => {
+  //   setInGameReplayBusy(true);
+  //   setInGameReplayStatus(null);
+  //   try {
+  //     await invoke("replay_stop_in_game");
+  //     setInGameReplayStatus("Stopped in-game replay.");
+  //   } catch (err) {
+  //     setInGameReplayStatus(String(err));
+  //   } finally {
+  //     setInGameReplayBusy(false);
+  //   }
+  // };
 
   if (replayRecords.length === 0) {
     return (
@@ -2132,7 +2132,8 @@ function ReplayTab({
       )}
       {!loading && runSnapshot && selectedRecord && (
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          <div style={CHART_STYLE}>
+          {/* In-Game Replay UI hidden for development. */}
+          {/* <div style={CHART_STYLE}>
             <SectionTitle>In-Game Replay</SectionTitle>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <button
@@ -2178,7 +2179,7 @@ function ReplayTab({
                 {inGameReplayStatus}
               </div>
             )}
-          </div>
+          </div> */}
 
           <div style={CHART_STYLE}>
             <SectionTitle>Bridge run stats (persisted)</SectionTitle>
