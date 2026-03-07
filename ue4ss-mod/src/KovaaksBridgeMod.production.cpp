@@ -2958,11 +2958,13 @@ private:
         const bool known_in_scenario = is_in_scenario >= 0;
         const bool challenge_active_signal = known_in_challenge && (is_in_challenge != 0);
         const bool scenario_active_signal = known_in_scenario && (is_in_scenario != 0);
-        bool active_signal = challenge_active_signal || scenario_active_signal;
-        if (!known_in_challenge && !known_in_scenario) {
-            active_signal = runtime_active_hint;
-        } else if (!active_signal && runtime_active_hint && lifecycle_active_) {
-            active_signal = true;
+        bool active_signal = challenge_active_signal;
+        if (!active_signal && runtime_active_hint) {
+            if (!known_in_challenge && !known_in_scenario) {
+                active_signal = true;
+            } else if (scenario_active_signal || lifecycle_active_ || has_positive_float(time_remaining) || progress_signal) {
+                active_signal = true;
+            }
         }
 
         if (!lifecycle_initialized_) {
@@ -3004,7 +3006,7 @@ private:
             return;
         }
 
-        if (known_in_challenge || known_in_scenario) {
+        if (known_in_challenge) {
             constexpr uint64_t k_state_end_confirm_ms = 120;
             if (runtime_active_hint) {
                 last_lifecycle_signal_ms_ = now;
