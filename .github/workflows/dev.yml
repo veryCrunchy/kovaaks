@@ -124,6 +124,17 @@ jobs:
             throw "Expected settings profile 'production' but found '$settingsProfile'."
           }
 
+          Write-Host "==> Staged prod payload hashes"
+          Get-FileHash "src-tauri/ue4ss/kovaaks_rust_core.dll" -Algorithm SHA256 | ForEach-Object {
+            Write-Host "kovaaks_rust_core.dll sha256: $($_.Hash.ToLowerInvariant())"
+          }
+          Get-FileHash "src-tauri/ue4ss/Mods/KovaaksBridgeMod/dlls/main.dll" -Algorithm SHA256 | ForEach-Object {
+            Write-Host "main.dll sha256: $($_.Hash.ToLowerInvariant())"
+          }
+          Get-FileHash $runtimeDll.FullName -Algorithm SHA256 | ForEach-Object {
+            Write-Host "$($runtimeDll.Name) sha256: $($_.Hash.ToLowerInvariant())"
+          }
+
       - name: Build and publish prod-on-main pre-release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -140,6 +151,18 @@ jobs:
           includeUpdaterJson: false
           assetNamePattern: '[name]-pre-[version]-[platform]-[arch][setup][ext]'
           args: --target x86_64-pc-windows-msvc
+
+      - name: Log built prod bundle hashes
+        shell: pwsh
+        run: |
+          $bundleRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+          if (Test-Path $bundleRoot) {
+            Write-Host "==> Built prod bundle artifact hashes"
+            Get-ChildItem $bundleRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              Write-Host "$($_.FullName) sha256: $hash"
+            }
+          }
 
       - name: Stage development-profile AimMod runtime payload
         shell: pwsh
@@ -185,6 +208,17 @@ jobs:
             throw "Expected settings profile 'development' but found '$settingsProfile'."
           }
 
+          Write-Host "==> Staged dev payload hashes"
+          Get-FileHash "src-tauri/ue4ss/kovaaks_rust_core.dll" -Algorithm SHA256 | ForEach-Object {
+            Write-Host "kovaaks_rust_core.dll sha256: $($_.Hash.ToLowerInvariant())"
+          }
+          Get-FileHash "src-tauri/ue4ss/Mods/KovaaksBridgeMod/dlls/main.dll" -Algorithm SHA256 | ForEach-Object {
+            Write-Host "main.dll sha256: $($_.Hash.ToLowerInvariant())"
+          }
+          Get-FileHash $runtimeDll.FullName -Algorithm SHA256 | ForEach-Object {
+            Write-Host "$($runtimeDll.Name) sha256: $($_.Hash.ToLowerInvariant())"
+          }
+
       - name: Build and publish dev pre-release
         uses: tauri-apps/tauri-action@v0
         env:
@@ -201,3 +235,15 @@ jobs:
           includeUpdaterJson: false
           assetNamePattern: '[name]-pre-debug-[version]-[platform]-[arch][setup][ext]'
           args: --target x86_64-pc-windows-msvc
+
+      - name: Log built dev bundle hashes
+        shell: pwsh
+        run: |
+          $bundleRoot = "src-tauri/target/x86_64-pc-windows-msvc/release/bundle"
+          if (Test-Path $bundleRoot) {
+            Write-Host "==> Built dev bundle artifact hashes"
+            Get-ChildItem $bundleRoot -Recurse -File | Sort-Object FullName | ForEach-Object {
+              $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+              Write-Host "$($_.FullName) sha256: $hash"
+            }
+          }
