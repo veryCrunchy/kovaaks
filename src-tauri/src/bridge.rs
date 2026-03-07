@@ -310,8 +310,8 @@ mod imp {
         VIRTUAL_KEY, VK_CONTROL,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GW_OWNER, GetWindow, GetWindowThreadProcessId, IsWindowVisible, SW_RESTORE,
-        SetForegroundWindow, ShowWindow,
+        EnumWindows, GW_OWNER, GetForegroundWindow, GetWindow, GetWindowThreadProcessId,
+        IsWindowVisible, SW_RESTORE, SetForegroundWindow, ShowWindow,
     };
     use windows::core::{BOOL, PCSTR};
 
@@ -335,7 +335,7 @@ mod imp {
     const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
-    const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(5);
+    const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(8);
     // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
     const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
 
@@ -427,9 +427,17 @@ mod imp {
     }
 
     fn ensure_game_ready_for_injection(pid: u32) -> Result<(), String> {
-        if find_main_window_for_pid(pid).is_none() {
+        let Some(main_hwnd) = find_main_window_for_pid(pid) else {
             return Err(format!(
                 "{}: waiting for KovaaK's main window",
+                super::INJECTION_DEFERRED_ERROR_PREFIX
+            ));
+        };
+
+        let fg = unsafe { GetForegroundWindow() };
+        if fg.0.is_null() || fg != main_hwnd {
+            return Err(format!(
+                "{}: waiting for KovaaK's foreground window focus",
                 super::INJECTION_DEFERRED_ERROR_PREFIX
             ));
         }
@@ -4424,7 +4432,16 @@ mod imp {
         if rel == "Mods/mods.txt" {
             return true;
         }
-        if rel == "Mods/KovaaksBridgeMod" || rel.starts_with("Mods/KovaaksBridgeMod/") {
+        if rel == "Mods/KovaaksBridgeMod" && is_dir {
+            return true;
+        }
+        if rel == "Mods/KovaaksBridgeMod/dlls" && is_dir {
+            return true;
+        }
+        if rel == "Mods/KovaaksBridgeMod/mod.json"
+            || rel == "Mods/KovaaksBridgeMod/enabled.txt"
+            || rel == "Mods/KovaaksBridgeMod/dlls/main.dll"
+        {
             return true;
         }
 
