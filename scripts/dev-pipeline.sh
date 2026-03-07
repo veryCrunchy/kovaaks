@@ -440,6 +440,10 @@ sdk_headers_present() {
   [[ "$has_cpp_user_mod" -eq 1 && "$has_hooks" -eq 1 && "$has_uobj_globals" -eq 1 && "$has_dyn_output" -eq 1 ]]
 }
 
+PREFERRED_RE_UE4SS_REF="${KOVAAKS_RE_UE4SS_REF:-733e59695ec01e8ae74590e33345a5e8f4e12808}"
+PREFERRED_UEPSEUDO_REF="${KOVAAKS_UEPSEUDO_REF:-f55ddc76b79c32e175ba7cb34095cbf752e9028d}"
+PREFERRED_PATTERNSLEUTH_REF="${KOVAAKS_PATTERNSLEUTH_REF:-75b124983ec08fc2e32d53af1388d3cb3b5d31b8}"
+
 resolve_ue4ss_github_token() {
   local candidate=""
   for candidate in "${UE4SS_GITHUB_TOKEN:-}" "${GH_TOKEN:-}" "${GITHUB_TOKEN:-}"; do
@@ -449,6 +453,36 @@ resolve_ue4ss_github_token() {
     fi
   done
   return 1
+}
+
+set_git_repo_exact_ref() {
+  local repo_path="$1"
+  local ref="$2"
+  shift 2 || true
+  local -a git_auth_args=("$@")
+
+  [[ -n "$repo_path" && -n "$ref" && -d "$repo_path/.git" || -f "$repo_path/.git" ]] || return 0
+
+  local current=""
+  current="$(git -C "$repo_path" rev-parse HEAD 2>/dev/null || true)"
+  if [[ "$current" == "$ref" ]]; then
+    return 0
+  fi
+
+  echo "==> Pinning $(basename "$repo_path") to $ref"
+  git "${git_auth_args[@]}" -C "$repo_path" fetch --depth 1 origin "$ref"
+  git "${git_auth_args[@]}" -C "$repo_path" checkout --force FETCH_HEAD
+}
+
+apply_ue4ss_pinned_revisions() {
+  local template_root="$1"
+  shift || true
+  local -a git_auth_args=("$@")
+
+  [[ -d "$template_root" ]] || return 0
+  set_git_repo_exact_ref "$template_root" "$PREFERRED_RE_UE4SS_REF" "${git_auth_args[@]}"
+  set_git_repo_exact_ref "$template_root/deps/first/Unreal" "$PREFERRED_UEPSEUDO_REF" "${git_auth_args[@]}"
+  set_git_repo_exact_ref "$template_root/deps/first/patternsleuth" "$PREFERRED_PATTERNSLEUTH_REF" "${git_auth_args[@]}"
 }
 
 maybe_init_template_submodules() {
@@ -500,6 +534,7 @@ maybe_init_template_submodules() {
       git "${git_auth_args[@]}" -C "$template_root" submodule sync --recursive
       git "${git_auth_args[@]}" -C "$template_root" submodule update --init --recursive --depth 1
     fi
+    apply_ue4ss_pinned_revisions "$template_root" "${git_auth_args[@]}"
   ) && return 0
 
   warn "Submodule init via repo defaults failed; trying HTTPS URL overrides."
@@ -518,6 +553,7 @@ maybe_init_template_submodules() {
         -c submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git \
         submodule update --init --recursive --depth 1
     fi
+    apply_ue4ss_pinned_revisions "$template_root" "${git_auth_args[@]}"
   ) && return 0
 
   warn "Submodule init failed. Continuing to probe existing SDK paths."

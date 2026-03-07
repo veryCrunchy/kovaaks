@@ -168,6 +168,117 @@ function Get-CommandVersion([string]$Name, [string[]]$Args = @("--version")) {
   }
 }
 
+function Get-GitHead([string]$RepoPath) {
+  if ([string]::IsNullOrWhiteSpace($RepoPath)) {
+    return $null
+  }
+  $gitPath = Join-Path $RepoPath ".git"
+  if (-not (Test-Path $gitPath)) {
+    return $null
+  }
+  try {
+    $head = & git -C $RepoPath rev-parse HEAD 2>$null | Select-Object -First 1
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($head)) {
+      return $head.Trim()
+    }
+  } catch {
+  }
+  return $null
+}
+
+function Write-CommandBannerLine([string]$Label, [string]$CommandPath, [string[]]$Args = @()) {
+  if ([string]::IsNullOrWhiteSpace($CommandPath) -or -not (Test-Path $CommandPath)) {
+    return
+  }
+  try {
+    $line = & $CommandPath @Args 2>&1 |
+      ForEach-Object { $_.ToString().Trim() } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -First 1
+    if (-not [string]::IsNullOrWhiteSpace($line)) {
+      Write-Host ("==> {0}: {1}" -f $Label, $line)
+    }
+  } catch {
+  }
+}
+
+function Write-FileHashLine([string]$Label, [string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue) -or -not (Test-Path $PathValue -PathType Leaf)) {
+    return
+  }
+  try {
+    $hashObj = Get-FileHash -LiteralPath $PathValue -Algorithm SHA256 -ErrorAction Stop
+    if ($null -ne $hashObj -and -not [string]::IsNullOrWhiteSpace($hashObj.Hash)) {
+      Write-Host ("==> {0} sha256: {1}" -f $Label, $hashObj.Hash.ToLowerInvariant())
+    }
+  } catch {
+  }
+}
+
+function Write-VisualStudioToolchainSummary() {
+  $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+  if (-not (Test-Path $vswhere)) {
+    return
+  }
+
+  try {
+    $installPath = & $vswhere -latest -products * -property installationPath 2>$null | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($installPath)) {
+      return
+    }
+    $installPath = $installPath.Trim()
+    Write-Host "==> Visual Studio: $installPath"
+
+    $msbuildExe = Join-Path $installPath "MSBuild\Current\Bin\MSBuild.exe"
+    Write-CommandBannerLine -Label "MSBuild" -CommandPath $msbuildExe -Args @("-version", "-nologo")
+
+    $msvcRoot = Join-Path $installPath "VC\Tools\MSVC"
+    if (Test-Path $msvcRoot) {
+      $toolsetDir = Get-ChildItem -Path $msvcRoot -Directory -ErrorAction SilentlyContinue |
+        Sort-Object Name |
+        Select-Object -Last 1
+      if ($null -ne $toolsetDir) {
+        Write-Host "==> MSVC toolset dir: $($toolsetDir.Name)"
+        Write-CommandBannerLine -Label "cl" -CommandPath (Join-Path $toolsetDir.FullName "bin\Hostx64\x64\cl.exe")
+        Write-CommandBannerLine -Label "lib" -CommandPath (Join-Path $toolsetDir.FullName "bin\Hostx64\x64\lib.exe")
+        Write-CommandBannerLine -Label "link" -CommandPath (Join-Path $toolsetDir.FullName "bin\Hostx64\x64\link.exe")
+      }
+    }
+  } catch {
+  }
+}
+
+function Write-Ue4ssSdkRevisionSummary([string]$SdkDir) {
+  if ([string]::IsNullOrWhiteSpace($SdkDir)) {
+    return
+  }
+
+  Write-Host "==> UE4SS SDK: $SdkDir"
+
+  $reUe4ssRoot = Resolve-NativePath (Join-Path $SdkDir "..")
+  $templateRoot = Resolve-NativePath (Join-Path $reUe4ssRoot "..")
+
+  $templateHead = Get-GitHead $templateRoot
+  if (-not [string]::IsNullOrWhiteSpace($templateHead)) {
+    Write-Host "==> UE4SSCPPTemplate HEAD: $templateHead"
+  }
+
+  $reUe4ssHead = Get-GitHead $reUe4ssRoot
+  if (-not [string]::IsNullOrWhiteSpace($reUe4ssHead)) {
+    Write-Host "==> RE-UE4SS HEAD: $reUe4ssHead"
+  }
+
+  $uePseudoHead = Get-GitHead (Join-Path $reUe4ssRoot "deps\first\Unreal")
+  if (-not [string]::IsNullOrWhiteSpace($uePseudoHead)) {
+    Write-Host "==> UEPseudo HEAD: $uePseudoHead"
+  }
+
+  $patternsleuthHead = Get-GitHead (Join-Path $reUe4ssRoot "deps\first\patternsleuth")
+  if (-not [string]::IsNullOrWhiteSpace($patternsleuthHead)) {
+    Write-Host "==> patternsleuth HEAD: $patternsleuthHead"
+  }
+}
+
 function Get-StringSha256([string]$Value) {
   $bytes = [System.Text.Encoding]::UTF8.GetBytes($Value)
   $hash = [System.Security.Cryptography.SHA256]::Create().ComputeHash($bytes)
@@ -428,6 +539,10 @@ function Test-SdkHeaders([string]$SdkDir) {
   return ($hasCppUserMod -and $hasHooks -and $hasUObjectGlobals -and $hasDynamicOutput)
 }
 
+$script:PreferredReUe4ssRef = if (-not [string]::IsNullOrWhiteSpace($env:KOVAAKS_RE_UE4SS_REF)) { $env:KOVAAKS_RE_UE4SS_REF.Trim() } else { "733e59695ec01e8ae74590e33345a5e8f4e12808" }
+$script:PreferredUePseudoRef = if (-not [string]::IsNullOrWhiteSpace($env:KOVAAKS_UEPSEUDO_REF)) { $env:KOVAAKS_UEPSEUDO_REF.Trim() } else { "f55ddc76b79c32e175ba7cb34095cbf752e9028d" }
+$script:PreferredPatternsleuthRef = if (-not [string]::IsNullOrWhiteSpace($env:KOVAAKS_PATTERNSLEUTH_REF)) { $env:KOVAAKS_PATTERNSLEUTH_REF.Trim() } else { "75b124983ec08fc2e32d53af1388d3cb3b5d31b8" }
+
 function Get-Ue4ssGithubToken() {
   $candidates = @(
     $env:UE4SS_GITHUB_TOKEN,
@@ -459,6 +574,39 @@ function Get-GitHubAuthGitConfigArgs([string]$Token, [bool]$ForceNonInteractive)
   }
 
   return $args
+}
+
+function Set-GitRepoExactRef([string]$RepoPath, [string]$Ref, [string[]]$GitAuthArgs = @()) {
+  if ([string]::IsNullOrWhiteSpace($RepoPath) -or [string]::IsNullOrWhiteSpace($Ref) -or -not (Test-Path $RepoPath -PathType Container)) {
+    return
+  }
+
+  $current = Get-GitHead $RepoPath
+  if ($current -eq $Ref) {
+    return
+  }
+
+  Write-Host "==> Pinning $(Split-Path -Leaf $RepoPath) to $Ref"
+  & git @GitAuthArgs -C $RepoPath fetch --depth 1 origin $Ref
+  if ($LASTEXITCODE -ne 0) { throw "git fetch failed for $RepoPath @ $Ref" }
+  & git @GitAuthArgs -C $RepoPath checkout --force FETCH_HEAD
+  if ($LASTEXITCODE -ne 0) { throw "git checkout failed for $RepoPath @ $Ref" }
+}
+
+function Apply-Ue4ssPinnedRevisions([string]$TemplateParent, [string]$TemplateRoot, [string[]]$GitAuthArgs = @()) {
+  if ([string]::IsNullOrWhiteSpace($TemplateParent) -or [string]::IsNullOrWhiteSpace($TemplateRoot)) {
+    return
+  }
+  if (-not (Test-Path $TemplateRoot -PathType Container)) {
+    return
+  }
+
+  Set-GitRepoExactRef -RepoPath $TemplateRoot -Ref $script:PreferredReUe4ssRef -GitAuthArgs $GitAuthArgs
+
+  $unrealRepo = Join-Path $TemplateRoot "deps/first/Unreal"
+  $patternsleuthRepo = Join-Path $TemplateRoot "deps/first/patternsleuth"
+  Set-GitRepoExactRef -RepoPath $unrealRepo -Ref $script:PreferredUePseudoRef -GitAuthArgs $GitAuthArgs
+  Set-GitRepoExactRef -RepoPath $patternsleuthRepo -Ref $script:PreferredPatternsleuthRef -GitAuthArgs $GitAuthArgs
 }
 
 function Initialize-TemplateSubmodules([string]$RepoRoot) {
@@ -503,6 +651,7 @@ function Initialize-TemplateSubmodules([string]$RepoRoot) {
       if ($LASTEXITCODE -ne 0) { throw "git submodule sync failed" }
       & git @gitAuthArgs -C $templateRoot submodule update --init --recursive --depth 1
       if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
+      Apply-Ue4ssPinnedRevisions -TemplateParent $templateParent -TemplateRoot $templateRoot -GitAuthArgs $gitAuthArgs
       return
     } catch {
       Write-Warning "Submodule init via repo defaults failed; trying HTTPS URL overrides."
@@ -516,6 +665,7 @@ function Initialize-TemplateSubmodules([string]$RepoRoot) {
         -c "submodule.deps/first/patternsleuth.url=https://github.com/trumank/patternsleuth.git" `
         submodule update --init --recursive --depth 1
       if ($LASTEXITCODE -ne 0) { throw "git submodule update failed" }
+      Apply-Ue4ssPinnedRevisions -TemplateParent $templateParent -TemplateRoot $templateRoot -GitAuthArgs $gitAuthArgs
       return
     } catch {
       Write-Warning "Submodule init with public HTTPS failed."
@@ -811,6 +961,7 @@ if ($StrippedModBuild) {
 } else {
   Write-Host "==> Mod source profile: full development"
 }
+Write-VisualStudioToolchainSummary
 if ($script:UseCache) {
   Write-Host "==> Cache: enabled ($script:PipelineCacheDir)"
 } else {
@@ -870,7 +1021,7 @@ if (-not $SkipModBuild) {
   if ($repoRoot -match '^[A-Za-z]:\\' -and $Ue4ssSdkDir.StartsWith("\\") -and $originalRepoRoot.StartsWith("\\")) {
     $Ue4ssSdkDir = Convert-ToMappedRepoPath -PathValue $Ue4ssSdkDir -OriginalRepoRoot $originalRepoRoot -MappedRepoRoot $repoRoot
   }
-  Write-Host "==> UE4SS SDK: $Ue4ssSdkDir"
+  Write-Ue4ssSdkRevisionSummary -SdkDir $Ue4ssSdkDir
 }
 
 $profileDir = if ($Configuration -eq "Release") { "release" } else { "debug" }
@@ -906,6 +1057,7 @@ if (-not $SkipRustCoreBuild) {
   }
   $rustCoreDll = Resolve-NativePath "ue4ss-rust-core/target/$target/$profileDir/ue4ss_rust_core.dll"
 }
+Write-FileHashLine -Label "ue4ss_rust_core.dll" -PathValue $rustCoreDll
 
 $modBuildDir = Join-Path (Join-Path $repoRoot "ue4ss-mod") "build"
 $modMainDll = $null
@@ -1004,6 +1156,7 @@ if (-not $SkipModBuild) {
     Set-CacheStamp -StepName "ue4ss-mod-$ModConfiguration" -Key $modKey
   }
 }
+Write-FileHashLine -Label "main.dll" -PathValue $modMainDll
 
 if (-not $SkipStage) {
   if (-not $rustCoreDll -or -not (Test-Path $rustCoreDll -PathType Leaf)) {
@@ -1059,6 +1212,10 @@ if (-not $SkipStage) {
   # The running dev/release app syncs from target profile payload folders.
   # Keep those in sync with src-tauri/ue4ss even when stage is a cache hit.
   Sync-Ue4ssPayloadToTauriTargets -RepoRoot $repoRoot -TargetTriple $target
+
+  Write-FileHashLine -Label "staged UE4SS.dll" -PathValue (Join-Path $repoRoot "src-tauri/ue4ss/UE4SS.dll")
+  Write-FileHashLine -Label "staged main.dll" -PathValue (Join-Path $repoRoot "src-tauri/ue4ss/Mods/KovaaksBridgeMod/dlls/main.dll")
+  Write-FileHashLine -Label "staged kovaaks_rust_core.dll" -PathValue (Join-Path $repoRoot "src-tauri/ue4ss/kovaaks_rust_core.dll")
 }
 
 if (-not $SkipOverlayBuild) {
