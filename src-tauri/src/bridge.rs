@@ -906,7 +906,7 @@ mod imp {
         let mut time_hint_secs = None;
 
         match parsed.ev.as_str() {
-            "session_start" | "challenge_start" | "scenario_start" => {
+            "session_start" | "challenge_start" => {
                 let duration_hint = state.metrics.duration_secs;
                 ensure_run_capture_started_locked(&mut state, duration_hint);
                 state.event_counts.challenge_start_events =
@@ -918,7 +918,7 @@ mod imp {
                 state.event_counts.challenge_queued_events =
                     state.event_counts.challenge_queued_events.saturating_add(1);
             }
-            "challenge_end" | "scenario_end" => {
+            "challenge_end" => {
                 let duration_hint = state.metrics.duration_secs;
                 ensure_run_capture_started_locked(&mut state, duration_hint);
                 state.event_counts.challenge_end_events =
@@ -2003,15 +2003,15 @@ mod imp {
             "session_end" => {
                 handle_session_end_signal(app, "bridge:session_end");
             }
-            "challenge_start" | "scenario_start" => {
+            "challenge_start" => {
                 begin_session_tracking(app, "bridge:challenge_start", true);
                 challenge_transition_active = Some(true);
             }
-            "challenge_restart" | "challenge_restarted" | "scenario_restart" | "scenario_restarted" => {
+            "challenge_restart" | "challenge_restarted" => {
                 restart_session_tracking(app, "bridge:challenge_restart", true);
                 challenge_transition_active = Some(true);
             }
-            "challenge_end" | "scenario_end" => {
+            "challenge_end" => {
                 end_session_tracking(app, "bridge:challenge_end", true);
                 challenge_transition_active = Some(false);
             }
@@ -2499,17 +2499,21 @@ mod imp {
                 let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
             }
 
-            let challenge_context = state.stats.is_in_challenge == Some(true)
-                || state.stats.is_in_scenario == Some(true)
-                || state
-                    .stats
-                    .challenge_seconds_total
-                    .map_or(false, |v| v > 0.25)
-                || state.stats.time_remaining.map_or(false, |v| v > 0.25);
-            let has_active_session_metrics = challenge_context
-                || state.stats.accuracy_shots.map_or(false, |v| v > 0)
+            let paused = state.stats.scenario_is_paused == Some(true);
+            let queued = next_game_state_code == 2;
+            let challenge_context = next_game_state_code == 4
+                || (state.stats.is_in_challenge == Some(true) && !paused)
+                || (!paused
+                    && !queued
+                    && (state
+                        .stats
+                        .challenge_seconds_total
+                        .map_or(false, |v| v > 0.25)
+                        || state.stats.time_remaining.map_or(false, |v| v > 0.25)));
+            let progress_metrics = state.stats.accuracy_shots.map_or(false, |v| v > 0)
                 || state.stats.kills.map_or(false, |v| v > 0)
                 || state.stats.damage_dealt.map_or(false, |v| v > 0.0);
+            let has_active_session_metrics = challenge_context || (!paused && !queued && progress_metrics);
             let recovery_challenge_active = challenge_context;
             recovery_signal = Some((has_active_session_metrics, recovery_challenge_active));
         }
