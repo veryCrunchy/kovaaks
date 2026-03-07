@@ -36,6 +36,8 @@ pub struct BridgeParsedEvent {
     pub value: Option<f64>,
     pub total: Option<f64>,
     pub delta: Option<f64>,
+    pub ts_ms: Option<u64>,
+    pub seq: Option<u64>,
     pub field: Option<String>,
     pub source: Option<String>,
     pub method: Option<String>,
@@ -177,6 +179,8 @@ fn parse_bridge_payload(raw: &str) -> Option<BridgeParsedEvent> {
         value: parse_payload_number(obj, "value").or_else(|| parse_payload_number(obj, "v")),
         total: parse_payload_number(obj, "total").or_else(|| parse_payload_number(obj, "t")),
         delta: parse_payload_number(obj, "delta").or_else(|| parse_payload_number(obj, "d")),
+        ts_ms: parse_payload_u64(obj, "ts_ms"),
+        seq: parse_payload_u64(obj, "seq"),
         field: parse_payload_string(obj, "field"),
         source,
         method: parse_payload_string(obj, "method"),
@@ -196,6 +200,18 @@ fn parse_payload_number(
     match obj.get(key) {
         Some(serde_json::Value::Number(n)) => n.as_f64(),
         Some(serde_json::Value::String(s)) => s.parse::<f64>().ok(),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn parse_payload_u64(
+    obj: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<u64> {
+    match obj.get(key) {
+        Some(serde_json::Value::Number(n)) => n.as_u64(),
+        Some(serde_json::Value::String(s)) => s.parse::<u64>().ok(),
         _ => None,
     }
 }
@@ -1824,6 +1840,8 @@ mod imp {
                 value: None,
                 total: None,
                 delta: None,
+                ts_ms: None,
+                seq: None,
                 field: Some(name),
                 source: Some(source.to_string()),
                 method: Some("state_manager_metadata".to_string()),

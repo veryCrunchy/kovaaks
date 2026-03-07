@@ -4,6 +4,10 @@ mod pipe;
 
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+static EVENT_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn sanitize_event_name(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
@@ -26,11 +30,57 @@ fn cstr_opt<'a>(ptr: *const c_char) -> Option<&'a CStr> {
     Some(unsafe { CStr::from_ptr(ptr) })
 }
 
+fn event_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn contains_json_key(json: &str, key: &str) -> bool {
+    json.contains(key)
+}
+
+fn stamp_json_payload(json: &str) -> String {
+    let trimmed = json.trim();
+    if !(trimmed.starts_with('{') && trimmed.ends_with('}')) {
+        return json.to_string();
+    }
+
+    let has_ts = contains_json_key(trimmed, "\"ts_ms\":");
+    let has_seq = contains_json_key(trimmed, "\"seq\":");
+    if has_ts && has_seq {
+        return trimmed.to_string();
+    }
+
+    let ts_ms = event_timestamp_ms();
+    let seq = EVENT_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut out = String::with_capacity(trimmed.len() + 48);
+    let body = &trimmed[..trimmed.len() - 1];
+    out.push_str(body);
+
+    if trimmed.len() > 2 {
+        out.push(',');
+    }
+    if !has_ts {
+        out.push_str(&format!("\"ts_ms\":{}", ts_ms));
+        if !has_seq {
+            out.push(',');
+        }
+    }
+    if !has_seq {
+        out.push_str(&format!("\"seq\":{}", seq));
+    }
+    out.push('}');
+    out
+}
+
 fn emit_json(json: &str) -> bool {
+    let payload = stamp_json_payload(json);
     if !pipe::is_connected() && pipe::connect().is_err() {
         return false;
     }
-    pipe::write_event(json)
+    pipe::write_event(&payload)
 }
 
 fn emit_i32(ev: &str, v: i32) -> bool {
