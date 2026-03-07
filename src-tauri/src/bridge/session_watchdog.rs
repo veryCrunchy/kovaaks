@@ -37,7 +37,11 @@ fn request_state_sync_if_flow_stalled() {
     };
 
     if should_request {
-        request_mod_state_sync("bridge:pull_flow_stall");
+        if !request_mod_state_sync("bridge:pull_flow_stall") {
+            let mut state = bridge_session_state().lock().unwrap();
+            state.state_resync_pending = false;
+            state.last_state_resync_request_at = None;
+        }
     }
 }
 

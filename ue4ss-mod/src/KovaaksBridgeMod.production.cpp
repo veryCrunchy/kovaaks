@@ -804,6 +804,7 @@ private:
         int32_t current_is_in_challenge,
         int32_t current_is_in_scenario,
         int32_t current_is_in_scenario_editor,
+        int32_t current_scenario_is_paused,
         float current_queue_time_remaining,
         float current_score_total,
         float current_score_total_derived,
@@ -855,7 +856,7 @@ private:
         s_last_pull_is_in_scenario = sanitize_state(current_is_in_scenario, last_is_in_scenario_);
         s_last_pull_is_in_scenario_editor = sanitize_state(current_is_in_scenario_editor, last_is_in_scenario_editor_);
         s_last_pull_scenario_is_in_editor = s_last_pull_is_in_scenario_editor;
-        s_last_pull_scenario_is_paused = -1;
+        s_last_pull_scenario_is_paused = sanitize_state(current_scenario_is_paused, s_last_pull_scenario_is_paused);
 
         s_last_pull_queue_time_remaining = sanitize_temporal_metric(
             current_queue_time_remaining,
@@ -987,7 +988,7 @@ private:
 
         const auto game_state_code = kmod_replay::derive_game_state_code(
             last_is_in_scenario_editor_,
-            -1,
+            s_last_pull_scenario_is_paused,
             last_is_in_challenge_,
             last_is_in_scenario_,
             last_is_in_trainer_,
@@ -1048,6 +1049,7 @@ private:
         emit_i32_if_valid("pull_is_in_scenario_editor", last_is_in_scenario_editor_);
         emit_i32_if_valid("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_);
         emit_i32_if_valid("pull_is_in_trainer", last_is_in_trainer_);
+        emit_i32_if_valid("pull_scenario_is_paused", s_last_pull_scenario_is_paused);
         emit_i32_if_valid("pull_shots_fired_total", last_shots_fired_);
         emit_i32_if_valid("pull_shots_hit_total", last_shots_hit_);
         emit_i32_if_valid("pull_kills_total", last_kills_total_);
@@ -1377,18 +1379,25 @@ private:
         };
 
         bind(targets_.receive_seconds, LiveMetricHookKind::Seconds);
+        bind(targets_.receive_seconds_single, LiveMetricHookKind::Seconds);
+        bind(targets_.receive_seconds_value_else, LiveMetricHookKind::Seconds);
+        bind(targets_.receive_seconds_value_or, LiveMetricHookKind::Seconds);
         bind(targets_.receive_score, LiveMetricHookKind::Score);
         bind(targets_.receive_score_single, LiveMetricHookKind::Score);
         bind(targets_.receive_score_value_else, LiveMetricHookKind::Score);
+        bind(targets_.receive_score_value_or, LiveMetricHookKind::Score);
         bind(targets_.receive_shots_fired, LiveMetricHookKind::ShotsFired);
         bind(targets_.receive_shots_fired_single, LiveMetricHookKind::ShotsFired);
         bind(targets_.receive_shots_fired_value_else, LiveMetricHookKind::ShotsFired);
+        bind(targets_.receive_shots_fired_value_or, LiveMetricHookKind::ShotsFired);
         bind(targets_.receive_shots_hit, LiveMetricHookKind::ShotsHit);
         bind(targets_.receive_shots_hit_single, LiveMetricHookKind::ShotsHit);
         bind(targets_.receive_shots_hit_value_else, LiveMetricHookKind::ShotsHit);
+        bind(targets_.receive_shots_hit_value_or, LiveMetricHookKind::ShotsHit);
         bind(targets_.receive_challenge_tick_count, LiveMetricHookKind::ChallengeTickCount);
         bind(targets_.receive_challenge_tick_count_single, LiveMetricHookKind::ChallengeTickCount);
         bind(targets_.receive_challenge_tick_count_value_else, LiveMetricHookKind::ChallengeTickCount);
+        bind(targets_.receive_challenge_tick_count_value_or, LiveMetricHookKind::ChallengeTickCount);
 
         live_metric_hooks_registered_ = !live_metric_hook_bindings_.empty();
     }
@@ -1442,6 +1451,7 @@ private:
         int32_t current_is_in_scenario_editor = -1;
         int32_t current_is_currently_in_benchmark = -1;
         int32_t current_is_in_trainer = -1;
+        int32_t current_scenario_is_paused = -1;
         float current_seconds = -1.0f;
         float current_score_total = -1.0f;
         float current_score_total_derived = -1.0f;
@@ -1464,6 +1474,8 @@ private:
         bool has_critical_tick_read = false;
         RC::Unreal::UObject* meta = nullptr;
         RC::Unreal::UObject* scenario_manager = nullptr;
+        RC::Unreal::UObject* scenario_state_receiver = nullptr;
+        current_scenario_is_paused = cached_scenario_is_paused_;
 
         {
             EmitTagScope state_scope(*this, "state_get", "non_ui_probe");
@@ -1476,6 +1488,7 @@ private:
                     targets_.get_kills_value_else,
                     targets_.get_kills_value_or,
                     targets_.receive_kills_value_else,
+                    targets_.receive_kills_value_or,
                     targets_.receive_kills_single,
                     targets_.receive_kills
                 }, iv)) {
@@ -1485,6 +1498,7 @@ private:
                     targets_.get_shots_fired_value_else,
                     targets_.get_shots_fired_value_or,
                     targets_.receive_shots_fired_value_else,
+                    targets_.receive_shots_fired_value_or,
                     targets_.receive_shots_fired_single,
                     targets_.receive_shots_fired
                 }, iv)) {
@@ -1494,6 +1508,7 @@ private:
                     targets_.get_shots_hit_value_else,
                     targets_.get_shots_hit_value_or,
                     targets_.receive_shots_hit_value_else,
+                    targets_.receive_shots_hit_value_or,
                     targets_.receive_shots_hit_single,
                     targets_.receive_shots_hit
                 }, iv)) {
@@ -1503,6 +1518,7 @@ private:
                     targets_.get_score_value_else,
                     targets_.get_score_value_or,
                     targets_.receive_score_value_else,
+                    targets_.receive_score_value_or,
                     targets_.receive_score_single,
                     targets_.receive_score
                 }, fv)) {
@@ -1513,6 +1529,7 @@ private:
                     targets_.get_accuracy_value_else,
                     targets_.get_accuracy_value_or,
                     targets_.receive_accuracy_value_else,
+                    targets_.receive_accuracy_value_or,
                     targets_.receive_accuracy_single,
                     targets_.receive_accuracy
                 }, fv)) {
@@ -1522,6 +1539,7 @@ private:
                     targets_.get_score_per_minute_value_else,
                     targets_.get_score_per_minute_value_or,
                     targets_.receive_score_per_minute_value_else,
+                    targets_.receive_score_per_minute_value_or,
                     targets_.receive_score_per_minute
                 }, fv)) {
                 current_score_per_minute = fv;
@@ -1567,6 +1585,7 @@ private:
                     targets_.get_kills_per_second_value_else,
                     targets_.get_kills_per_second_value_or,
                     targets_.receive_kills_per_second_value_else,
+                    targets_.receive_kills_per_second_value_or,
                     targets_.receive_kills_per_second
                 }, fv)) {
                 current_kills_per_second = fv;
@@ -1582,6 +1601,9 @@ private:
             if (try_read_float(active_receiver, {
                     targets_.get_seconds_value_else,
                     targets_.get_seconds_value_or,
+                    targets_.receive_seconds_value_else,
+                    targets_.receive_seconds_value_or,
+                    targets_.receive_seconds_single,
                     targets_.receive_seconds
                 }, fv)) {
                 has_critical_seconds_read = true;
@@ -1716,6 +1738,30 @@ private:
             }
         }
 
+        scenario_state_receiver = resolve_scenario_state_receiver_instance(now);
+        const bool should_refresh_paused_state =
+            scenario_state_receiver
+            && (cached_scenario_is_paused_ < 0
+                || now >= next_scenario_paused_read_ms_);
+        if (should_refresh_paused_state) {
+            bool paused_value = false;
+            if (try_read_bool(
+                    scenario_state_receiver,
+                    {
+                        targets_.scenario_state_get_is_paused_value_else,
+                        targets_.scenario_state_get_is_paused_value_or,
+                        targets_.scenario_state_receive_is_paused_value_else,
+                        targets_.scenario_state_receive_is_paused_value_or,
+                        targets_.scenario_state_receive_is_paused_single,
+                        targets_.scenario_state_receive_is_paused,
+                    },
+                    paused_value)) {
+                cached_scenario_is_paused_ = paused_value ? 1 : 0;
+                current_scenario_is_paused = cached_scenario_is_paused_;
+            }
+            next_scenario_paused_read_ms_ = now + ((last_is_in_challenge_ == 1 || last_is_in_scenario_ == 1) ? 100 : 250);
+        }
+
         const bool seconds_advancing =
             has_critical_seconds_read
             && std::isfinite(current_seconds)
@@ -1771,11 +1817,28 @@ private:
         if (current_is_in_trainer < 0) {
             current_is_in_trainer = (last_is_in_trainer_ > 0) ? 1 : 0;
         }
+        const bool paused_active_context =
+            current_scenario_is_paused == 1
+            && (
+                prev_is_in_challenge > 0
+                || prev_is_in_scenario > 0
+                || (last_in_challenge_true_ms_ > 0 && safe_elapsed_ms(now, last_in_challenge_true_ms_) < 2500)
+                || (last_in_scenario_true_ms_ > 0 && safe_elapsed_ms(now, last_in_scenario_true_ms_) < 2500)
+            );
+        if (paused_active_context) {
+            if (current_is_in_challenge <= 0 && prev_is_in_challenge > 0) {
+                current_is_in_challenge = prev_is_in_challenge;
+            }
+            if (current_is_in_scenario <= 0 && prev_is_in_scenario > 0) {
+                current_is_in_scenario = prev_is_in_scenario;
+            }
+        }
         emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, current_is_in_challenge > 0 ? 1 : 0, now);
         emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, current_is_in_scenario > 0 ? 1 : 0, now);
         emit_state_i32("pull_is_in_scenario_editor", last_is_in_scenario_editor_, current_is_in_scenario_editor > 0 ? 1 : 0, now);
         emit_state_i32("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_, current_is_currently_in_benchmark > 0 ? 1 : 0, now);
         emit_state_i32("pull_is_in_trainer", last_is_in_trainer_, current_is_in_trainer > 0 ? 1 : 0, now);
+        emit_state_i32("pull_scenario_is_paused", last_scenario_is_paused_, current_scenario_is_paused > 0 ? 1 : 0, now);
 
         const bool active_now =
             current_is_in_challenge > 0
@@ -2155,6 +2218,7 @@ private:
             current_is_in_challenge,
             current_is_in_scenario,
             current_is_in_scenario_editor,
+            current_scenario_is_paused,
             current_queue_time_remaining,
             current_score_total,
             current_score_total_derived,
@@ -2181,8 +2245,14 @@ private:
             current_queue_time_remaining
         );
 
+        const bool paused_runtime_context =
+            current_scenario_is_paused == 1
+            || last_scenario_is_paused_ == 1
+            || s_last_pull_scenario_is_paused == 1;
+
         const bool stale_active_flags =
             !kmod_replay::replay_ingame_playback_is_active()
+            && !paused_runtime_context
             && (last_is_in_challenge_ == 1 || last_is_in_scenario_ == 1)
             && safe_elapsed_ms(now, last_runtime_progress_ms_) > 2200
             && (!std::isfinite(last_time_remaining_) || last_time_remaining_ <= 0.0001f)
@@ -2210,7 +2280,7 @@ private:
             || lifecycle_active_
             || (last_in_challenge_true_ms_ > 0 && (now - last_in_challenge_true_ms_) < 2000)
             || (std::isfinite(current_time_remaining) && current_time_remaining > 0.25f);
-        if (challenge_expected_active) {
+        if (challenge_expected_active && !paused_runtime_context) {
             const bool has_critical_read = has_critical_seconds_read || has_critical_tick_read || has_critical_score_read;
             if (has_critical_read) {
                 critical_read_miss_streak_ = 0;
@@ -2255,7 +2325,10 @@ private:
         if (last_state_change_emit_ms_ > stream_activity_ms) {
             stream_activity_ms = last_state_change_emit_ms_;
         }
-        if (likely_active_stream && stream_activity_ms > 0 && !kmod_replay::replay_ingame_playback_is_active()) {
+        if (likely_active_stream
+            && !paused_runtime_context
+            && stream_activity_ms > 0
+            && !kmod_replay::replay_ingame_playback_is_active()) {
             constexpr uint64_t k_stream_stall_ms = 850;
             const uint64_t stall_ms = safe_elapsed_ms(now, stream_activity_ms);
             if (stall_ms > k_stream_stall_ms
@@ -2340,7 +2413,7 @@ private:
             replay_input.scalars.is_in_scenario = s_last_pull_is_in_scenario;
             replay_input.scalars.is_in_scenario_editor = s_last_pull_is_in_scenario_editor;
             replay_input.scalars.is_in_trainer = last_is_in_trainer_;
-            replay_input.scalars.scenario_is_paused = -1;
+            replay_input.scalars.scenario_is_paused = s_last_pull_scenario_is_paused;
             replay_input.scalars.scenario_is_enabled = -1;
             replay_input.scalars.challenge_seconds_total = s_last_pull_challenge_seconds;
             replay_input.scalars.session_seconds_total = last_seconds_;
@@ -2361,7 +2434,8 @@ private:
             || current_is_in_scenario >= 0
             || current_is_in_scenario_editor >= 0
             || current_is_currently_in_benchmark >= 0
-            || current_is_in_trainer >= 0;
+            || current_is_in_trainer >= 0
+            || current_scenario_is_paused >= 0;
         const bool has_nonzero_signal =
             (current_is_in_challenge > 0)
             || (current_kills_total > 0)
@@ -2499,38 +2573,48 @@ private:
         RC::Unreal::UFunction* get_kills_value_else{};
         RC::Unreal::UFunction* get_kills_value_or{};
         RC::Unreal::UFunction* receive_kills_value_else{};
+        RC::Unreal::UFunction* receive_kills_value_or{};
         RC::Unreal::UFunction* receive_kills_single{};
         RC::Unreal::UFunction* receive_kills{};
         RC::Unreal::UFunction* get_score_value_else{};
         RC::Unreal::UFunction* get_score_value_or{};
         RC::Unreal::UFunction* receive_score_value_else{};
+        RC::Unreal::UFunction* receive_score_value_or{};
         RC::Unreal::UFunction* receive_score_single{};
         RC::Unreal::UFunction* receive_score{};
         RC::Unreal::UFunction* get_accuracy_value_else{};
         RC::Unreal::UFunction* get_accuracy_value_or{};
         RC::Unreal::UFunction* receive_accuracy_value_else{};
+        RC::Unreal::UFunction* receive_accuracy_value_or{};
         RC::Unreal::UFunction* receive_accuracy_single{};
         RC::Unreal::UFunction* receive_accuracy{};
         RC::Unreal::UFunction* get_shots_fired_value_else{};
         RC::Unreal::UFunction* get_shots_fired_value_or{};
         RC::Unreal::UFunction* receive_shots_fired_value_else{};
+        RC::Unreal::UFunction* receive_shots_fired_value_or{};
         RC::Unreal::UFunction* receive_shots_fired_single{};
         RC::Unreal::UFunction* receive_shots_fired{};
         RC::Unreal::UFunction* get_shots_hit_value_else{};
         RC::Unreal::UFunction* get_shots_hit_value_or{};
         RC::Unreal::UFunction* receive_shots_hit_value_else{};
+        RC::Unreal::UFunction* receive_shots_hit_value_or{};
         RC::Unreal::UFunction* receive_shots_hit_single{};
         RC::Unreal::UFunction* receive_shots_hit{};
         RC::Unreal::UFunction* get_seconds_value_else{};
         RC::Unreal::UFunction* get_seconds_value_or{};
+        RC::Unreal::UFunction* receive_seconds_value_else{};
+        RC::Unreal::UFunction* receive_seconds_value_or{};
+        RC::Unreal::UFunction* receive_seconds_single{};
         RC::Unreal::UFunction* receive_seconds{};
         RC::Unreal::UFunction* get_score_per_minute_value_else{};
         RC::Unreal::UFunction* get_score_per_minute_value_or{};
         RC::Unreal::UFunction* receive_score_per_minute_value_else{};
+        RC::Unreal::UFunction* receive_score_per_minute_value_or{};
         RC::Unreal::UFunction* receive_score_per_minute{};
         RC::Unreal::UFunction* get_kills_per_second_value_else{};
         RC::Unreal::UFunction* get_kills_per_second_value_or{};
         RC::Unreal::UFunction* receive_kills_per_second_value_else{};
+        RC::Unreal::UFunction* receive_kills_per_second_value_or{};
         RC::Unreal::UFunction* receive_kills_per_second{};
         RC::Unreal::UFunction* get_damage_done_value_else{};
         RC::Unreal::UFunction* get_damage_done_value_or{};
@@ -2556,6 +2640,12 @@ private:
         RC::Unreal::UFunction* receive_challenge_tick_count_value_or{};
         RC::Unreal::UFunction* receive_challenge_tick_count_single{};
         RC::Unreal::UFunction* receive_challenge_tick_count{};
+        RC::Unreal::UFunction* scenario_state_get_is_paused_value_or{};
+        RC::Unreal::UFunction* scenario_state_get_is_paused_value_else{};
+        RC::Unreal::UFunction* scenario_state_receive_is_paused{};
+        RC::Unreal::UFunction* scenario_state_receive_is_paused_single{};
+        RC::Unreal::UFunction* scenario_state_receive_is_paused_value_else{};
+        RC::Unreal::UFunction* scenario_state_receive_is_paused_value_or{};
         RC::Unreal::UFunction* meta_get_in_trainer{};
         RC::Unreal::UFunction* scenario_get_challenge_time_remaining{};
         RC::Unreal::UFunction* scenario_get_challenge_queue_time_remaining{};
@@ -2627,9 +2717,11 @@ private:
 
     RC::Unreal::UObject* meta_game_instance_{nullptr};
     RC::Unreal::UObject* state_receiver_instance_{nullptr};
+    RC::Unreal::UObject* scenario_state_receiver_instance_{nullptr};
     RC::Unreal::UObject* scenario_manager_instance_{nullptr};
     RC::Unreal::UClass* meta_game_instance_class_{nullptr};
     RC::Unreal::UClass* state_receiver_class_{nullptr};
+    RC::Unreal::UClass* scenario_state_receiver_class_{nullptr};
     RC::Unreal::UClass* scenario_manager_class_{nullptr};
     RC::Unreal::UFunction* text_set_fn_{nullptr};
     RC::Unreal::UFunction* text_get_fn_{nullptr};
@@ -2646,6 +2738,8 @@ private:
     uint64_t next_targets_resolve_ms_{0};
     uint64_t next_meta_resolve_ms_{0};
     uint64_t next_receiver_resolve_ms_{0};
+    uint64_t next_scenario_state_resolve_ms_{0};
+    uint64_t next_scenario_paused_read_ms_{0};
     uint64_t next_scenario_resolve_ms_{0};
     uint64_t next_scenario_identity_refresh_ms_{0};
     uint64_t last_in_challenge_true_ms_{0};
@@ -2668,6 +2762,8 @@ private:
     int32_t last_is_in_scenario_editor_{std::numeric_limits<int32_t>::min()};
     int32_t last_is_currently_in_benchmark_{std::numeric_limits<int32_t>::min()};
     int32_t last_is_in_trainer_{std::numeric_limits<int32_t>::min()};
+    int32_t last_scenario_is_paused_{std::numeric_limits<int32_t>::min()};
+    int32_t cached_scenario_is_paused_{-1};
     float last_seconds_{std::numeric_limits<float>::quiet_NaN()};
     float last_score_total_{std::numeric_limits<float>::quiet_NaN()};
     float last_score_total_derived_{std::numeric_limits<float>::quiet_NaN()};
@@ -2741,12 +2837,16 @@ private:
     void reset_runtime_resolvers() {
         meta_game_instance_ = nullptr;
         state_receiver_instance_ = nullptr;
+        scenario_state_receiver_instance_ = nullptr;
         scenario_manager_instance_ = nullptr;
+        cached_scenario_is_paused_ = -1;
         live_metric_receiver_hint_ = nullptr;
         live_metric_receiver_hint_ms_ = 0;
         next_live_stream_refresh_ms_ = 0;
         next_meta_resolve_ms_ = 0;
         next_receiver_resolve_ms_ = 0;
+        next_scenario_state_resolve_ms_ = 0;
+        next_scenario_paused_read_ms_ = 0;
         next_scenario_resolve_ms_ = 0;
         next_targets_resolve_ms_ = 0;
     }
@@ -2950,38 +3050,48 @@ private:
         targets_.get_kills_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Kills_ValueElse"));
         targets_.get_kills_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Kills_ValueOr"));
         targets_.receive_kills_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Kills_ValueElse"));
+        targets_.receive_kills_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Kills_ValueOr"));
         targets_.receive_kills_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Kills_Single"));
         targets_.receive_kills = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Kills"));
         targets_.get_score_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Score_ValueElse"));
         targets_.get_score_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Score_ValueOr"));
         targets_.receive_score_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Score_ValueElse"));
+        targets_.receive_score_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Score_ValueOr"));
         targets_.receive_score_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Score_Single"));
         targets_.receive_score = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Score"));
         targets_.get_accuracy_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Accuracy_ValueElse"));
         targets_.get_accuracy_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Accuracy_ValueOr"));
         targets_.receive_accuracy_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Accuracy_ValueElse"));
+        targets_.receive_accuracy_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Accuracy_ValueOr"));
         targets_.receive_accuracy_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Accuracy_Single"));
         targets_.receive_accuracy = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Accuracy"));
         targets_.get_shots_fired_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ShotsFired_ValueElse"));
         targets_.get_shots_fired_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ShotsFired_ValueOr"));
         targets_.receive_shots_fired_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsFired_ValueElse"));
+        targets_.receive_shots_fired_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsFired_ValueOr"));
         targets_.receive_shots_fired_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsFired_Single"));
         targets_.receive_shots_fired = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsFired"));
         targets_.get_shots_hit_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ShotsHit_ValueElse"));
         targets_.get_shots_hit_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ShotsHit_ValueOr"));
         targets_.receive_shots_hit_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsHit_ValueElse"));
+        targets_.receive_shots_hit_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsHit_ValueOr"));
         targets_.receive_shots_hit_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsHit_Single"));
         targets_.receive_shots_hit = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ShotsHit"));
         targets_.get_seconds_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Seconds_ValueElse"));
         targets_.get_seconds_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Seconds_ValueOr"));
+        targets_.receive_seconds_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Seconds_ValueElse"));
+        targets_.receive_seconds_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Seconds_ValueOr"));
+        targets_.receive_seconds_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Seconds_Single"));
         targets_.receive_seconds = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Seconds"));
         targets_.get_score_per_minute_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ScorePerMinute_ValueElse"));
         targets_.get_score_per_minute_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_ScorePerMinute_ValueOr"));
         targets_.receive_score_per_minute_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ScorePerMinute_ValueElse"));
+        targets_.receive_score_per_minute_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ScorePerMinute_ValueOr"));
         targets_.receive_score_per_minute = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ScorePerMinute"));
         targets_.get_kills_per_second_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_KillsPerSecond_ValueElse"));
         targets_.get_kills_per_second_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_KillsPerSecond_ValueOr"));
         targets_.receive_kills_per_second_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_KillsPerSecond_ValueElse"));
+        targets_.receive_kills_per_second_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_KillsPerSecond_ValueOr"));
         targets_.receive_kills_per_second = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_KillsPerSecond"));
         targets_.get_damage_done_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_DamageDone_ValueElse"));
         targets_.get_damage_done_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_DamageDone_ValueOr"));
@@ -3007,6 +3117,12 @@ private:
         targets_.receive_challenge_tick_count_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount_ValueOr"));
         targets_.receive_challenge_tick_count_single = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount_Single"));
         targets_.receive_challenge_tick_count = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_ChallengeTickCount"));
+        targets_.scenario_state_get_is_paused_value_or = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Get_IsPaused_ValueOr"));
+        targets_.scenario_state_get_is_paused_value_else = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Get_IsPaused_ValueElse"));
+        targets_.scenario_state_receive_is_paused = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Receive_IsPaused"));
+        targets_.scenario_state_receive_is_paused_single = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Receive_IsPaused_Single"));
+        targets_.scenario_state_receive_is_paused_value_else = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Receive_IsPaused_ValueElse"));
+        targets_.scenario_state_receive_is_paused_value_or = resolve_fn(STR("/Script/KovaaKFramework.ScenarioStateReceiver:Receive_IsPaused_ValueOr"));
         targets_.meta_get_in_trainer = resolve_fn(STR("/Script/GameSkillsTrainer.GTheMetaGameInstance:GetInTrainer"));
         targets_.scenario_get_challenge_time_remaining = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:GetChallengeTimeRemaining"));
         targets_.scenario_get_challenge_queue_time_remaining = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:GetChallengeQueueTimeRemaining"));
@@ -3017,9 +3133,9 @@ private:
         register_live_metric_hooks();
 
         const bool core_live_hooks_ready =
-            targets_.receive_seconds &&
-            (targets_.receive_challenge_tick_count || targets_.receive_challenge_tick_count_single || targets_.receive_challenge_tick_count_value_else) &&
-            (targets_.receive_score || targets_.receive_score_single || targets_.receive_score_value_else);
+            (targets_.receive_seconds || targets_.receive_seconds_single || targets_.receive_seconds_value_else || targets_.receive_seconds_value_or) &&
+            (targets_.receive_challenge_tick_count || targets_.receive_challenge_tick_count_single || targets_.receive_challenge_tick_count_value_else || targets_.receive_challenge_tick_count_value_or) &&
+            (targets_.receive_score || targets_.receive_score_single || targets_.receive_score_value_else || targets_.receive_score_value_or);
         const bool active_live_window =
             lifecycle_active_
             || last_is_in_challenge_ == 1
@@ -3713,6 +3829,83 @@ private:
         return state_receiver_instance_;
     }
 
+    RC::Unreal::UObject* resolve_scenario_state_receiver_instance(uint64_t now) {
+        if (scenario_state_receiver_instance_ && is_likely_valid_object_ptr(scenario_state_receiver_instance_) && now < next_scenario_state_resolve_ms_) {
+            return scenario_state_receiver_instance_;
+        }
+        next_scenario_state_resolve_ms_ = now + 2000;
+
+        auto* meta = resolve_meta_game_instance(now);
+        RC::StringType meta_path{};
+        if (meta && is_likely_valid_object_ptr(meta)) {
+            meta_path = object_path_from_full_name(meta->GetFullName());
+        }
+
+        std::vector<RC::Unreal::UObject*> all{};
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("ScenarioStateReceiver"), all);
+        std::vector<RC::Unreal::UObject*> alt{};
+        RC::Unreal::UObjectGlobals::FindAllOf(STR("ScenarioStateReceiver_C"), alt);
+        append_unique_objects(all, alt);
+
+        auto* cls = resolve_class_cached(
+            scenario_state_receiver_class_,
+            {STR("/Script/KovaaKFramework.ScenarioStateReceiver"),
+             STR("/Script/KovaaKFramework.ScenarioStateReceiver_C"),
+             STR("/Game/FirstPersonBP/Blueprints/ScenarioStateReceiver.ScenarioStateReceiver_C")}
+        );
+        if (cls && is_likely_valid_object_ptr(cls)) {
+            std::vector<RC::Unreal::UObject*> by_class{};
+            collect_objects_by_class(cls, by_class);
+            append_unique_objects(all, by_class);
+        }
+
+        RC::Unreal::UObject* best = nullptr;
+        RC::Unreal::UObject* best_meta_scoped = nullptr;
+        int best_score = -1000000;
+        int best_meta_scoped_score = -1000000;
+        for (auto* obj : all) {
+            if (!obj || !is_likely_valid_object_ptr(obj)) {
+                continue;
+            }
+            const auto full_name = obj->GetFullName();
+            if (is_rejected_runtime_object_name(full_name)) {
+                continue;
+            }
+            const auto object_path = object_path_from_full_name(full_name);
+            int score = 0;
+            if (full_name.find(STR("Default__")) != RC::StringType::npos) score -= 1000;
+            if (full_name.find(STR("/Script/")) != RC::StringType::npos) score -= 100;
+            if (full_name.find(STR("/Engine/Transient.")) != RC::StringType::npos) score += 40;
+            if (full_name.find(STR("TheMetaGameInstance")) != RC::StringType::npos) score += 200;
+            if (full_name.find(STR("ScenarioStateReceiver_")) != RC::StringType::npos) score += 120;
+            if (score > best_score) {
+                best = obj;
+                best_score = score;
+            }
+            if (!meta_path.empty()) {
+                RC::StringType prefix = meta_path;
+                prefix += STR(".");
+                if (object_path.rfind(prefix, 0) == 0 && score > best_meta_scoped_score) {
+                    best_meta_scoped = obj;
+                    best_meta_scoped_score = score;
+                }
+            }
+        }
+
+        auto* chosen = best_meta_scoped ? best_meta_scoped : best;
+        if (!chosen || !is_likely_valid_object_ptr(chosen)) {
+            chosen = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UObject*>(
+                nullptr,
+                nullptr,
+                STR("/Script/KovaaKFramework.Default__ScenarioStateReceiver")
+            );
+        }
+        if (chosen && is_likely_valid_object_ptr(chosen)) {
+            scenario_state_receiver_instance_ = chosen;
+        }
+        return scenario_state_receiver_instance_;
+    }
+
     RC::Unreal::UObject* resolve_scenario_manager_instance(uint64_t now) {
         if (scenario_manager_instance_ && is_likely_valid_object_ptr(scenario_manager_instance_) && now < next_scenario_resolve_ms_) {
             return scenario_manager_instance_;
@@ -4052,6 +4245,22 @@ private:
         if (value == 0 && last_nonzero_ms == 0 && !active_stream_expected) {
             return;
         }
+        if (value == 0 && last_value > 0) {
+            constexpr uint64_t k_recent_zero_suppress_ms = 2500;
+            const bool recent_nonzero =
+                last_nonzero_ms > 0
+                && safe_elapsed_ms(now, last_nonzero_ms) < k_recent_zero_suppress_ms;
+            const bool suppress_transient_zero =
+                recent_nonzero
+                && (
+                    std::strcmp(ev, "pull_shots_fired_total") == 0
+                    || std::strcmp(ev, "pull_shots_hit_total") == 0
+                    || std::strcmp(ev, "pull_kills_total") == 0
+                );
+            if (suppress_transient_zero) {
+                return;
+            }
+        }
         if (value > 0) {
             last_nonzero_ms = now;
         }
@@ -4109,6 +4318,22 @@ private:
             || last_is_in_scenario_ == 1;
         if (value == 0.0f && last_nonzero_ms == 0 && !is_qrem && !active_stream_expected) {
             return;
+        }
+        if (value == 0.0f && std::isfinite(last_value) && last_value > 0.0f) {
+            constexpr uint64_t k_recent_zero_suppress_ms = 2500;
+            const bool recent_nonzero =
+                last_nonzero_ms > 0
+                && safe_elapsed_ms(now, last_nonzero_ms) < k_recent_zero_suppress_ms;
+            const bool suppress_transient_zero =
+                recent_nonzero
+                && (
+                    std::strcmp(ev, "pull_accuracy") == 0
+                    || std::strcmp(ev, "pull_seconds_total") == 0
+                    || std::strcmp(ev, "pull_score_per_minute") == 0
+                );
+            if (suppress_transient_zero) {
+                return;
+            }
         }
         if (value > 0.0f) {
             last_nonzero_ms = now;

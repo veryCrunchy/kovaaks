@@ -469,6 +469,20 @@ mod imp {
         false
     }
 
+    fn requeue_bridge_command_front(json_line: String) -> bool {
+        if json_line.trim().is_empty() {
+            return true;
+        }
+        if let Ok(mut queue) = bridge_command_queue().lock() {
+            if queue.len() >= MAX_BRIDGE_COMMAND_QUEUE {
+                return false;
+            }
+            queue.push_front(json_line);
+            return true;
+        }
+        false
+    }
+
     fn enqueue_bridge_command_blocking(json_line: String) -> bool {
         if json_line.trim().is_empty() {
             return true;
@@ -487,7 +501,7 @@ mod imp {
         }
     }
 
-    fn request_mod_state_sync(reason: &str) {
+    fn request_mod_state_sync(reason: &str) -> bool {
         let reason = sanitize_state_request_reason(reason);
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -497,8 +511,13 @@ mod imp {
             "{{\"cmd\":\"state_snapshot_request\",\"reason\":\"{}\",\"ts_ms\":{}}}",
             reason, now_ms
         );
-        let _ = enqueue_bridge_command(cmd);
-        log::info!("bridge: queued mod state sync request ({})", reason);
+        if enqueue_bridge_command(cmd) {
+            log::info!("bridge: queued mod state sync request ({})", reason);
+            true
+        } else {
+            log::warn!("bridge: failed to queue mod state sync request ({})", reason);
+            false
+        }
     }
 
     include!("bridge/replay_protocol.rs");
@@ -2622,13 +2641,19 @@ mod imp {
                     continue;
                 };
 
-                let mut line = command;
+                let mut line = String::with_capacity(command.len() + 1);
+                line.push_str(&command);
                 line.push('\n');
                 let bytes = line.as_bytes();
                 let mut written = 0u32;
                 match unsafe { WriteFile(pipe, Some(bytes), Some(&mut written), None) } {
                     Ok(_) if written as usize == bytes.len() => {}
                     _ => {
+                        if !requeue_bridge_command_front(command) {
+                            log::warn!(
+                                "bridge: failed to preserve command after pipe write failure; queue saturated"
+                            );
+                        }
                         log::warn!("bridge: command pipe write failed; awaiting reconnect");
                         break;
                     }
@@ -2682,7 +2707,7 @@ mod imp {
 
             mark_bridge_dll_connected(true);
             log::info!("bridge: DLL connected — reading events");
-            request_mod_state_sync("bridge_connected");
+            let _ = request_mod_state_sync("bridge_connected");
             read_events(pipe, &app);
             mark_bridge_dll_connected(false);
             log::info!("bridge: pipe disconnected — waiting for next connection");
