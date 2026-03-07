@@ -17,6 +17,7 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_NONE: u32 = 0x0000_0000;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const PIPE_NOWAIT: u32 = 0x0000_0001;
 
 type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
@@ -54,6 +55,13 @@ extern "system" {
         lp_total_bytes_avail: *mut u32,
         lp_bytes_left_this_message: *mut u32,
     ) -> i32;
+    fn SetNamedPipeHandleState(
+        h_named_pipe: Handle,
+        lp_mode: *mut u32,
+        lp_max_collection_count: *mut u32,
+        lp_collect_data_timeout: *mut u32,
+    ) -> i32;
+    fn WaitNamedPipeA(lp_named_pipe_name: *const u8, n_time_out: u32) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
     fn GetLastError() -> u32;
 }
@@ -63,9 +71,51 @@ fn command_buffer() -> &'static Mutex<Vec<u8>> {
     BUFFER.get_or_init(|| Mutex::new(Vec::with_capacity(4096)))
 }
 
+fn wait_named_pipe_now(name: *const u8) -> Result<(), u32> {
+    let ok = unsafe { WaitNamedPipeA(name, 0) };
+    if ok != 0 {
+        return Ok(());
+    }
+    Err(unsafe { GetLastError() })
+}
+
+fn set_pipe_nowait(handle: Handle) -> Result<(), u32> {
+    let mut mode = PIPE_NOWAIT;
+    let ok = unsafe {
+        SetNamedPipeHandleState(
+            handle,
+            &mut mode,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+    Err(unsafe { GetLastError() })
+}
+
+fn close_event_pipe() {
+    CONNECTED.store(false, Ordering::Release);
+    let raw = PIPE_HANDLE.swap(0, Ordering::AcqRel) as Handle;
+    if !raw.is_null() && raw != INVALID_HANDLE_VALUE {
+        unsafe {
+            let _ = CloseHandle(raw);
+        }
+    }
+}
+
 pub fn connect() -> Result<(), String> {
     if is_connected() {
         return Ok(());
+    }
+
+    if let Err(err) = wait_named_pipe_now(EVENT_PIPE_NAME.as_ptr()) {
+        LAST_ERROR.store(err, Ordering::Release);
+        return Err(format!(
+            "WaitNamedPipe(\\\\.\\pipe\\kovaaks-bridge) failed with {}",
+            err
+        ));
     }
 
     let handle = unsafe {
@@ -80,6 +130,16 @@ pub fn connect() -> Result<(), String> {
         )
     };
     if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
+        if let Err(err) = set_pipe_nowait(handle) {
+            LAST_ERROR.store(err, Ordering::Release);
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!(
+                "SetNamedPipeHandleState(\\\\.\\pipe\\kovaaks-bridge) failed with {}",
+                err
+            ));
+        }
         PIPE_HANDLE.store(handle as usize, Ordering::Release);
         CONNECTED.store(true, Ordering::Release);
         LAST_ERROR.store(0, Ordering::Release);
@@ -96,6 +156,14 @@ fn connect_command() -> Result<(), String> {
         return Ok(());
     }
 
+    if let Err(err) = wait_named_pipe_now(COMMAND_PIPE_NAME.as_ptr()) {
+        COMMAND_LAST_ERROR.store(err, Ordering::Release);
+        return Err(format!(
+            "WaitNamedPipe(\\\\.\\pipe\\kovaaks-bridge-cmd) failed with {}",
+            err
+        ));
+    }
+
     let handle = unsafe {
         CreateFileA(
             COMMAND_PIPE_NAME.as_ptr(),
@@ -108,6 +176,16 @@ fn connect_command() -> Result<(), String> {
         )
     };
     if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
+        if let Err(err) = set_pipe_nowait(handle) {
+            COMMAND_LAST_ERROR.store(err, Ordering::Release);
+            unsafe {
+                let _ = CloseHandle(handle);
+            }
+            return Err(format!(
+                "SetNamedPipeHandleState(\\\\.\\pipe\\kovaaks-bridge-cmd) failed with {}",
+                err
+            ));
+        }
         COMMAND_HANDLE.store(handle as usize, Ordering::Release);
         COMMAND_CONNECTED.store(true, Ordering::Release);
         COMMAND_LAST_ERROR.store(0, Ordering::Release);
@@ -129,8 +207,8 @@ pub fn write_event(json: &str) -> bool {
 
     let handle = PIPE_HANDLE.load(Ordering::Acquire) as Handle;
     if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        CONNECTED.store(false, Ordering::Release);
         LAST_ERROR.store(6, Ordering::Release); // ERROR_INVALID_HANDLE
+        close_event_pipe();
         return false;
     }
 
@@ -152,11 +230,8 @@ pub fn write_event(json: &str) -> bool {
 
     if ok == 0 || written as usize != bytes.len() {
         let err = unsafe { GetLastError() };
-        CONNECTED.store(false, Ordering::Release);
         LAST_ERROR.store(err, Ordering::Release);
-        unsafe {
-            let _ = CloseHandle(handle);
-        }
+        close_event_pipe();
         return false;
     }
 
@@ -279,14 +354,7 @@ pub fn is_connected() -> bool {
 }
 
 pub fn close() {
-    if CONNECTED.swap(false, Ordering::AcqRel) {
-        let raw = PIPE_HANDLE.swap(0, Ordering::AcqRel) as Handle;
-        if !raw.is_null() && raw != INVALID_HANDLE_VALUE {
-            unsafe {
-                let _ = CloseHandle(raw);
-            }
-        }
-    }
+    close_event_pipe();
     close_command_pipe();
 }
 
