@@ -210,6 +210,7 @@ mod scenario_index;
 mod screen_recorder;
 mod session_store;
 mod settings;
+mod stats_db;
 mod steam_api;
 mod steam_integration;
 mod window_tracker;
@@ -1226,10 +1227,7 @@ pub fn run() {
                 logger::log_file_path().display()
             );
 
-            // Migrate legacy session names: strip " - Challenge" / " - Challenge Start"
-            // suffixes that were incorrectly included before parse_filename was fixed.
-            // TODO(future): remove after a few releases (added 2026-02-25).
-            session_store::migrate_session_names(app.handle());
+            session_store::initialize(app.handle());
 
             // Start file watcher
             file_watcher::start(app.handle().clone(), &loaded.stats_dir);

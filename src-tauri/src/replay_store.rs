@@ -113,6 +113,22 @@ pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool 
                 stored.frames.len(),
                 stored.run_snapshot.is_some(),
             );
+            if let Err(error) = crate::stats_db::upsert_replay_asset(
+                app,
+                &crate::stats_db::ReplayAssetRecord {
+                    session_id,
+                    file_path: &path,
+                    positions_count: stored.positions.len(),
+                    metrics_count: stored.metrics.len(),
+                    frames_count: stored.frames.len(),
+                    has_run_snapshot: stored.run_snapshot.is_some(),
+                },
+            ) {
+                log::warn!(
+                    "replay_store: could not register replay metadata for {}: {error}",
+                    session_id
+                );
+            }
             true
         }
         Err(e) => {
