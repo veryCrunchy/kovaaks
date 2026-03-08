@@ -108,19 +108,6 @@ interface AnalyticsSessionRecord extends SessionRecord {
   qualityIssues: string[];
 }
 
-interface ScenarioTelemetrySummary {
-  totalRuns: number;
-  reliableRuns: number;
-  flaggedRuns: number;
-  durationOutliers: number;
-  zeroSignalRuns: number;
-  smoothnessRuns: number;
-  statsPanelRuns: number;
-  shotTimingRuns: number;
-  replayRuns: number;
-  nextSteps: string[];
-}
-
 interface PracticeProfile {
   sessionCount: number;
   activeDays: number;
@@ -336,52 +323,6 @@ function buildAnalyticsRecords(records: SessionRecord[]): AnalyticsSessionRecord
       qualityIssues,
     };
   });
-}
-
-function summarizeScenarioTelemetry(records: AnalyticsSessionRecord[]): ScenarioTelemetrySummary {
-  const reliableRecords = records.filter((record) => record.isReliableForAnalysis);
-  const reliableRuns = reliableRecords.length;
-  const flaggedRuns = records.length - reliableRuns;
-  const smoothnessRuns = reliableRecords.filter((record) => record.smoothness != null).length;
-  const statsPanelRuns = reliableRecords.filter((record) => record.stats_panel != null).length;
-  const shotTimingRuns = reliableRecords.filter((record) => record.shot_timing != null).length;
-  const replayRuns = reliableRecords.filter((record) => record.has_replay).length;
-  const avgKills = reliableRuns > 0 ? mean(reliableRecords.map((record) => record.kills)) : 0;
-  const nextSteps: string[] = [];
-
-  if (flaggedRuns > 0) {
-    nextSteps.push(
-      "Persist a run end reason or validation flag so analytics can separate aborted/parser-corrupted runs from genuine low scores.",
-    );
-  }
-  if (statsPanelRuns < Math.max(3, Math.ceil(reliableRuns * 0.4))) {
-    nextSteps.push(
-      "Persist stats_panel on session finalize to unlock fatigue, accuracy-trend, and TTK coaching from real runs.",
-    );
-  }
-  if (smoothnessRuns < Math.max(3, Math.ceil(reliableRuns * 0.4))) {
-    nextSteps.push(
-      "Persist smoothness snapshots more consistently so movement fingerprints and control coaching use enough evidence.",
-    );
-  }
-  if (avgKills >= 1 && shotTimingRuns < Math.max(3, Math.ceil(reliableRuns * 0.35))) {
-    nextSteps.push(
-      "Persist shot_timing for click-heavy runs so first-shot conversion and recovery cost are measured directly instead of inferred.",
-    );
-  }
-
-  return {
-    totalRuns: records.length,
-    reliableRuns,
-    flaggedRuns,
-    durationOutliers: records.filter((record) => record.isDurationOutlier).length,
-    zeroSignalRuns: records.filter((record) => record.isZeroSignal).length,
-    smoothnessRuns,
-    statsPanelRuns,
-    shotTimingRuns,
-    replayRuns,
-    nextSteps: nextSteps.slice(0, 2),
-  };
 }
 
 function startOfLocalDayMs(timestampMs: number): number {
@@ -3795,7 +3736,6 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionFilter);
     return stored === "warmup" || stored === "warmedup" ? stored : "all";
   });
-  const qualitySummary = useMemo(() => summarizeScenarioTelemetry(records), [records]);
   const analysisRecords = useMemo(
     () => records.filter((record) => record.isReliableForAnalysis),
     [records],
@@ -3883,55 +3823,6 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
-      <div
-        style={{
-          ...CHART_STYLE,
-          padding: "12px 16px",
-          display: "flex",
-          flexDirection: "column",
-          gap: 8,
-        }}
-      >
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-          <span
-            style={{
-              fontSize: 11,
-              color: "#00f5a0",
-              textTransform: "uppercase",
-              letterSpacing: 1,
-              fontWeight: 700,
-            }}
-          >
-            Analytics quality
-          </span>
-          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
-            Using {qualitySummary.reliableRuns}/{qualitySummary.totalRuns} high-confidence run{qualitySummary.totalRuns !== 1 ? "s" : ""} for charts and coaching.
-          </span>
-          {qualitySummary.flaggedRuns > 0 && (
-            <span style={{ fontSize: 12, color: "#ffb400" }}>
-              Ignored {qualitySummary.flaggedRuns} suspect run{qualitySummary.flaggedRuns !== 1 ? "s" : ""}
-              {qualitySummary.durationOutliers > 0 ? ` (${qualitySummary.durationOutliers} duration outlier${qualitySummary.durationOutliers !== 1 ? "s" : ""}` : ""}
-              {qualitySummary.durationOutliers > 0 && qualitySummary.zeroSignalRuns > 0 ? ", " : ""}
-              {qualitySummary.zeroSignalRuns > 0 ? `${qualitySummary.zeroSignalRuns} empty` : ""}
-              {qualitySummary.durationOutliers > 0 || qualitySummary.zeroSignalRuns > 0 ? ")" : ""}.
-            </span>
-          )}
-        </div>
-
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 11, color: "rgba(255,255,255,0.42)" }}>
-          <span>Smoothness {qualitySummary.smoothnessRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
-          <span>Stats panel {qualitySummary.statsPanelRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
-          <span>Shot timing {qualitySummary.shotTimingRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
-          <span>Replay {qualitySummary.replayRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
-        </div>
-
-        {qualitySummary.nextSteps[0] && (
-          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.58)", lineHeight: 1.5 }}>
-            Next useful data: {qualitySummary.nextSteps[0]}
-          </div>
-        )}
-      </div>
-
       {analysisRecords.length === 0 ? (
         <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.45)", lineHeight: 1.7 }}>
           All recorded runs for this scenario look incomplete or malformed, so trend and coaching views are hidden until a clean run is recorded.
