@@ -380,6 +380,23 @@ fn save_settings(
     Ok(())
 }
 
+#[tauri::command]
+fn reset_settings(
+    state: tauri::State<AppState>,
+    app: AppHandle,
+) -> Result<AppSettings, String> {
+    let defaults = settings::load_default();
+    let mut s = state.settings.lock().map_err(|e| e.to_string())?;
+    *s = defaults.clone();
+    settings::persist(&app, &defaults).map_err(|e| e.to_string())?;
+    file_watcher::restart(&app, &defaults.stats_dir);
+    mouse_hook::set_dpi(defaults.mouse_dpi);
+    mouse_hook::set_feedback_enabled(defaults.live_feedback_enabled);
+    mouse_hook::set_feedback_verbosity(defaults.live_feedback_verbosity);
+    let _ = app.emit("settings-changed", ());
+    Ok(defaults)
+}
+
 // ─── Friend / API commands ─────────────────────────────────────────────────────
 
 /// Persist the username of the friend chosen as battle opponent (pass None to clear).
@@ -1180,89 +1197,21 @@ fn set_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
 /// hazard of the naive PID-file approach).
 ///
 /// On other platforms we fall back to a PID file.
-fn kill_existing_instance() {
-    let our_pid = std::process::id();
-
-    #[cfg(target_os = "windows")]
-    {
-        // Resolve just the file name of our own executable (e.g. "aimmod.exe").
-        let exe_name = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
-            .unwrap_or_default();
-
-        if exe_name.is_empty() {
-            return;
-        }
-
-        // Ask Windows for every running process whose image name matches ours.
-        let result = std::process::Command::new("tasklist")
-            .args([
-                "/FI",
-                &format!("IMAGENAME eq {exe_name}"),
-                "/FO",
-                "CSV",
-                "/NH",
-            ])
-            .output();
-
-        if let Ok(output) = result {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut killed_any = false;
-
-            for line in stdout.lines() {
-                // CSV columns: "ImageName","PID","SessionName","Session#","MemUsage"
-                let mut parts = line.splitn(3, ',');
-                let _name = parts.next();
-                if let Some(pid_field) = parts.next() {
-                    let pid_str = pid_field.trim().trim_matches('"');
-                    if let Ok(pid) = pid_str.parse::<u32>() {
-                        if pid != our_pid {
-                            eprintln!("[single-instance] killing old instance (PID {pid})");
-                            let _ = std::process::Command::new("taskkill")
-                                .args(["/PID", &pid.to_string(), "/F"])
-                                .output();
-                            killed_any = true;
-                        }
-                    }
-                }
-            }
-
-            if killed_any {
-                // Give the old process a moment to release file handles etc.
-                std::thread::sleep(std::time::Duration::from_millis(400));
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let pid_path = std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("aimmod.pid")))
-            .unwrap_or_else(|| std::env::temp_dir().join("aimmod.pid"));
-
-        if let Ok(contents) = std::fs::read_to_string(&pid_path) {
-            if let Ok(old_pid) = contents.trim().parse::<u32>() {
-                if old_pid != our_pid {
-                    eprintln!("[single-instance] killing old instance (PID {old_pid})");
-                    let _ = std::process::Command::new("kill")
-                        .args(["-15", &old_pid.to_string()])
-                        .output();
-                    std::thread::sleep(std::time::Duration::from_millis(400));
-                }
-            }
-        }
-
-        let _ = std::fs::write(&pid_path, our_pid.to_string());
+fn focus_primary_window(app: &AppHandle) {
+    for label in ["stats", "logs", "overlay"] {
+        let Some(window) = app.get_webview_window(label) else {
+            continue;
+        };
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+        break;
     }
 }
 
 // ─── App Entry Point ───────────────────────────────────────────────────────────
 
 pub fn run() {
-    kill_existing_instance();
-
     // Our logger emits to stderr AND to the Tauri logs window
     logger::init().unwrap_or_else(|_| eprintln!("logger already set"));
 
@@ -1272,6 +1221,10 @@ pub fn run() {
     };
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::info!("single-instance: forwarding launch to existing AimMod instance");
+            focus_primary_window(app);
+        }))
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -1291,6 +1244,7 @@ pub fn run() {
             clear_log_buffer,
             get_settings,
             save_settings,
+            reset_settings,
             get_friends,
             add_friend,
             remove_friend,
