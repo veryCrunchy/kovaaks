@@ -176,16 +176,6 @@ fn connect_command() -> Result<(), String> {
         )
     };
     if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
-        if let Err(err) = set_pipe_nowait(handle) {
-            COMMAND_LAST_ERROR.store(err, Ordering::Release);
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            return Err(format!(
-                "SetNamedPipeHandleState(\\\\.\\pipe\\kovaaks-bridge-cmd) failed with {}",
-                err
-            ));
-        }
         COMMAND_HANDLE.store(handle as usize, Ordering::Release);
         COMMAND_CONNECTED.store(true, Ordering::Release);
         COMMAND_LAST_ERROR.store(0, Ordering::Release);
