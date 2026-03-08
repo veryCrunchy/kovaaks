@@ -2008,6 +2008,11 @@ private:
             || (std::isfinite(current_score_total) && current_score_total > 0.05f)
             || (std::isfinite(current_score_total_derived) && current_score_total_derived > 0.05f);
         const bool effective_active_now = active_now || runtime_progress_hint;
+        const bool recent_live_metric_stream =
+            live_metric_hooks_registered_
+            && live_metric_receiver_hint_
+            && is_likely_valid_object_ptr(live_metric_receiver_hint_)
+            && safe_elapsed_ms(now, live_metric_receiver_hint_ms_) <= 160;
         const bool active_prev =
             prev_is_in_challenge > 0
             || prev_is_in_scenario > 0;
@@ -2071,51 +2076,116 @@ private:
             pull_receiver_metrics(receiver);
         }
 
-        if (!effective_active_now) {
-            current_kills_total = -1;
-            current_shots_fired = -1;
-            current_shots_hit = -1;
-            current_score_total = -1.0f;
-            current_score_total_derived = -1.0f;
-            current_score_per_minute = -1.0f;
-            current_kills_per_second = -1.0f;
-            current_accuracy = -1.0f;
-            current_challenge_average_fps = -1.0f;
-            current_challenge_tick_count = -1;
-            current_damage_done = -1.0f;
-            current_damage_possible = -1.0f;
-            current_damage_efficiency = -1.0f;
-            current_seconds = -1.0f;
-            current_time_remaining = -1.0f;
+        const bool use_batched_poll_snapshot = !recent_live_metric_stream;
+
+        {
+        EmitTagScope derived_scope(*this, "derived_spm_seconds", "non_ui_probe");
+        if (current_accuracy < 0.0f && current_shots_fired > 0 && current_shots_hit >= 0) {
+            current_accuracy = (static_cast<float>(current_shots_hit) * 100.0f)
+                / static_cast<float>(current_shots_fired);
+            if (!use_batched_poll_snapshot) {
+                emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
+            }
+        }
+        const bool allow_score_derivation =
+            current_is_in_challenge > 0
+            || (std::isfinite(current_time_remaining) && current_time_remaining > 0.25f);
+        if (allow_score_derivation
+            && std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
+            && std::isfinite(current_seconds) && current_seconds > 0.0f) {
+            const float derived_score_total = (current_score_per_minute * current_seconds) / 60.0f;
+            if (std::isfinite(derived_score_total) && derived_score_total >= 0.0f) {
+                current_score_total_derived = derived_score_total;
+                if (!use_batched_poll_snapshot) {
+                    emit_pull_f32(
+                        "pull_score_total_derived",
+                        last_score_total_derived_,
+                        derived_score_total,
+                        last_nonzero_score_total_derived_ms_,
+                        now
+                    );
+                }
+                if (current_score_total < 0.0f || current_score_total <= 0.0001f) {
+                    current_score_total = derived_score_total;
+                    if (!use_batched_poll_snapshot) {
+                        emit_pull_f32(
+                            "pull_score_total",
+                            last_score_total_,
+                            derived_score_total,
+                            last_nonzero_score_total_ms_,
+                            now
+                        );
+                    }
+                }
+            }
+        }
         }
 
-        if (effective_active_now) {
-            emit_pull_i32("pull_kills_total", last_kills_total_, current_kills_total, last_nonzero_kills_total_ms_, now);
-            emit_pull_i32("pull_shots_fired_total", last_shots_fired_, current_shots_fired, last_nonzero_shots_fired_ms_, now);
-            emit_pull_i32("pull_shots_hit_total", last_shots_hit_, current_shots_hit, last_nonzero_shots_hit_ms_, now);
-            emit_pull_i32(
+        if (!effective_active_now) {
+            current_kills_total = 0;
+            current_shots_fired = 0;
+            current_shots_hit = 0;
+            current_score_total = 0.0f;
+            current_score_total_derived = 0.0f;
+            current_score_per_minute = 0.0f;
+            current_kills_per_second = 0.0f;
+            current_accuracy = 0.0f;
+            current_challenge_average_fps = 0.0f;
+            current_challenge_tick_count = 0;
+            current_damage_done = 0.0f;
+            current_damage_possible = 0.0f;
+            current_damage_efficiency = 0.0f;
+            current_seconds = 0.0f;
+            current_time_remaining = 0.0f;
+        }
+
+        if (use_batched_poll_snapshot) {
+            bool snapshot_dirty = false;
+            snapshot_dirty |= cache_pull_i32("pull_kills_total", last_kills_total_, current_kills_total, last_nonzero_kills_total_ms_, now);
+            snapshot_dirty |= cache_pull_i32("pull_shots_fired_total", last_shots_fired_, current_shots_fired, last_nonzero_shots_fired_ms_, now);
+            snapshot_dirty |= cache_pull_i32("pull_shots_hit_total", last_shots_hit_, current_shots_hit, last_nonzero_shots_hit_ms_, now);
+            snapshot_dirty |= cache_pull_i32(
                 "pull_challenge_tick_count_total",
                 last_challenge_tick_count_,
                 current_challenge_tick_count,
                 last_nonzero_challenge_tick_count_ms_,
                 now
             );
-            emit_pull_f32("pull_seconds_total", last_seconds_, current_seconds, last_nonzero_seconds_ms_, now);
-            emit_pull_f32(
+            snapshot_dirty |= cache_pull_f32("pull_seconds_total", last_seconds_, current_seconds, last_nonzero_seconds_ms_, now);
+            snapshot_dirty |= cache_pull_f32(
                 "pull_challenge_seconds_total",
                 last_challenge_seconds_total_,
                 current_seconds,
                 last_nonzero_challenge_seconds_ms_,
                 now
             );
-            emit_pull_f32("pull_score_total", last_score_total_, current_score_total, last_nonzero_score_total_ms_, now);
-            emit_pull_f32("pull_score_per_minute", last_score_per_minute_, current_score_per_minute, last_nonzero_spm_ms_, now);
-            emit_pull_f32("pull_kills_per_second", last_kills_per_second_, current_kills_per_second, last_nonzero_kills_per_second_ms_, now);
-            emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
-            emit_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, current_challenge_average_fps, last_nonzero_challenge_average_fps_ms_, now);
-            emit_pull_f32("pull_damage_done", last_damage_done_, current_damage_done, last_nonzero_damage_done_ms_, now);
-            emit_pull_f32("pull_damage_possible", last_damage_possible_, current_damage_possible, last_nonzero_damage_possible_ms_, now);
-            emit_pull_f32("pull_damage_efficiency", last_damage_efficiency_, current_damage_efficiency, last_nonzero_damage_efficiency_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_score_total", last_score_total_, current_score_total, last_nonzero_score_total_ms_, now);
+            snapshot_dirty |= cache_pull_f32(
+                "pull_score_total_derived",
+                last_score_total_derived_,
+                current_score_total_derived,
+                last_nonzero_score_total_derived_ms_,
+                now
+            );
+            snapshot_dirty |= cache_pull_f32("pull_score_per_minute", last_score_per_minute_, current_score_per_minute, last_nonzero_spm_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_kills_per_second", last_kills_per_second_, current_kills_per_second, last_nonzero_kills_per_second_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_challenge_average_fps", last_challenge_average_fps_, current_challenge_average_fps, last_nonzero_challenge_average_fps_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_damage_done", last_damage_done_, current_damage_done, last_nonzero_damage_done_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_damage_possible", last_damage_possible_, current_damage_possible, last_nonzero_damage_possible_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_damage_efficiency", last_damage_efficiency_, current_damage_efficiency, last_nonzero_damage_efficiency_ms_, now);
+            snapshot_dirty |= cache_pull_f32("pull_time_remaining", last_time_remaining_, current_time_remaining, last_nonzero_time_remaining_ms_, now);
+            snapshot_dirty |= cache_pull_f32(
+                "pull_queue_time_remaining",
+                last_queue_time_remaining_,
+                current_queue_time_remaining,
+                last_nonzero_queue_time_remaining_ms_,
+                now
+            );
+            if (snapshot_dirty) {
+                emit_pull_snapshot(now);
+            }
+        } else if (effective_active_now) {
             emit_pull_f32("pull_time_remaining", last_time_remaining_, current_time_remaining, last_nonzero_time_remaining_ms_, now);
             emit_pull_f32("pull_queue_time_remaining", last_queue_time_remaining_, current_queue_time_remaining, last_nonzero_queue_time_remaining_ms_, now);
         } else {
@@ -2328,43 +2398,6 @@ private:
             if (leaving_active_edge || entering_active_edge) {
                 state_receiver_instance_ = nullptr;
                 next_receiver_resolve_ms_ = 0;
-            }
-        }
-        }
-
-        {
-        EmitTagScope derived_scope(*this, "derived_spm_seconds", "non_ui_probe");
-        if (current_accuracy < 0.0f && current_shots_fired > 0 && current_shots_hit >= 0) {
-            current_accuracy = (static_cast<float>(current_shots_hit) * 100.0f)
-                / static_cast<float>(current_shots_fired);
-            emit_pull_f32("pull_accuracy", last_accuracy_, current_accuracy, last_nonzero_accuracy_ms_, now);
-        }
-        const bool allow_score_derivation =
-            current_is_in_challenge > 0
-            || (std::isfinite(current_time_remaining) && current_time_remaining > 0.25f);
-        if (allow_score_derivation
-            && std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0f
-            && std::isfinite(current_seconds) && current_seconds > 0.0f) {
-            const float derived_score_total = (current_score_per_minute * current_seconds) / 60.0f;
-            if (std::isfinite(derived_score_total) && derived_score_total >= 0.0f) {
-                current_score_total_derived = derived_score_total;
-                emit_pull_f32(
-                    "pull_score_total_derived",
-                    last_score_total_derived_,
-                    derived_score_total,
-                    last_nonzero_score_total_derived_ms_,
-                    now
-                );
-                if (current_score_total < 0.0f || current_score_total <= 0.0001f) {
-                    current_score_total = derived_score_total;
-                    emit_pull_f32(
-                        "pull_score_total",
-                        last_score_total_,
-                        derived_score_total,
-                        last_nonzero_score_total_ms_,
-                        now
-                    );
-                }
             }
         }
         }
@@ -4691,6 +4724,54 @@ private:
         }
     }
 
+    bool cache_pull_i32(const char* ev, int32_t& last_value, int32_t value, uint64_t& last_nonzero_ms, uint64_t now) {
+        if (value < 0) {
+            return false;
+        }
+        const bool active_stream_expected =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1;
+        if (value == 0 && last_nonzero_ms == 0 && !active_stream_expected) {
+            return false;
+        }
+        if (value == 0 && last_value > 0) {
+            constexpr uint64_t k_recent_zero_suppress_ms = 2500;
+            const bool recent_nonzero =
+                last_nonzero_ms > 0
+                && safe_elapsed_ms(now, last_nonzero_ms) < k_recent_zero_suppress_ms;
+            const bool suppress_transient_zero =
+                recent_nonzero
+                && (
+                    std::strcmp(ev, "pull_shots_fired_total") == 0
+                    || std::strcmp(ev, "pull_shots_hit_total") == 0
+                    || std::strcmp(ev, "pull_kills_total") == 0
+                );
+            if (suppress_transient_zero) {
+                return false;
+            }
+        }
+        if (value > 0) {
+            last_nonzero_ms = now;
+        }
+        if (last_value == value) {
+            return false;
+        }
+        const int32_t prev = last_value;
+        last_value = value;
+        last_state_change_emit_ms_ = now;
+
+        if (prev >= 0 && value > prev) {
+            const int32_t delta = value - prev;
+            if (std::strcmp(ev, "pull_shots_fired_total") == 0) {
+                emit_shot_target_telemetry("shot_fired", delta, value, now);
+            } else if (std::strcmp(ev, "pull_shots_hit_total") == 0) {
+                emit_shot_target_telemetry("shot_hit", delta, value, now);
+            }
+        }
+        return true;
+    }
+
     void emit_pull_f32(const char* ev, float& last_value, float value, uint64_t& last_nonzero_ms, uint64_t now) {
         if (!std::isfinite(value) || value < 0.0f) {
             return;
@@ -4738,6 +4819,80 @@ private:
         );
         kovaaks::RustBridge::emit_json(json.data());
         last_state_change_emit_ms_ = now;
+    }
+
+    bool cache_pull_f32(const char* ev, float& last_value, float value, uint64_t& last_nonzero_ms, uint64_t now) {
+        if (!std::isfinite(value) || value < 0.0f) {
+            return false;
+        }
+        const bool is_qrem = (std::strcmp(ev, "pull_queue_time_remaining") == 0);
+        const bool active_stream_expected =
+            lifecycle_active_
+            || last_is_in_challenge_ == 1
+            || last_is_in_scenario_ == 1;
+        if (value == 0.0f && last_nonzero_ms == 0 && !is_qrem && !active_stream_expected) {
+            return false;
+        }
+        if (value == 0.0f && std::isfinite(last_value) && last_value > 0.0f) {
+            constexpr uint64_t k_recent_zero_suppress_ms = 2500;
+            const bool recent_nonzero =
+                last_nonzero_ms > 0
+                && safe_elapsed_ms(now, last_nonzero_ms) < k_recent_zero_suppress_ms;
+            const bool suppress_transient_zero =
+                recent_nonzero
+                && (
+                    std::strcmp(ev, "pull_accuracy") == 0
+                    || std::strcmp(ev, "pull_seconds_total") == 0
+                    || std::strcmp(ev, "pull_score_per_minute") == 0
+                );
+            if (suppress_transient_zero) {
+                return false;
+            }
+        }
+        if (value > 0.0f) {
+            last_nonzero_ms = now;
+        }
+        if (std::isfinite(last_value) && std::fabs(static_cast<double>(last_value) - static_cast<double>(value)) <= 0.0001) {
+            return false;
+        }
+        last_value = value;
+        last_state_change_emit_ms_ = now;
+        return true;
+    }
+
+    void emit_pull_snapshot(uint64_t now) {
+        std::array<char, 2048> json{};
+        std::snprintf(
+            json.data(),
+            json.size(),
+            "{\"ev\":\"pull_snapshot\",\"ts_ms\":%llu,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_in_trainer\":%d,\"scenario_is_paused\":%d,\"kills\":%d,\"shots_fired\":%d,\"shots_hit\":%d,\"challenge_tick_count_total\":%d,\"session_time_secs\":%.6f,\"challenge_seconds_total\":%.6f,\"score_total\":%.6f,\"score_total_derived\":%.6f,\"spm\":%.6f,\"kps\":%.6f,\"accuracy_pct\":%.6f,\"challenge_average_fps\":%.6f,\"damage_done\":%.6f,\"damage_possible\":%.6f,\"damage_efficiency\":%.6f,\"time_remaining\":%.6f,\"queue_time_remaining\":%.6f,\"method\":\"%s\",\"origin_flag\":\"%s\",\"source\":\"production_stripped\"}",
+            static_cast<unsigned long long>(now),
+            last_is_in_challenge_,
+            last_is_in_scenario_,
+            last_is_in_scenario_editor_,
+            last_is_in_trainer_,
+            last_scenario_is_paused_,
+            last_kills_total_,
+            last_shots_fired_,
+            last_shots_hit_,
+            last_challenge_tick_count_,
+            static_cast<double>(last_seconds_),
+            static_cast<double>(last_challenge_seconds_total_),
+            static_cast<double>(last_score_total_),
+            static_cast<double>(last_score_total_derived_),
+            static_cast<double>(last_score_per_minute_),
+            static_cast<double>(last_kills_per_second_),
+            static_cast<double>(last_accuracy_),
+            static_cast<double>(last_challenge_average_fps_),
+            static_cast<double>(last_damage_done_),
+            static_cast<double>(last_damage_possible_),
+            static_cast<double>(last_damage_efficiency_),
+            static_cast<double>(last_time_remaining_),
+            static_cast<double>(last_queue_time_remaining_),
+            emit_method_ ? emit_method_ : "unknown",
+            emit_origin_flag_ ? emit_origin_flag_ : "unknown"
+        );
+        kovaaks::RustBridge::emit_json(json.data());
     }
 };
 
