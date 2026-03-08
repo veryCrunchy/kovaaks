@@ -35,10 +35,13 @@ std::wstring g_last_dll_path{};
 std::atomic<DWORD> g_last_win32_error{0};
 std::atomic<DWORD> g_last_transport_error{0};
 std::atomic<ULONGLONG> g_last_reconnect_attempt_ms{0};
+std::atomic<ULONGLONG> g_last_probe_attempt_ms{0};
 std::atomic<bool> g_reconnect_worker_stop{false};
 std::thread g_reconnect_worker{};
 
 constexpr ULONGLONG k_min_reconnect_interval_ms = 250;
+constexpr ULONGLONG k_connected_probe_interval_ms = 1500;
+constexpr const char* k_transport_probe_json = "{\"ev\":\"bridge_transport_probe\"}";
 
 bool module_still_loaded(HMODULE expected_module, const void* symbol_address) {
     if (!expected_module || !symbol_address) {
@@ -89,6 +92,27 @@ void reconnect_throttled() {
     (void)reconnect_now();
 }
 
+bool probe_connected_transport() {
+    if (!g_api.emit_json || !module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.emit_json))) {
+        invalidate_api();
+        return false;
+    }
+
+    const ULONGLONG now = GetTickCount64();
+    const ULONGLONG previous = g_last_probe_attempt_ms.load(std::memory_order_relaxed);
+    if (now - previous < k_connected_probe_interval_ms) {
+        return true;
+    }
+
+    g_last_probe_attempt_ms.store(now, std::memory_order_relaxed);
+    if (g_api.emit_json(k_transport_probe_json)) {
+        return true;
+    }
+
+    refresh_transport_error();
+    return false;
+}
+
 void stop_reconnect_worker() {
     g_reconnect_worker_stop.store(true, std::memory_order_release);
     if (g_reconnect_worker.joinable()) {
@@ -112,6 +136,9 @@ void ensure_reconnect_worker() {
                 bool connected = false;
                 if (module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.is_connected))) {
                     connected = g_api.is_connected();
+                    if (connected) {
+                        connected = probe_connected_transport();
+                    }
                 } else {
                     invalidate_api();
                 }

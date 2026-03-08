@@ -15,9 +15,11 @@ const COMMAND_PIPE_NAME: &[u8] = b"\\\\.\\pipe\\kovaaks-bridge-cmd\0";
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
+const FILE_WRITE_ATTRIBUTES: u32 = 0x0000_0100;
 const FILE_SHARE_NONE: u32 = 0x0000_0000;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
+const ERROR_ACCESS_DENIED: u32 = 5;
 
 type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
@@ -101,6 +103,10 @@ fn named_pipe_handle_alive(handle: Handle) -> Result<(), u32> {
     Err(unsafe { GetLastError() })
 }
 
+fn is_nonfatal_pipe_probe_error(err: u32) -> bool {
+    err == ERROR_ACCESS_DENIED
+}
+
 fn close_event_pipe() {
     CONNECTED.store(false, Ordering::Release);
     let raw = PIPE_HANDLE.swap(0, Ordering::AcqRel) as Handle;
@@ -163,7 +169,7 @@ fn connect_command() -> Result<(), String> {
     let handle = unsafe {
         CreateFileA(
             COMMAND_PIPE_NAME.as_ptr(),
-            GENERIC_READ,
+            GENERIC_READ | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
             FILE_SHARE_NONE,
             ptr::null_mut(),
             OPEN_EXISTING,
@@ -295,8 +301,10 @@ pub fn poll_command_line(out: &mut [u8]) -> i32 {
     if COMMAND_CONNECTED.load(Ordering::Acquire) {
         let handle = COMMAND_HANDLE.load(Ordering::Acquire) as Handle;
         if let Err(err) = named_pipe_handle_alive(handle) {
-            COMMAND_LAST_ERROR.store(err, Ordering::Release);
-            close_command_pipe();
+            if !is_nonfatal_pipe_probe_error(err) {
+                COMMAND_LAST_ERROR.store(err, Ordering::Release);
+                close_command_pipe();
+            }
         }
     }
 
@@ -350,9 +358,11 @@ pub fn is_connected() -> bool {
 
     let handle = PIPE_HANDLE.load(Ordering::Acquire) as Handle;
     if let Err(err) = named_pipe_handle_alive(handle) {
-        LAST_ERROR.store(err, Ordering::Release);
-        close_event_pipe();
-        return false;
+        if !is_nonfatal_pipe_probe_error(err) {
+            LAST_ERROR.store(err, Ordering::Release);
+            close_event_pipe();
+            return false;
+        }
     }
 
     true

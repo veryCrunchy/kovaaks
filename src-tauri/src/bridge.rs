@@ -4009,6 +4009,7 @@ mod imp {
                                                 | "hook_focus_probe_typed"
                                                 | "class_hook_probe"
                                                 | "script_hook_probe"
+                                                | "bridge_transport_probe"
                                                 | "pull_source"
                                                 | "pull_snapshot"
                                                 | "shot_fired_telemetry"
