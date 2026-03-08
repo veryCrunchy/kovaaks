@@ -1781,6 +1781,29 @@ private:
         const bool replay_active = kmod_replay::replay_ingame_playback_is_active();
         const bool recent_runtime_progress =
             safe_elapsed_ms(now, last_runtime_progress_ms_) < 1200;
+        const bool recent_stream_activity =
+            last_state_change_emit_ms_ > 0
+            && safe_elapsed_ms(now, last_state_change_emit_ms_) < 1200;
+        const bool progress_signal =
+            current_shots_fired > 0
+            || current_shots_hit > 0
+            || (std::isfinite(current_seconds) && current_seconds > 0.0001f)
+            || (std::isfinite(current_score_per_minute) && current_score_per_minute > 0.0001f)
+            || (std::isfinite(current_damage_done) && current_damage_done > 0.0001f)
+            || (std::isfinite(current_damage_possible) && current_damage_possible > 0.0001f);
+        const bool lifecycle_start_alignment_hint =
+            recent_stream_activity
+            && (progress_signal || timer_implies_challenge)
+            && (
+                current_is_in_scenario > 0
+                || current_is_in_challenge > 0
+                || prev_is_in_scenario > 0
+                || prev_is_in_challenge > 0
+                || lifecycle_active_
+                || (last_true_start_transition_ms_ > 0
+                    && safe_elapsed_ms(now, last_true_start_transition_ms_) < 1500)
+                || (std::isfinite(current_queue_time_remaining) && current_queue_time_remaining > 0.0001f)
+            );
         const bool runtime_progress_active =
             seconds_advancing
             || ticks_advancing
@@ -1788,7 +1811,8 @@ private:
             || timer_implies_challenge;
         const bool inferred_active =
             !replay_active
-            && (runtime_progress_active
+            && (lifecycle_start_alignment_hint
+                || runtime_progress_active
                 || (recent_runtime_progress
                     && (current_challenge_tick_count > 0
                         || timer_implies_challenge
