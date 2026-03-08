@@ -1,16 +1,17 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useLiveFeedback } from "../hooks/useLiveFeedback";
+import { C } from "../design/tokens";
 
 const KIND_COLOR: Record<string, string> = {
   positive: "#00f5a0",
-  tip: "#ffd700",
-  warning: "#ff4d4d",
+  tip:      "#ffd700",
+  warning:  "#ff4d4d",
 };
 
 const KIND_ICON: Record<string, string> = {
   positive: "✓",
-  tip: "◆",
-  warning: "⚠",
+  tip:      "◆",
+  warning:  "⚠",
 };
 
 interface LiveFeedbackToastProps {
@@ -18,66 +19,66 @@ interface LiveFeedbackToastProps {
   ttsVoice?: string | null;
 }
 
-/**
- * Auto-dismissing coaching notification stack.
- * Positioning is handled by the parent DraggableHUD wrapper.
- */
 export function LiveFeedbackToast({ ttsEnabled = false, ttsVoice = null }: LiveFeedbackToastProps) {
   const toasts = useLiveFeedback(ttsEnabled, ttsVoice);
 
   return (
     <div
       style={{
-        display: "flex",
-        flexDirection: "column-reverse",
-        gap: 8,
-        fontFamily: "'JetBrains Mono', monospace",
-        width: 280,
-        pointerEvents: "none",
+        display:        "flex",
+        flexDirection:  "column-reverse",
+        gap:            6,
+        fontFamily:     "'JetBrains Mono', monospace",
+        width:          300,
+        pointerEvents:  "none",
       }}
     >
       <AnimatePresence initial={false}>
         {toasts.map((toast) => {
           const color = KIND_COLOR[toast.kind] ?? "#ffffff";
-          const icon = KIND_ICON[toast.kind] ?? "•";
+          const icon  = KIND_ICON[toast.kind]  ?? "•";
+
           return (
             <motion.div
               key={toast.id}
-              initial={{ opacity: 0, x: 40, scale: 0.92 }}
-              animate={{ opacity: 1, x: 0, scale: 1 }}
-              exit={{ opacity: 0, x: 40, scale: 0.88 }}
-              transition={{ duration: 0.2 }}
+              initial={{ opacity: 0, x: 30, scale: 0.94 }}
+              animate={{ opacity: 1, x: 0,  scale: 1 }}
+              exit={{    opacity: 0, x: 30, scale: 0.9 }}
+              transition={{ duration: 0.18, ease: "easeOut" }}
               style={{
-                background: "rgba(8, 8, 14, 0.88)",
-                border: `1px solid ${color}44`,
-                borderLeft: `3px solid ${color}`,
-                borderRadius: 6,
-                padding: "7px 12px",
-                maxWidth: 300,
-                backdropFilter: "blur(10px)",
-                boxShadow: `0 2px 12px rgba(0,0,0,0.5), 0 0 8px ${color}18`,
+                background:     C.glassDark,
+                border:         `1px solid ${color}30`,
+                borderLeft:     `4px solid ${color}`,
+                borderRadius:   8,
+                padding:        "9px 13px",
+                backdropFilter: "blur(16px) saturate(180%)",
+                boxShadow:      `0 4px 18px rgba(0,0,0,0.55), 0 0 10px ${color}14`,
               }}
             >
-              <div style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+              <div style={{ display: "flex", gap: 9, alignItems: "flex-start" }}>
+                {/* Icon pill */}
                 <span
                   style={{
+                    flexShrink:    0,
+                    display:       "inline-flex",
+                    alignItems:    "center",
+                    justifyContent: "center",
+                    width:         18,
+                    height:        18,
+                    borderRadius:  "50%",
+                    background:    `${color}18`,
+                    border:        `1px solid ${color}35`,
                     color,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    marginTop: 1,
-                    flexShrink: 0,
-                    textShadow: `0 0 6px ${color}`,
+                    fontSize:      9,
+                    fontWeight:    700,
+                    marginTop:     1,
+                    textShadow:    `0 0 6px ${color}`,
                   }}
                 >
                   {icon}
                 </span>
-                <span
-                  style={{
-                    color: "rgba(255,255,255,0.88)",
-                    fontSize: 11,
-                    lineHeight: 1.4,
-                  }}
-                >
+
+                <span style={{ color: "rgba(255,255,255,0.88)", fontSize: 11, lineHeight: 1.45 }}>
                   {toast.message}
                 </span>
               </div>

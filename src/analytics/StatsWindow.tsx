@@ -30,6 +30,8 @@ import {
   ReferenceArea,
   TooltipProps,
 } from "recharts";
+import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
+import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -146,8 +148,8 @@ const SEV_COLOR = {
 } as const;
 
 const CARD_STYLE: React.CSSProperties = {
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.07)",
+  background: C.surface,
+  border: `1px solid ${C.border}`,
   borderRadius: 10,
   padding: "14px 18px",
   flex: 1,
@@ -155,15 +157,16 @@ const CARD_STYLE: React.CSSProperties = {
 };
 
 const CHART_STYLE: React.CSSProperties = {
-  background: "rgba(255,255,255,0.03)",
-  border: "1px solid rgba(255,255,255,0.07)",
+  background: C.glass,
+  border: `1px solid ${C.border}`,
   borderRadius: 12,
   padding: "16px 20px",
+  backdropFilter: "blur(16px) saturate(180%)",
 };
 
 const TOOLTIP_STYLE: React.CSSProperties = {
-  background: "rgba(12,12,20,0.95)",
-  border: "1px solid rgba(255,255,255,0.1)",
+  background: C.glassDark,
+  border: `1px solid ${C.border}`,
   borderRadius: 8,
   fontFamily: "'JetBrains Mono', monospace",
   fontSize: 12,
@@ -773,11 +776,12 @@ function StatCard({
     <div style={CARD_STYLE}>
       <div
         style={{
-          fontSize: 11,
-          color: "rgba(255,255,255,0.38)",
+          fontSize: 9,
+          color: C.textFaint,
           textTransform: "uppercase",
-          letterSpacing: 1,
+          letterSpacing: "0.1em",
           marginBottom: 6,
+          fontWeight: 600,
         }}
       >
         {label}
@@ -792,23 +796,23 @@ function StatCard({
         }}
       >
         <span
+          className="tabular-nums"
           style={{
             fontSize: "clamp(14px, 2.5vw, 20px)",
             fontWeight: 700,
-            color: accent ?? "#fff",
+            color: accent ?? C.text,
             lineHeight: 1,
             maxWidth: "100%",
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            fontVariantNumeric: "tabular-nums",
           }}
         >
           {value}
         </span>
       </div>
       {sub && (
-        <div style={{ fontSize: 11, color: "rgba(255,255,255,0.35)", marginTop: 4 }}>
+        <div style={{ fontSize: 10, color: C.textFaint, marginTop: 4 }}>
           {sub}
         </div>
       )}
@@ -817,19 +821,7 @@ function StatCard({
 }
 
 function SectionTitle({ children }: { children: React.ReactNode }) {
-  return (
-    <div
-      style={{
-        fontSize: 12,
-        color: "rgba(255,255,255,0.4)",
-        textTransform: "uppercase",
-        letterSpacing: 1,
-        marginBottom: 14,
-      }}
-    >
-      {children}
-    </div>
-  );
+  return <SectionLabel className="mb-3">{children}</SectionLabel>;
 }
 
 function MiniTooltip({ active, payload }: TooltipProps<number, string>) {
@@ -1198,37 +1190,23 @@ function InsightCard({ ins }: { ins: Insight }) {
   return (
     <div
       style={{
-        background: `${color}12`,
-        border: `1px solid ${color}30`,
+        background: `${color}0e`,
+        border: `1px solid ${color}28`,
+        borderLeft: `3px solid ${color}`,
         borderRadius: 10,
         padding: "12px 16px",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
-        <div
-          style={{
-            width: 6,
-            height: 6,
-            borderRadius: "50%",
-            background: color,
-            flexShrink: 0,
-          }}
-        />
-        <span style={{ fontWeight: 700, color, fontSize: 13 }}>{ins.title}</span>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+        <Dot color={color} size={6} />
+        <span style={{ fontWeight: 700, color, fontSize: 12 }}>{ins.title}</span>
         {ins.kind === "issue" && ins.severity && (
-          <span
-            style={{
-              fontSize: 10,
-              color: `${color}80`,
-              textTransform: "uppercase",
-              letterSpacing: 1,
-            }}
-          >
+          <Badge color={color} size="xs">
             {ins.severity === "high" ? "priority" : ins.severity === "medium" ? "worth fixing" : "minor"}
-          </span>
+          </Badge>
         )}
       </div>
-      <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.55)", lineHeight: 1.6 }}>
+      <p style={{ margin: 0, fontSize: 11, color: C.textSub, lineHeight: 1.6 }}>
         {ins.description}
       </p>
     </div>
@@ -4030,8 +4008,8 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
         style={{
           display: "flex",
           alignItems: "flex-end",
-          gap: 4,
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
+          gap: 2,
+          borderBottom: `1px solid ${C.border}`,
         }}
       >
         {tabs.map((t) => {
@@ -4044,15 +4022,16 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
               style={{
                 background: "none",
                 border: "none",
-                borderBottom: active ? "2px solid #00f5a0" : "2px solid transparent",
-                padding: "8px 16px",
+                borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent",
+                padding: "8px 14px",
                 marginBottom: -1,
                 cursor: "pointer",
-                color: active ? "#fff" : "rgba(255,255,255,0.4)",
+                color: active ? C.text : C.textMuted,
                 fontFamily: "inherit",
-                fontSize: 13,
-                fontWeight: active ? 700 : 400,
+                fontSize: 12,
+                fontWeight: active ? 700 : 500,
                 transition: "color 0.12s",
+                letterSpacing: "0.01em",
               }}
             >
               {t.label}
@@ -4071,34 +4050,34 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
               alignItems: "center",
             }}
           >
-            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginRight: 4, textTransform: "uppercase", letterSpacing: 0.8 }}>
+            <span style={{ fontSize: 9, color: C.textFaint, marginRight: 2, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600 }}>
               View
             </span>
-            {(["all", "warmup", "warmedup"] as SessionFilter[]).map((f) => (
-              <button
-                key={f}
-                onClick={() => setSessionFilter(f)}
-                style={{
-                  background: sessionFilter === f
-                    ? f === "warmup" ? "rgba(255,180,0,0.15)" : "rgba(0,245,160,0.12)"
-                    : "none",
-                  border: sessionFilter === f
-                    ? f === "warmup" ? "1px solid rgba(255,180,0,0.4)" : "1px solid rgba(0,245,160,0.3)"
-                    : "1px solid rgba(255,255,255,0.1)",
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  fontSize: 11,
-                  color: sessionFilter === f
-                    ? f === "warmup" ? "#ffb400" : "#00f5a0"
-                    : "rgba(255,255,255,0.4)",
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                  transition: "all 0.1s",
-                }}
-              >
-                {f === "all" ? "All" : f === "warmup" ? "Warm-up" : "Warmed-up"}
-              </button>
-            ))}
+            {(["all", "warmup", "warmedup"] as SessionFilter[]).map((f) => {
+              const active = sessionFilter === f;
+              const baseColor = f === "warmup" ? C.warn : C.accent;
+              return (
+                <button
+                  key={f}
+                  onClick={() => setSessionFilter(f)}
+                  style={{
+                    background: active ? `${baseColor}15` : "transparent",
+                    border: active ? `1px solid ${baseColor}40` : `1px solid ${C.border}`,
+                    borderRadius: 6,
+                    padding: "3px 9px",
+                    fontSize: 10,
+                    color: active ? baseColor : C.textMuted,
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    fontWeight: active ? 700 : 500,
+                    transition: "all 0.1s",
+                    letterSpacing: "0.03em",
+                  }}
+                >
+                  {f === "all" ? "All" : f === "warmup" ? "Warm-up" : "Warmed-up"}
+                </button>
+              );
+            })}
           </div>
         )}
       </div>
@@ -4429,8 +4408,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         display: "flex",
         flexDirection: "column",
         height: embedded ? "100%" : "100vh",
-        background: "#0a0a0f",
-        color: "#fff",
+        background: C.bg,
+        color: C.text,
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 13,
         overflow: "hidden",
@@ -4441,32 +4420,37 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         style={{
           display: "flex",
           gap: 0,
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
-          padding: "0 16px",
-          background: "rgba(255,255,255,0.015)",
+          borderBottom: `1px solid ${C.border}`,
+          padding: "0 20px",
+          background: "rgba(255,255,255,0.018)",
           flexShrink: 0,
         }}
       >
-        {(["sessions", "leaderboards", "debug"] as RootMode[]).map((m) => (
-          <button
-            key={m}
-            onClick={() => setRootMode(m)}
-            style={{
-              background: "none",
-              border: "none",
-              borderBottom: rootMode === m ? "2px solid #00f5a0" : "2px solid transparent",
-              padding: "11px 16px",
-              marginBottom: -1,
-              cursor: "pointer",
-              color: rootMode === m ? "#fff" : "rgba(255,255,255,0.4)",
-              fontFamily: "inherit",
-              fontSize: 13,
-              fontWeight: rootMode === m ? 700 : 400,
-            }}
-          >
-            {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : "Debug"}
-          </button>
-        ))}
+        {(["sessions", "leaderboards", "debug"] as RootMode[]).map((m) => {
+          const active = rootMode === m;
+          return (
+            <button
+              key={m}
+              onClick={() => setRootMode(m)}
+              style={{
+                background: "none",
+                border: "none",
+                borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent",
+                padding: "12px 18px",
+                marginBottom: -1,
+                cursor: "pointer",
+                color: active ? C.text : C.textMuted,
+                fontFamily: "inherit",
+                fontSize: 12,
+                fontWeight: active ? 700 : 500,
+                letterSpacing: "0.02em",
+                transition: "color 0.15s",
+              }}
+            >
+              {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : "Debug"}
+            </button>
+          );
+        })}
       </div>
 
       {/* ── Sessions content ── */}
@@ -4475,43 +4459,38 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       {/* ── Sidebar ── */}
       <div
         style={{
-          width: 250,
-          minWidth: 250,
-          borderRight: "1px solid rgba(255,255,255,0.07)",
+          width: 260,
+          minWidth: 260,
+          borderRight: `1px solid ${C.border}`,
           display: "flex",
           flexDirection: "column",
-          background: "rgba(255,255,255,0.015)",
+          background: "rgba(255,255,255,0.018)",
         }}
       >
-        <div style={{ padding: "18px 16px 12px" }}>
-          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 12 }}>
-            Session Stats
+        <div style={{ padding: "16px 14px 10px" }}>
+          <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textFaint, marginBottom: 10 }}>
+            Scenarios
           </div>
           <input
             type="text"
-            placeholder="Search scenarios…"
+            placeholder="Search…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
+            className="am-input"
             style={{
               width: "100%",
               boxSizing: "border-box",
-              background: "rgba(255,255,255,0.06)",
-              border: "1px solid rgba(255,255,255,0.1)",
-              borderRadius: 7,
-              padding: "7px 10px",
-              color: "#fff",
-              fontSize: 12,
-              fontFamily: "inherit",
-              outline: "none",
             }}
           />
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
             <span
               style={{
-                fontSize: 10,
-                color: "rgba(255,255,255,0.32)",
+                fontSize: 9,
+                color: C.textFaint,
                 textTransform: "uppercase",
-                letterSpacing: 0.8,
+                letterSpacing: "0.1em",
+                fontWeight: 600,
+                whiteSpace: "nowrap",
               }}
             >
               Sort
@@ -4519,17 +4498,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             <select
               value={scenarioSort}
               onChange={(e) => setScenarioSort(e.target.value as ScenarioSortMode)}
+              className="am-input"
               style={{
                 flex: 1,
                 boxSizing: "border-box",
-                background: "rgba(255,255,255,0.06)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 7,
-                padding: "6px 10px",
-                color: "#fff",
-                fontSize: 12,
-                fontFamily: "inherit",
-                outline: "none",
+                padding: "5px 8px",
               }}
             >
               <option value="recent">Recent</option>
@@ -4562,6 +4535,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           ) : (
             scenarioGroups.map((g) => {
               const active = g.name === selectedScenario;
+              const typeColor = scenarioColor(g.scenarioType);
               return (
                 <button
                   key={g.name}
@@ -4570,16 +4544,17 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                     display: "block",
                     width: "100%",
                     textAlign: "left",
-                    background: active ? "rgba(0,245,160,0.08)" : "transparent",
+                    background: active ? `${typeColor}0c` : "transparent",
                     border: "none",
                     borderLeft: active
-                      ? "2px solid #00f5a0"
-                      : "2px solid transparent",
-                    padding: "10px 14px",
+                      ? `3px solid ${typeColor}`
+                      : `3px solid ${typeColor}30`,
+                    padding: "9px 12px 9px 11px",
                     cursor: "pointer",
-                    color: active ? "#fff" : "rgba(255,255,255,0.65)",
+                    color: active ? C.text : C.textSub,
                     fontFamily: "inherit",
                     fontSize: 12,
+                    transition: "background 0.1s",
                   }}
                 >
                   <div
@@ -4594,29 +4569,25 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                   </div>
                   <div
                     style={{
-                      fontSize: 11,
-                      color: active
-                        ? "rgba(255,255,255,0.45)"
-                        : "rgba(255,255,255,0.28)",
+                      fontSize: 10,
+                      color: active ? C.textMuted : C.textFaint,
                       display: "flex",
-                      gap: 10,
+                      gap: 8,
+                      alignItems: "center",
                     }}
                   >
-                    <span>
-                      {g.count} run{g.count !== 1 ? "s" : ""}
+                    <span style={{ color: typeColor, fontWeight: 600 }}>
+                      {SCENARIO_LABELS[g.scenarioType] ?? g.scenarioType}
                     </span>
-                    <span>
-                      {g.scenarioType}
-                    </span>
+                    <span>{g.count}×</span>
                     {g.flaggedCount > 0 && (
-                      <span style={{ color: "#ffb400" }}>
+                      <span style={{ color: C.warn }}>
                         {g.flaggedCount} flagged
                       </span>
                     )}
                     <span
-                      style={{
-                        color: active ? "#00f5a0" : "rgba(255,255,255,0.35)",
-                      }}
+                      className="tabular-nums"
+                      style={{ marginLeft: "auto", color: active ? C.accent : C.textFaint }}
                     >
                       PB {fmtScore(g.bestReliable ?? g.bestAny)}
                     </span>
@@ -4629,11 +4600,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
 
         <div
           style={{
-            padding: "10px 16px",
-            borderTop: "1px solid rgba(255,255,255,0.07)",
+            padding: "10px 14px",
+            borderTop: `1px solid ${C.border}`,
             display: "flex",
             flexDirection: "column",
-            gap: 10,
+            gap: 8,
           }}
         >
           <div
@@ -4644,48 +4615,30 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               gap: 8,
             }}
           >
-            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.25)" }}>
+            <span style={{ fontSize: 10, color: C.textFaint }}>
               {records.length} total{flaggedRecordCount > 0 ? ` • ${flaggedRecordCount} flagged` : ""}
             </span>
-            <div style={{ display: "flex", gap: 6 }}>
-              <button
+            <div style={{ display: "flex", gap: 5 }}>
+              <Btn
+                size="xs"
+                variant="ghost"
                 onClick={handleImportHistory}
                 disabled={importingHistory}
-                style={{
-                  background: importingHistory ? "rgba(255,255,255,0.08)" : "transparent",
-                  border: "1px solid rgba(255,255,255,0.12)",
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  cursor: importingHistory ? "default" : "pointer",
-                  color: importingHistory ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.55)",
-                  fontFamily: "inherit",
-                  fontSize: 11,
-                  transition: "all 0.15s",
-                }}
               >
                 {importingHistory ? "Importing…" : "Import CSVs"}
-              </button>
-              <button
+              </Btn>
+              <Btn
+                size="xs"
+                variant={confirmClear ? "danger" : "ghost"}
                 onClick={handleClear}
                 onBlur={() => setConfirmClear(false)}
-                style={{
-                  background: confirmClear ? "rgba(255,107,107,0.15)" : "transparent",
-                  border: `1px solid ${confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.12)"}`,
-                  borderRadius: 6,
-                  padding: "4px 10px",
-                  cursor: "pointer",
-                  color: confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.4)",
-                  fontFamily: "inherit",
-                  fontSize: 11,
-                  transition: "all 0.15s",
-                }}
               >
                 {confirmClear ? "Confirm clear" : "Clear"}
-              </button>
+              </Btn>
             </div>
           </div>
           {importStatus && (
-            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", lineHeight: 1.5 }}>
+            <div style={{ fontSize: 10, color: C.textFaint, lineHeight: 1.5 }}>
               {importStatus}
             </div>
           )}
@@ -4696,11 +4649,13 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
         {selectedScenario && selectedRecords.length > 0 ? (
           <>
-            <h2
-              style={{ margin: "0 0 20px", fontSize: 16, fontWeight: 700, color: "#fff" }}
-            >
-              {selectedScenario}
-            </h2>
+            <div style={{ marginBottom: 20 }}>
+              <h2
+                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text, letterSpacing: "-0.01em" }}
+              >
+                {selectedScenario}
+              </h2>
+            </div>
             <ScenarioDetails records={selectedRecords} scenarioName={selectedScenario!} />
           </>
         ) : (
@@ -4711,7 +4666,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               flexDirection: "column",
               alignItems: "center",
               justifyContent: "center",
-              color: "rgba(255,255,255,0.2)",
+              color: C.textFaint,
               gap: 12,
             }}
           >
@@ -4725,15 +4680,15 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               <div
                 style={{
                   marginTop: 4,
-                  border: "1px solid rgba(0,245,160,0.22)",
-                  background: "rgba(0,245,160,0.06)",
+                  border: `1px solid ${C.accentBorder}`,
+                  background: C.accentDim,
                   borderRadius: 8,
                   padding: "10px 12px",
                   minWidth: 320,
-                  color: "rgba(255,255,255,0.82)",
+                  color: C.textSub,
                 }}
               >
-                <div style={{ fontSize: 12, marginBottom: 6, color: "#00f5a0" }}>
+                <div style={{ fontSize: 11, marginBottom: 6, color: C.accent, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>
                   Live AimMod metrics (not persisted yet)
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 10px", fontSize: 11 }}>

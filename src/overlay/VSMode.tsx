@@ -7,6 +7,8 @@ import { useLiveScore } from "../hooks/useLiveScore";
 import { useStatsPanel } from "../hooks/useStatsPanel";
 import type { FriendProfile } from "../types/friends";
 import { logError } from "../log";
+import { GlassCard, Dot } from "../design/ui";
+import { C } from "../design/tokens";
 
 interface VSModeProps {
   currentScenario: string | null;
@@ -286,129 +288,108 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
     <AnimatePresence>
       <motion.div
         key="vs-mode"
-        initial={{ opacity: 0, y: -10 }}
+        initial={{ opacity: 0, y: -8 }}
         animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -10 }}
-        transition={{ duration: 0.3 }}
+        exit={{ opacity: 0, y: -8 }}
+        transition={{ duration: 0.25 }}
         className="select-none"
         style={{ fontFamily: "'JetBrains Mono', monospace" }}
       >
-        <div
-          className="rounded-xl overflow-hidden"
-          style={{
-            background: "rgba(8, 8, 14, 0.88)",
-            border: "1px solid rgba(255,255,255,0.07)",
-            backdropFilter: "blur(12px)",
-            width: 340,
-            padding: "14px 16px",
-          }}
-        >
-          {/* Header row */}
+        <GlassCard style={{ width: 310, padding: "12px 14px" }}>
+          {/* ── Header ──────────────────────────────────────────────────── */}
           <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2">
-              <div
-                className="w-2 h-2 rounded-full"
-                style={{
-                  background: isSessionActive ? "#00f5a0" : "#666",
-                  boxShadow: isSessionActive ? "0 0 6px #00f5a0" : "none",
-                }}
-              />
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Dot color={isSessionActive ? C.accent : "#444"} pulse={isSessionActive} size={6} />
               <span
-                className="text-xs font-medium"
-                style={{ color: "rgba(255,255,255,0.5)" }}
+                className="truncate text-xs"
+                style={{ color: C.textMuted, maxWidth: 180 }}
               >
                 {activeScenarioRaw ?? "VS MODE"}
               </span>
             </div>
             {sessionResult && (
-              <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+              <span
+                style={{
+                  fontSize: 8,
+                  fontWeight: 700,
+                  letterSpacing: "0.12em",
+                  color: C.accent,
+                  background: C.accentDim,
+                  border: `1px solid ${C.accentBorder}`,
+                  borderRadius: 4,
+                  padding: "2px 6px",
+                }}
+              >
                 FINAL
               </span>
             )}
           </div>
 
-          {/* ── YOUR score ── */}
+          {/* ── YOUR score ──────────────────────────────────────────────── */}
           <div className="flex items-baseline justify-between mb-1">
-            <span
-              className="text-xs uppercase tracking-widest"
-              style={{ color: "rgba(255,255,255,0.4)" }}
-            >
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.14em", color: C.textFaint }}>
               YOU
             </span>
             <motion.span
               key={displayScore}
-              initial={{ opacity: 0.6, scale: 0.95 }}
+              initial={{ opacity: 0.6, scale: 0.94 }}
               animate={{ opacity: 1, scale: 1 }}
-              className="text-2xl font-bold tabular-nums"
-              style={{ color: "#ffffff" }}
+              className="tabular-nums"
+              style={{ fontSize: 26, fontWeight: 800, color: "#fff", letterSpacing: "-0.02em", lineHeight: 1 }}
             >
               {formatScore(displayScore)}
             </motion.span>
           </div>
 
-          {/* Your progress bar */}
+          {/* Your bar */}
           <div
-            className="relative rounded-full overflow-hidden mb-3"
-            style={{ height: 6, background: "rgba(255,255,255,0.08)" }}
+            className="relative overflow-hidden mb-3"
+            style={{ height: 5, borderRadius: 3, background: "rgba(255,255,255,0.07)" }}
           >
             <motion.div
-              className="absolute left-0 top-0 h-full rounded-full"
-              style={{ background: "linear-gradient(90deg, #00f5a0, #00b4ff)" }}
+              className="absolute left-0 top-0 h-full"
+              style={{ background: "linear-gradient(90deg, #00f5a0, #00c8ff)", borderRadius: 3 }}
               initial={{ width: 0 }}
               animate={{ width: `${myPct}%` }}
-              transition={{ duration: 0.3, ease: "easeOut" }}
+              transition={{ duration: 0.35, ease: "easeOut" }}
             />
           </div>
 
-          {/* ── OPPONENT comparison (friend or personal best fallback) ── */}
-          <>
+          {/* ── OPPONENT ─────────────────────────────────────────────────── */}
+          <div style={{ paddingTop: 4, borderTop: `1px solid ${C.borderSub}` }}>
             <div className="flex items-center justify-between mb-1">
-              <div
-                className="flex items-center gap-2"
-                style={{ pointerEvents: "auto" }}
-              >
+              {/* Left: avatar + name */}
+              <div className="flex items-center gap-1.5" style={{ pointerEvents: "auto", minWidth: 0 }}>
                 {selectedFriend ? (
                   selectedFriend.avatar_url ? (
                     <img
                       src={selectedFriend.avatar_url}
                       alt={selectedFriend.username}
-                      className="w-4 h-4 rounded-full object-cover flex-shrink-0"
-                      style={{ border: "1px solid rgba(255,255,255,0.15)" }}
+                      style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover", border: "1px solid rgba(255,255,255,0.15)", flexShrink: 0 }}
                     />
                   ) : (
-                    <div
-                      className="w-4 h-4 rounded-full flex-shrink-0"
-                      style={{ background: "#ff6b6b" }}
-                    />
+                    <div style={{ width: 16, height: 16, borderRadius: "50%", background: "#ff6b6b", flexShrink: 0 }} />
                   )
                 ) : (
-                  <div
-                    className="w-4 h-4 rounded-full flex-shrink-0"
-                    style={{ background: "rgba(255,255,255,0.25)" }}
-                  />
+                  <div style={{ width: 16, height: 16, borderRadius: "50%", background: "rgba(255,255,255,0.2)", flexShrink: 0 }} />
                 )}
 
-                <span
-                  className="text-xs"
-                  style={{ color: "rgba(255,255,255,0.4)" }}
-                >
+                <span className="truncate" style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.08em", color: C.textMuted, maxWidth: 120 }}>
                   {opponentLabel}
                 </span>
 
                 {selectedFriend && friendSpm !== null && !sessionResult && (
-                  <span
-                    className="text-xs tabular-nums"
-                    style={{ color: "rgba(255,107,107,0.5)" }}
-                  >
+                  <span className="tabular-nums" style={{ fontSize: 9, color: "rgba(255,107,107,0.55)" }}>
                     {friendSpm.toLocaleString()} spm
                   </span>
                 )}
               </div>
 
+              {/* Right: score + delta */}
               <div className="flex items-center gap-2">
                 <span
-                  className="text-sm font-semibold tabular-nums"
-                  style={{ color: "rgba(255,255,255,0.55)" }}
+                  className="tabular-nums"
+                  style={{ fontSize: 13, fontWeight: 600, color: C.textSub }}
                 >
                   {isFetchingOpponent
                     ? "…"
@@ -418,11 +399,13 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
                 </span>
                 {delta !== null && (
                   <span
-                    className="text-sm font-bold tabular-nums"
+                    className="tabular-nums"
                     style={{
-                      color: isAhead ? "#00f5a0" : isBehind ? "#ff6b6b" : "#888",
-                      minWidth: 60,
-                      textAlign: "right",
+                      fontSize:   12,
+                      fontWeight: 700,
+                      color:      isAhead ? C.accent : isBehind ? C.danger : "#666",
+                      minWidth:   52,
+                      textAlign:  "right",
                     }}
                   >
                     {getDeltaLabel(delta)}
@@ -431,44 +414,34 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
               </div>
             </div>
 
+            {/* Opponent bar */}
             <div
-              className="relative rounded-full overflow-hidden mb-2"
-              style={{ height: 4, background: "rgba(255,255,255,0.06)" }}
+              className="relative overflow-hidden"
+              style={{ height: 3, borderRadius: 2, background: "rgba(255,255,255,0.06)" }}
             >
               <motion.div
-                className="absolute left-0 top-0 h-full rounded-full"
-                style={{ background: "linear-gradient(90deg, #ff6b6b, #ff9f4a)" }}
+                className="absolute left-0 top-0 h-full"
+                style={{ background: "linear-gradient(90deg, #ff6b6b, #ff9f4a)", borderRadius: 2 }}
                 initial={{ width: 0 }}
                 animate={{ width: `${opponentPct}%` }}
-                transition={{
-                  duration: sessionResult ? 0.3 : 1.0,
-                  ease: "easeOut",
-                }}
+                transition={{ duration: sessionResult ? 0.35 : 1.0, ease: "easeOut" }}
               />
             </div>
-          </>
+          </div>
 
           {/* Post-session accuracy */}
           {sessionResult && (
             <div
-              className="mt-3 pt-3 flex items-center justify-between"
-              style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+              className="flex items-center justify-between mt-2.5 pt-2.5"
+              style={{ borderTop: `1px solid ${C.borderSub}` }}
             >
-              <span
-                className="text-xs"
-                style={{ color: "rgba(255,255,255,0.35)" }}
-              >
-                Accuracy
-              </span>
-              <span
-                className="text-sm font-semibold tabular-nums"
-                style={{ color: "rgba(255,255,255,0.7)" }}
-              >
+              <span style={{ fontSize: 9, color: C.textFaint, letterSpacing: "0.1em" }}>ACCURACY</span>
+              <span className="tabular-nums" style={{ fontSize: 13, fontWeight: 600, color: C.textSub }}>
                 {(sessionResult.accuracy * 100).toFixed(1)}%
               </span>
             </div>
           )}
-        </div>
+        </GlassCard>
       </motion.div>
     </AnimatePresence>
   );

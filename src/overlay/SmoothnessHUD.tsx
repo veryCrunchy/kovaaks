@@ -1,21 +1,23 @@
 import { motion, AnimatePresence } from "framer-motion";
 import { useMouseMetrics } from "../hooks/useMouseMetrics";
+import { GlassCard, Dot, MiniBar } from "../design/ui";
+import { C } from "../design/tokens";
 
 function getColor(score: number): string {
   if (score >= 75) return "#00f5a0";
   if (score >= 50) return "#ffd700";
+  if (score >= 25) return "#fb923c";
   return "#ff4d4d";
 }
 
 function getLabel(score: number): string {
   if (score >= 80) return "SMOOTH";
-  if (score >= 60) return "OK";
+  if (score >= 60) return "GOOD";
   if (score >= 40) return "ROUGH";
   return "CHOPPY";
 }
 
 interface SmoothnessHUDProps {
-  /** When true, always render even with no metrics (for repositioning). */
   preview?: boolean;
 }
 
@@ -25,133 +27,91 @@ export function SmoothnessHUD({ preview = false }: SmoothnessHUDProps) {
   if (!metrics && !preview) return null;
 
   const score = metrics ? Math.round(metrics.smoothness) : 0;
-  const color = metrics ? getColor(score) : "rgba(255,255,255,0.3)";
+  const color = metrics ? getColor(score) : C.textDisabled;
   const label = metrics ? getLabel(score) : "IDLE";
+
+  const jitter       = metrics?.jitter ?? 0;
+  const pathEff      = metrics?.path_efficiency ?? 0;
+  const overshoot    = metrics?.overshoot_rate ?? 0;
+  const velocityCv   = metrics?.velocity_std ?? 0;
+
+  const subMetrics = [
+    { label: "WOBBLE", value: jitter.toFixed(2),                  bad: jitter > 0.3,     tooltip: "Lateral jitter — lower is better" },
+    { label: "PATH",   value: `${Math.round(pathEff * 100)}%`,    bad: pathEff < 0.82,   tooltip: "Path straightness — higher is better" },
+    { label: "OVER",   value: `${(overshoot * 100).toFixed(0)}%`, bad: overshoot > 0.25, tooltip: "Overshoot rate — lower is better" },
+    { label: "CV",     value: velocityCv.toFixed(2),              bad: velocityCv > 0.5, tooltip: "Speed consistency — lower is better" },
+  ];
 
   return (
     <AnimatePresence>
       <motion.div
         key="smoothness-hud"
-        initial={{ opacity: 0, scale: 0.9 }}
+        initial={{ opacity: 0, scale: 0.92 }}
         animate={{ opacity: 1, scale: 1 }}
-        exit={{ opacity: 0, scale: 0.9 }}
-        transition={{ duration: 0.25 }}
+        exit={{ opacity: 0, scale: 0.92 }}
+        transition={{ duration: 0.22 }}
         style={{ fontFamily: "'JetBrains Mono', monospace" }}
       >
-        <div
-          className="rounded-lg"
-          style={{
-            background: "rgba(8, 8, 14, 0.82)",
-            border: `1px solid ${color}28`,
-            backdropFilter: "blur(10px)",
-            padding: "8px 12px",
-            minWidth: 90,
-          }}
-        >
-          {/* Score arc indicator */}
-          <div className="flex items-center gap-2 mb-1">
-            <div
-              className="w-2 h-2 rounded-full"
-              style={{
-                background: color,
-                boxShadow: `0 0 6px ${color}`,
-              }}
-            />
-            <span
-              className="text-xs font-medium tracking-wider"
-              style={{ color: "rgba(255,255,255,0.4)" }}
-            >
-              SMOOTH
+        <GlassCard accent={color} style={{ padding: "10px 13px", minWidth: 130 }}>
+          {/* Header row */}
+          <div className="flex items-center gap-1.5 mb-2.5">
+            <Dot color={color} pulse={!!metrics} size={6} />
+            <span style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", color: C.textMuted }}>
+              SMOOTHNESS
             </span>
           </div>
 
-          {/* Big score number */}
-          <div className="flex items-baseline gap-1.5">
+          {/* Score */}
+          <div className="flex items-baseline gap-1 mb-0.5">
             <motion.span
               key={score}
-              initial={{ opacity: 0.5 }}
-              animate={{ opacity: 1 }}
-              className="text-xl font-bold tabular-nums"
-              style={{ color }}
+              initial={{ opacity: 0.5, scale: 0.9 }}
+              animate={{ opacity: 1, scale: 1 }}
+              transition={{ duration: 0.2 }}
+              className="tabular-nums"
+              style={{ fontSize: 30, fontWeight: 800, color, lineHeight: 1, letterSpacing: "-0.02em" }}
             >
               {score}
             </motion.span>
-            <span className="text-xs" style={{ color: "rgba(255,255,255,0.3)" }}>
-              /100
-            </span>
+            <span style={{ fontSize: 10, color: C.textFaint }}>/100</span>
           </div>
 
           {/* Label */}
-          <div
-            className="text-xs font-semibold tracking-widest mt-0.5"
-            style={{ color }}
-          >
+          <div style={{ fontSize: 9, fontWeight: 700, letterSpacing: "0.14em", color, marginBottom: 8 }}>
             {label}
           </div>
 
-          {/* Mini stat pills */}
-          <div className="flex gap-1.5 mt-2">
-            <StatPill
-              label="WOBBLE"
-              value={metrics ? metrics.jitter.toFixed(2) : "—"}
-              tooltip="Lateral jitter (perpendicular to motion axis). 0 = on-axis clean."
-              bad={!!metrics && metrics.jitter > 0.3}
-            />
-            <StatPill
-              label="PATH"
-              value={metrics ? `${Math.round(metrics.path_efficiency * 100)}%` : "—"}
-              tooltip="Path straightness: displacement ÷ path length. 100% = laser-straight; low = cursor curved/weaved to target."
-              bad={!!metrics && metrics.path_efficiency < 0.82}
-            />
-            <StatPill
-              label="OVER"
-              value={metrics ? `${(metrics.overshoot_rate * 100).toFixed(0)}%` : "—"}
-              tooltip="Sharp axial reversals. High = aggressive overcorrections."
-              bad={!!metrics && metrics.overshoot_rate > 0.25}
-            />
-            <StatPill
-              label="CV"
-              value={metrics ? metrics.velocity_std.toFixed(2) : "—"}
-              tooltip="Speed consistency (coeff. of variation). Lower = steadier pace."
-              bad={!!metrics && metrics.velocity_std > 0.5}
-            />
+          {/* Score bar */}
+          <MiniBar pct={score} color={color} height={3} className="mb-2.5" />
+
+          {/* Sub-metric grid */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 6px" }}>
+            {subMetrics.map((m) => (
+              <div
+                key={m.label}
+                title={m.tooltip}
+                style={{
+                  background:   "rgba(255,255,255,0.04)",
+                  border:       `1px solid ${m.bad ? "rgba(255,77,77,0.25)" : "rgba(255,255,255,0.06)"}`,
+                  borderRadius: 5,
+                  padding:      "3px 6px",
+                  cursor:       "help",
+                }}
+              >
+                <div style={{ fontSize: 7.5, letterSpacing: "0.1em", color: C.textFaint, textTransform: "uppercase" }}>
+                  {m.label}
+                </div>
+                <div
+                  className="tabular-nums"
+                  style={{ fontSize: 10, fontWeight: 600, color: m.bad ? C.danger : C.textSub, marginTop: 1 }}
+                >
+                  {metrics ? m.value : "—"}
+                </div>
+              </div>
+            ))}
           </div>
-        </div>
+        </GlassCard>
       </motion.div>
     </AnimatePresence>
-  );
-}
-
-interface StatPillProps {
-  label: string;
-  value: string;
-  bad: boolean;
-  tooltip?: string;
-}
-
-function StatPill({ label, value, bad, tooltip }: StatPillProps) {
-  return (
-    <div
-      className="rounded px-1.5 py-0.5"
-      title={tooltip}
-      style={{
-        background: "rgba(255,255,255,0.05)",
-        border: `1px solid ${bad ? "rgba(255,77,77,0.3)" : "rgba(255,255,255,0.06)"}`,
-        cursor: tooltip ? "help" : undefined,
-      }}
-    >
-      <div
-        className="text-[9px] uppercase tracking-wider"
-        style={{ color: "rgba(255,255,255,0.3)" }}
-      >
-        {label}
-      </div>
-      <div
-        className="text-[10px] font-semibold tabular-nums"
-        style={{ color: bad ? "#ff6b6b" : "rgba(255,255,255,0.6)" }}
-      >
-        {value}
-      </div>
-    </div>
   );
 }

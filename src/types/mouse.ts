@@ -119,6 +119,7 @@ export interface BridgeShotTelemetryTarget extends BridgeShotTelemetryEntity {
 export interface BridgeShotTelemetryEvent {
   event: string;
   ts_ms: number;
+  count: number | null;
   total: number | null;
   run_id: number | null;
   sample_seq: number | null;
