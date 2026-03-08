@@ -14,11 +14,6 @@ interface VSModeProps {
   preview?: boolean;
 }
 
-interface SessionHistoryRecord {
-  scenario: string;
-  score: number;
-}
-
 function normalizeScenarioName(name: string): string {
   return stripChallengeSuffix(name)
     .trim()
@@ -144,15 +139,11 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
 
     const normalizedScenario = normalizeScenarioName(activeScenario);
     setFetchingPersonalBest(true);
-    invoke<SessionHistoryRecord[]>("get_session_history")
-      .then((history) => {
-        let best = 0;
-        for (const record of history) {
-          if (normalizeScenarioName(record.scenario) !== normalizedScenario) continue;
-          if (!Number.isFinite(record.score)) continue;
-          best = Math.max(best, Math.round(record.score));
-        }
-        setPersonalBestScore(best > 0 ? best : null);
+    invoke<number | null>("get_personal_best_for_scenario", {
+      scenarioName: normalizedScenario,
+    })
+      .then((score) => {
+        setPersonalBestScore(score != null && score > 0 ? score : null);
       })
       .catch((err) => {
         setPersonalBestScore(null);
