@@ -2,9 +2,10 @@
 ///
 /// Each replay is saved as a JSON file in `{app_data_dir}/replays/{session_id}.json`.
 /// Positions are downsampled (every Nth point) to reduce file size.
-/// At most MAX_REPLAYS files are kept; the oldest are pruned on overflow.
+/// Replays are retained indefinitely so historical replay-backed coaching can
+/// accumulate alongside the unbounded stats database.
 use serde::{Deserialize, Serialize};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
 use crate::mouse_hook::{MetricPoint, RawPositionPoint};
@@ -13,8 +14,6 @@ use crate::mouse_hook::{MetricPoint, RawPositionPoint};
 
 /// Keep every 3rd raw position sample (30fps → ~10fps, ~600 pts/min).
 const DOWNSAMPLE_FACTOR: usize = 3;
-/// Maximum number of replay files to keep on disk (video frames make these larger).
-const MAX_REPLAYS: usize = 10;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -41,33 +40,6 @@ fn replay_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(dir)
 }
 
-fn prune_old_replays(replay_dir: &Path, keep: usize) {
-    let Ok(entries) = std::fs::read_dir(replay_dir) else {
-        return;
-    };
-
-    let mut files: Vec<(PathBuf, std::time::SystemTime)> = entries
-        .flatten()
-        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("json"))
-        .filter_map(|e| {
-            let mtime = e.metadata().ok()?.modified().ok()?;
-            Some((e.path(), mtime))
-        })
-        .collect();
-
-    if files.len() <= keep {
-        return;
-    }
-
-    // Sort oldest-first, remove the excess
-    files.sort_by_key(|(_, mtime)| *mtime);
-    let to_delete = files.len() - keep;
-    for (path, _) in files.iter().take(to_delete) {
-        let _ = std::fs::remove_file(path);
-        log::debug!("replay_store: pruned {}", path.display());
-    }
-}
-
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Persist `data` for `session_id`.  Positions are downsampled before writing.
@@ -77,9 +49,6 @@ pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool 
         log::warn!("replay_store: could not resolve app data dir");
         return false;
     };
-
-    // Make room for the new file first
-    prune_old_replays(&dir, MAX_REPLAYS - 1);
 
     // Downsample positions: keep every DOWNSAMPLE_FACTOR-th point.
     // Click events are never dropped so they remain visible in the canvas.
