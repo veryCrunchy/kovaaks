@@ -1,11 +1,12 @@
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OptionalExtension, params};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 7;
+const SCHEMA_VERSION: i32 = 8;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -14,6 +15,32 @@ pub struct ReplayAssetRecord<'a> {
     pub metrics_count: usize,
     pub frames_count: usize,
     pub has_run_snapshot: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionReplayContextWindow {
+    pub window_idx: u32,
+    pub context_kind: String,
+    pub label: String,
+    pub phase: Option<String>,
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub shot_event_count: u32,
+    pub fired_count: u32,
+    pub hit_count: u32,
+    pub accuracy_pct: Option<f64>,
+    pub avg_bot_count: Option<f64>,
+    pub primary_target_label: Option<String>,
+    pub primary_target_profile: Option<String>,
+    pub primary_target_entity_id: Option<String>,
+    pub primary_target_share: Option<f64>,
+    pub avg_nearest_distance: Option<f64>,
+    pub avg_nearest_yaw_error_deg: Option<f64>,
+    pub avg_nearest_pitch_error_deg: Option<f64>,
+    pub avg_score_per_minute: Option<f64>,
+    pub avg_kills_per_second: Option<f64>,
+    pub avg_timeline_accuracy_pct: Option<f64>,
+    pub avg_damage_efficiency: Option<f64>,
 }
 
 pub fn initialize(app: &AppHandle) -> Result<PathBuf> {
@@ -616,6 +643,45 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         })?;
     }
 
+    if user_version < 8 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS session_replay_context_windows (
+                session_id TEXT NOT NULL,
+                window_idx INTEGER NOT NULL,
+                context_kind TEXT NOT NULL,
+                label TEXT NOT NULL,
+                phase TEXT,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                shot_event_count INTEGER NOT NULL DEFAULT 0,
+                fired_count INTEGER NOT NULL DEFAULT 0,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                accuracy_pct REAL,
+                avg_bot_count REAL,
+                primary_target_label TEXT,
+                primary_target_profile TEXT,
+                primary_target_entity_id TEXT,
+                primary_target_share REAL,
+                avg_nearest_distance REAL,
+                avg_nearest_yaw_error_deg REAL,
+                avg_nearest_pitch_error_deg REAL,
+                avg_score_per_minute REAL,
+                avg_kills_per_second REAL,
+                avg_timeline_accuracy_pct REAL,
+                avg_damage_efficiency REAL,
+                PRIMARY KEY(session_id, window_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_context_windows_session
+                ON session_replay_context_windows(session_id, start_ms);
+            PRAGMA user_version = 8;
+            COMMIT;
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -885,11 +951,559 @@ fn query_shot_telemetry(
     Ok(events)
 }
 
+fn average_optional(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let mut sum = 0.0;
+    let mut count = 0u32;
+    for value in values.flatten() {
+        if value.is_finite() {
+            sum += value;
+            count += 1;
+        }
+    }
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
+    }
+}
+
+fn weighted_average(sum: f64, count: u32) -> Option<f64> {
+    if count == 0 {
+        None
+    } else {
+        Some(sum / count as f64)
+    }
+}
+
+fn format_entity_suffix(entity_id: &str) -> String {
+    let compact: String = entity_id.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    if compact.is_empty() {
+        return entity_id.to_string();
+    }
+    let start = compact.len().saturating_sub(6);
+    compact[start..].to_ascii_uppercase()
+}
+
+fn stable_target_label(profile: Option<&str>, entity_id: &str, duplicate_profile: bool) -> String {
+    let trimmed_profile = profile.unwrap_or_default().trim();
+    let base = if trimmed_profile.is_empty() {
+        entity_id
+    } else {
+        trimmed_profile
+    };
+    if !duplicate_profile {
+        base.to_string()
+    } else {
+        format!("{base} · {}", format_entity_suffix(entity_id))
+    }
+}
+
+fn select_nearest_target(
+    event: &crate::bridge::BridgeShotTelemetryEvent,
+) -> Option<&crate::bridge::BridgeShotTelemetryTarget> {
+    event
+        .targets
+        .iter()
+        .find(|target| target.is_bot && target.is_nearest)
+        .or_else(|| event.targets.iter().find(|target| target.is_bot))
+        .or_else(|| event.targets.iter().find(|target| target.is_nearest))
+        .or_else(|| event.targets.first())
+}
+
+fn telemetry_window_thresholds(duration_secs: Option<f64>, sample_count: usize) -> (u64, u64) {
+    if let Some(duration_secs) = duration_secs.filter(|value| value.is_finite() && *value > 0.0) {
+        if duration_secs <= 45.0 {
+            return (1_200, 5_000);
+        }
+        if duration_secs <= 120.0 {
+            return (1_800, 10_000);
+        }
+        if duration_secs <= 300.0 {
+            return (2_500, 15_000);
+        }
+        return (4_000, 30_000);
+    }
+
+    if sample_count <= 24 {
+        (1_200, 5_000)
+    } else if sample_count <= 72 {
+        (1_800, 10_000)
+    } else {
+        (2_500, 15_000)
+    }
+}
+
+fn phase_for_offset(offset_ms: u64, duration_secs: Option<f64>) -> Option<String> {
+    let total_ms = duration_secs
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value * 1000.0).round() as u64)?;
+    if total_ms == 0 {
+        return None;
+    }
+    if offset_ms < total_ms / 3 {
+        Some("opening".to_string())
+    } else if offset_ms < (total_ms * 2) / 3 {
+        Some("mid".to_string())
+    } else {
+        Some("closing".to_string())
+    }
+}
+
+fn metric_state(
+    value: Option<f64>,
+    average: Option<f64>,
+    relative_threshold: f64,
+    absolute_threshold: f64,
+    high_label: &'static str,
+    low_label: &'static str,
+) -> &'static str {
+    let Some(value) = value.filter(|value| value.is_finite()) else {
+        return "steady";
+    };
+    let Some(average) = average.filter(|value| value.is_finite() && *value > 0.0) else {
+        return "steady";
+    };
+
+    let threshold = (average * relative_threshold).max(absolute_threshold);
+    if value >= average + threshold {
+        high_label
+    } else if value <= average - threshold {
+        low_label
+    } else {
+        "steady"
+    }
+}
+
+fn dominant_state(counts: &HashMap<&'static str, u32>) -> &'static str {
+    counts
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(state, _)| *state)
+        .unwrap_or("steady")
+}
+
+#[derive(Clone)]
+struct AnnotatedShotEvent {
+    offset_ms: u64,
+    weight: u32,
+    event_kind: String,
+    phase: Option<String>,
+    nearest_label: Option<String>,
+    nearest_profile: Option<String>,
+    nearest_entity_id: Option<String>,
+    bot_count: u32,
+    nearest_distance: Option<f64>,
+    nearest_yaw_error_deg: Option<f64>,
+    nearest_pitch_error_deg: Option<f64>,
+    score_per_minute: Option<f64>,
+    kills_per_second: Option<f64>,
+    timeline_accuracy_pct: Option<f64>,
+    damage_efficiency: Option<f64>,
+    pace_state: &'static str,
+    accuracy_state: &'static str,
+}
+
+#[derive(Default)]
+struct ContextWindowAccumulator {
+    start_ms: u64,
+    end_ms: u64,
+    phase: Option<String>,
+    shot_event_count: u32,
+    fired_count: u32,
+    hit_count: u32,
+    weighted_event_count: u32,
+    weighted_bot_count_sum: f64,
+    nearest_counts: HashMap<String, u32>,
+    label_meta: HashMap<String, (String, String)>,
+    pace_counts: HashMap<&'static str, u32>,
+    accuracy_counts: HashMap<&'static str, u32>,
+    weighted_distance_sum: f64,
+    weighted_distance_count: u32,
+    weighted_yaw_sum: f64,
+    weighted_yaw_count: u32,
+    weighted_pitch_sum: f64,
+    weighted_pitch_count: u32,
+    weighted_spm_sum: f64,
+    weighted_spm_count: u32,
+    weighted_kps_sum: f64,
+    weighted_kps_count: u32,
+    weighted_timeline_accuracy_sum: f64,
+    weighted_timeline_accuracy_count: u32,
+    weighted_damage_efficiency_sum: f64,
+    weighted_damage_efficiency_count: u32,
+}
+
+fn finalize_context_window(
+    window_idx: usize,
+    accumulator: ContextWindowAccumulator,
+) -> SessionReplayContextWindow {
+    let dominant_pace = dominant_state(&accumulator.pace_counts);
+    let dominant_accuracy = dominant_state(&accumulator.accuracy_counts);
+
+    let (primary_target_label, primary_target_count) = accumulator
+        .nearest_counts
+        .iter()
+        .max_by_key(|(_, count)| *count)
+        .map(|(label, count)| (Some(label.clone()), *count))
+        .unwrap_or((None, 0));
+    let (primary_target_profile, primary_target_entity_id) = primary_target_label
+        .as_ref()
+        .and_then(|label| accumulator.label_meta.get(label))
+        .map(|(profile, entity_id)| (Some(profile.clone()), Some(entity_id.clone())))
+        .unwrap_or((None, None));
+    let primary_target_share = if primary_target_count > 0 && accumulator.weighted_event_count > 0 {
+        Some(primary_target_count as f64 / accumulator.weighted_event_count as f64)
+    } else {
+        None
+    };
+
+    let context_kind = if primary_target_share.unwrap_or(0.0) < 0.55 {
+        "mixed_cluster"
+    } else if dominant_pace != "steady" || dominant_accuracy != "steady" {
+        "metric_shift"
+    } else {
+        "target_focus"
+    };
+
+    let mut label_parts = Vec::new();
+    if let Some(phase) = accumulator.phase.as_deref() {
+        label_parts.push(match phase {
+            "opening" => "Opening".to_string(),
+            "mid" => "Mid".to_string(),
+            "closing" => "Closing".to_string(),
+            _ => phase.to_string(),
+        });
+    }
+    if primary_target_share.unwrap_or(0.0) >= 0.35 {
+        if let Some(label) = primary_target_label.as_ref() {
+            label_parts.push(label.clone());
+        }
+    } else if !accumulator.nearest_counts.is_empty() {
+        label_parts.push("Mixed cluster".to_string());
+    }
+    if dominant_pace != "steady" {
+        label_parts.push(format!("pace {dominant_pace}"));
+    }
+    if dominant_accuracy != "steady" {
+        label_parts.push(format!("accuracy {dominant_accuracy}"));
+    }
+    let label = if label_parts.is_empty() {
+        "Engagement window".to_string()
+    } else {
+        label_parts.join(" · ")
+    };
+
+    SessionReplayContextWindow {
+        window_idx: window_idx as u32,
+        context_kind: context_kind.to_string(),
+        label,
+        phase: accumulator.phase,
+        start_ms: accumulator.start_ms,
+        end_ms: accumulator.end_ms,
+        shot_event_count: accumulator.shot_event_count,
+        fired_count: accumulator.fired_count,
+        hit_count: accumulator.hit_count,
+        accuracy_pct: if accumulator.fired_count > 0 {
+            Some((accumulator.hit_count as f64 / accumulator.fired_count as f64) * 100.0)
+        } else {
+            None
+        },
+        avg_bot_count: weighted_average(accumulator.weighted_bot_count_sum, accumulator.weighted_event_count),
+        primary_target_label,
+        primary_target_profile,
+        primary_target_entity_id,
+        primary_target_share,
+        avg_nearest_distance: weighted_average(accumulator.weighted_distance_sum, accumulator.weighted_distance_count),
+        avg_nearest_yaw_error_deg: weighted_average(accumulator.weighted_yaw_sum, accumulator.weighted_yaw_count),
+        avg_nearest_pitch_error_deg: weighted_average(accumulator.weighted_pitch_sum, accumulator.weighted_pitch_count),
+        avg_score_per_minute: weighted_average(accumulator.weighted_spm_sum, accumulator.weighted_spm_count),
+        avg_kills_per_second: weighted_average(accumulator.weighted_kps_sum, accumulator.weighted_kps_count),
+        avg_timeline_accuracy_pct: weighted_average(
+            accumulator.weighted_timeline_accuracy_sum,
+            accumulator.weighted_timeline_accuracy_count,
+        ),
+        avg_damage_efficiency: weighted_average(
+            accumulator.weighted_damage_efficiency_sum,
+            accumulator.weighted_damage_efficiency_count,
+        ),
+    }
+}
+
+fn build_replay_context_windows(
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> Vec<SessionReplayContextWindow> {
+    if snapshot.shot_telemetry.is_empty() {
+        return Vec::new();
+    }
+
+    let mut nearest_profile_entities: HashMap<String, HashSet<String>> = HashMap::new();
+    for event in &snapshot.shot_telemetry {
+        if let Some(nearest) = select_nearest_target(event) {
+            let profile_key = {
+                let trimmed = nearest.profile.trim();
+                if trimmed.is_empty() {
+                    nearest.entity_id.clone()
+                } else {
+                    trimmed.to_string()
+                }
+            };
+            nearest_profile_entities
+                .entry(profile_key)
+                .or_default()
+                .insert(nearest.entity_id.clone());
+        }
+    }
+
+    let timeline_by_sec: HashMap<u32, &crate::bridge::BridgeRunTimelinePoint> = snapshot
+        .timeline
+        .iter()
+        .map(|point| (point.t_sec, point))
+        .collect();
+    let avg_spm = average_optional(snapshot.timeline.iter().map(|point| point.score_per_minute));
+    let avg_timeline_accuracy =
+        average_optional(snapshot.timeline.iter().map(|point| point.accuracy_pct));
+
+    let first_ts_ms = snapshot.shot_telemetry.first().map(|event| event.ts_ms).unwrap_or(0);
+    let mut annotated = Vec::with_capacity(snapshot.shot_telemetry.len());
+    for event in &snapshot.shot_telemetry {
+        let offset_ms = event.ts_ms.saturating_sub(first_ts_ms);
+        let sec = ((offset_ms / 1000) as u32).saturating_add(1);
+        let timeline_point = timeline_by_sec
+            .get(&sec)
+            .or_else(|| timeline_by_sec.get(&sec.saturating_sub(1)));
+
+        let bot_count = event.targets.iter().filter(|target| target.is_bot).count() as u32;
+        let nearest = select_nearest_target(event);
+        let nearest_label = nearest.map(|target| {
+            let profile_key = {
+                let trimmed = target.profile.trim();
+                if trimmed.is_empty() {
+                    target.entity_id.clone()
+                } else {
+                    trimmed.to_string()
+                }
+            };
+            let duplicate_profile = nearest_profile_entities
+                .get(&profile_key)
+                .map(|entities| entities.len() > 1)
+                .unwrap_or(false);
+            stable_target_label(Some(target.profile.as_str()), &target.entity_id, duplicate_profile)
+        });
+
+        annotated.push(AnnotatedShotEvent {
+            offset_ms,
+            weight: std::cmp::max(1, event.count.unwrap_or(1)),
+            event_kind: event.event.clone(),
+            phase: phase_for_offset(offset_ms, snapshot.duration_secs),
+            nearest_label,
+            nearest_profile: nearest.map(|target| target.profile.clone()),
+            nearest_entity_id: nearest.map(|target| target.entity_id.clone()),
+            bot_count,
+            nearest_distance: nearest.and_then(|target| target.distance_3d.or(target.distance_2d)),
+            nearest_yaw_error_deg: nearest.and_then(|target| target.yaw_error_deg.map(f64::abs)),
+            nearest_pitch_error_deg: nearest.and_then(|target| target.pitch_error_deg.map(f64::abs)),
+            score_per_minute: timeline_point.and_then(|point| point.score_per_minute),
+            kills_per_second: timeline_point.and_then(|point| point.kills_per_second),
+            timeline_accuracy_pct: timeline_point.and_then(|point| point.accuracy_pct),
+            damage_efficiency: timeline_point.and_then(|point| point.damage_efficiency),
+            pace_state: metric_state(
+                timeline_point.and_then(|point| point.score_per_minute),
+                avg_spm,
+                0.12,
+                60.0,
+                "surge",
+                "dip",
+            ),
+            accuracy_state: metric_state(
+                timeline_point.and_then(|point| point.accuracy_pct),
+                avg_timeline_accuracy,
+                0.08,
+                3.0,
+                "hot",
+                "cold",
+            ),
+        });
+    }
+
+    let (max_gap_ms, max_span_ms) = telemetry_window_thresholds(snapshot.duration_secs, annotated.len());
+    let mut windows = Vec::new();
+    let mut current = ContextWindowAccumulator::default();
+    let mut last_event: Option<&AnnotatedShotEvent> = None;
+
+    for event in &annotated {
+        let should_split = if let Some(previous) = last_event {
+            let gap_ms = event.offset_ms.saturating_sub(previous.offset_ms);
+            let span_ms = event.offset_ms.saturating_sub(current.start_ms);
+            let phase_changed = event.phase != previous.phase && current.shot_event_count > 0;
+            let target_changed = event.nearest_label != previous.nearest_label && current.shot_event_count >= 2;
+            let pace_changed =
+                event.pace_state != previous.pace_state
+                && current.shot_event_count >= 2
+                && (event.pace_state != "steady" || previous.pace_state != "steady");
+            let accuracy_changed =
+                event.accuracy_state != previous.accuracy_state
+                && current.shot_event_count >= 2
+                && (event.accuracy_state != "steady" || previous.accuracy_state != "steady");
+
+            gap_ms > max_gap_ms
+                || span_ms > max_span_ms
+                || phase_changed
+                || target_changed
+                || pace_changed
+                || accuracy_changed
+        } else {
+            false
+        };
+
+        if should_split && current.shot_event_count > 0 {
+            windows.push(finalize_context_window(windows.len(), current));
+            current = ContextWindowAccumulator::default();
+        }
+
+        if current.shot_event_count == 0 {
+            current.start_ms = event.offset_ms;
+            current.phase = event.phase.clone();
+        }
+        current.end_ms = event.offset_ms;
+        current.shot_event_count += 1;
+        current.weighted_event_count += event.weight;
+        current.weighted_bot_count_sum += event.bot_count as f64 * event.weight as f64;
+
+        if event.event_kind == "shot_fired" {
+            current.fired_count += event.weight;
+        }
+        if event.event_kind == "shot_hit" {
+            current.hit_count += event.weight;
+        }
+
+        if let Some(label) = event.nearest_label.as_ref() {
+            *current.nearest_counts.entry(label.clone()).or_insert(0) += event.weight;
+            current.label_meta.entry(label.clone()).or_insert_with(|| {
+                (
+                    event.nearest_profile.clone().unwrap_or_default(),
+                    event.nearest_entity_id.clone().unwrap_or_default(),
+                )
+            });
+        }
+        *current.pace_counts.entry(event.pace_state).or_insert(0) += event.weight;
+        *current.accuracy_counts.entry(event.accuracy_state).or_insert(0) += event.weight;
+
+        if let Some(distance) = event.nearest_distance.filter(|value| value.is_finite()) {
+            current.weighted_distance_sum += distance * event.weight as f64;
+            current.weighted_distance_count += event.weight;
+        }
+        if let Some(yaw_error) = event.nearest_yaw_error_deg.filter(|value| value.is_finite()) {
+            current.weighted_yaw_sum += yaw_error * event.weight as f64;
+            current.weighted_yaw_count += event.weight;
+        }
+        if let Some(pitch_error) = event
+            .nearest_pitch_error_deg
+            .filter(|value| value.is_finite())
+        {
+            current.weighted_pitch_sum += pitch_error * event.weight as f64;
+            current.weighted_pitch_count += event.weight;
+        }
+        if let Some(score_per_minute) = event.score_per_minute.filter(|value| value.is_finite()) {
+            current.weighted_spm_sum += score_per_minute * event.weight as f64;
+            current.weighted_spm_count += event.weight;
+        }
+        if let Some(kills_per_second) = event.kills_per_second.filter(|value| value.is_finite()) {
+            current.weighted_kps_sum += kills_per_second * event.weight as f64;
+            current.weighted_kps_count += event.weight;
+        }
+        if let Some(accuracy_pct) = event.timeline_accuracy_pct.filter(|value| value.is_finite()) {
+            current.weighted_timeline_accuracy_sum += accuracy_pct * event.weight as f64;
+            current.weighted_timeline_accuracy_count += event.weight;
+        }
+        if let Some(damage_efficiency) = event.damage_efficiency.filter(|value| value.is_finite()) {
+            current.weighted_damage_efficiency_sum += damage_efficiency * event.weight as f64;
+            current.weighted_damage_efficiency_count += event.weight;
+        }
+
+        last_event = Some(event);
+    }
+
+    if current.shot_event_count > 0 {
+        windows.push(finalize_context_window(windows.len(), current));
+    }
+
+    windows
+}
+
+fn query_replay_context_windows(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<SessionReplayContextWindow>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            window_idx,
+            context_kind,
+            label,
+            phase,
+            start_ms,
+            end_ms,
+            shot_event_count,
+            fired_count,
+            hit_count,
+            accuracy_pct,
+            avg_bot_count,
+            primary_target_label,
+            primary_target_profile,
+            primary_target_entity_id,
+            primary_target_share,
+            avg_nearest_distance,
+            avg_nearest_yaw_error_deg,
+            avg_nearest_pitch_error_deg,
+            avg_score_per_minute,
+            avg_kills_per_second,
+            avg_timeline_accuracy_pct,
+            avg_damage_efficiency
+        FROM session_replay_context_windows
+        WHERE session_id = ?1
+        ORDER BY start_ms DESC, window_idx DESC
+        ",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(SessionReplayContextWindow {
+            window_idx: row.get::<_, i64>(0)? as u32,
+            context_kind: row.get(1)?,
+            label: row.get(2)?,
+            phase: row.get(3)?,
+            start_ms: row.get::<_, i64>(4)? as u64,
+            end_ms: row.get::<_, i64>(5)? as u64,
+            shot_event_count: row.get::<_, i64>(6)? as u32,
+            fired_count: row.get::<_, i64>(7)? as u32,
+            hit_count: row.get::<_, i64>(8)? as u32,
+            accuracy_pct: row.get(9)?,
+            avg_bot_count: row.get(10)?,
+            primary_target_label: row.get(11)?,
+            primary_target_profile: row.get(12)?,
+            primary_target_entity_id: row.get(13)?,
+            primary_target_share: row.get(14)?,
+            avg_nearest_distance: row.get(15)?,
+            avg_nearest_yaw_error_deg: row.get(16)?,
+            avg_nearest_pitch_error_deg: row.get(17)?,
+            avg_score_per_minute: row.get(18)?,
+            avg_kills_per_second: row.get(19)?,
+            avg_timeline_accuracy_pct: row.get(20)?,
+            avg_damage_efficiency: row.get(21)?,
+        })
+    })?;
+
+    let mut windows = Vec::new();
+    for row in rows {
+        windows.push(row?);
+    }
+    Ok(windows)
+}
+
 pub fn upsert_run_capture(
     app: &AppHandle,
     session_id: &str,
     snapshot: &crate::bridge::BridgeRunSnapshot,
 ) -> Result<()> {
+    let replay_context_windows = build_replay_context_windows(snapshot);
     let mut conn = connect(app)?;
     let tx = conn.transaction()?;
 
@@ -1046,6 +1660,10 @@ pub fn upsert_run_capture(
         "DELETE FROM session_shot_events WHERE session_id = ?1",
         params![session_id],
     )?;
+    tx.execute(
+        "DELETE FROM session_replay_context_windows WHERE session_id = ?1",
+        params![session_id],
+    )?;
 
     {
         let mut insert_event = tx.prepare(
@@ -1164,6 +1782,65 @@ pub fn upsert_run_capture(
                     if target.is_nearest { 1i64 } else { 0i64 },
                 ])?;
             }
+        }
+
+        let mut insert_window = tx.prepare(
+            "
+            INSERT INTO session_replay_context_windows (
+                session_id,
+                window_idx,
+                context_kind,
+                label,
+                phase,
+                start_ms,
+                end_ms,
+                shot_event_count,
+                fired_count,
+                hit_count,
+                accuracy_pct,
+                avg_bot_count,
+                primary_target_label,
+                primary_target_profile,
+                primary_target_entity_id,
+                primary_target_share,
+                avg_nearest_distance,
+                avg_nearest_yaw_error_deg,
+                avg_nearest_pitch_error_deg,
+                avg_score_per_minute,
+                avg_kills_per_second,
+                avg_timeline_accuracy_pct,
+                avg_damage_efficiency
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)
+            ",
+        )?;
+
+        for window in &replay_context_windows {
+            insert_window.execute(params![
+                session_id,
+                window.window_idx as i64,
+                window.context_kind,
+                window.label,
+                window.phase,
+                window.start_ms as i64,
+                window.end_ms as i64,
+                window.shot_event_count as i64,
+                window.fired_count as i64,
+                window.hit_count as i64,
+                window.accuracy_pct,
+                window.avg_bot_count,
+                window.primary_target_label,
+                window.primary_target_profile,
+                window.primary_target_entity_id,
+                window.primary_target_share,
+                window.avg_nearest_distance,
+                window.avg_nearest_yaw_error_deg,
+                window.avg_nearest_pitch_error_deg,
+                window.avg_score_per_minute,
+                window.avg_kills_per_second,
+                window.avg_timeline_accuracy_pct,
+                window.avg_damage_efficiency,
+            ])?;
         }
     }
 
@@ -1308,6 +1985,14 @@ pub fn get_shot_telemetry(
     query_shot_telemetry(&conn, session_id)
 }
 
+pub fn get_replay_context_windows(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Vec<SessionReplayContextWindow>> {
+    let conn = connect(app)?;
+    query_replay_context_windows(&conn, session_id)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSqlAudit {
     pub session_id: String,
@@ -1321,6 +2006,7 @@ pub struct SessionSqlAudit {
     pub run_timeline_rows: usize,
     pub shot_event_rows: usize,
     pub shot_target_rows: usize,
+    pub context_window_rows: usize,
     pub summary_shots_fired: Option<f64>,
     pub summary_shots_hit: Option<f64>,
     pub issues: Vec<String>,
@@ -1347,6 +2033,7 @@ pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSql
             (SELECT COUNT(*) FROM session_run_timelines WHERE session_id = ?1) AS run_timeline_rows,
             (SELECT COUNT(*) FROM session_shot_events WHERE session_id = ?1) AS shot_event_rows,
             (SELECT COUNT(*) FROM session_shot_targets WHERE session_id = ?1) AS shot_target_rows,
+            (SELECT COUNT(*) FROM session_replay_context_windows WHERE session_id = ?1) AS context_window_rows,
             (SELECT shots_fired FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_fired,
             (SELECT shots_hit FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_hit
         ",
@@ -1364,8 +2051,9 @@ pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSql
                 run_timeline_rows: row.get::<_, i64>(7)? as usize,
                 shot_event_rows: row.get::<_, i64>(8)? as usize,
                 shot_target_rows: row.get::<_, i64>(9)? as usize,
-                summary_shots_fired: row.get(10)?,
-                summary_shots_hit: row.get(11)?,
+                context_window_rows: row.get::<_, i64>(10)? as usize,
+                summary_shots_fired: row.get(11)?,
+                summary_shots_hit: row.get(12)?,
                 issues: Vec::new(),
             })
         },
@@ -1404,6 +2092,11 @@ pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSql
         audit
             .issues
             .push("session_shot_events exists but session_shot_targets is empty".to_string());
+    }
+    if audit.shot_event_rows > 0 && audit.context_window_rows == 0 {
+        audit
+            .issues
+            .push("session_shot_events exists but session_replay_context_windows is empty".to_string());
     }
 
     Ok(audit)

@@ -960,6 +960,36 @@ fn get_session_shot_telemetry(
 }
 
 #[tauri::command]
+fn get_session_replay_context_windows(
+    app: AppHandle,
+    session_id: String,
+) -> Vec<stats_db::SessionReplayContextWindow> {
+    match stats_db::get_replay_context_windows(&app, &session_id) {
+        Ok(windows) if !windows.is_empty() => windows,
+        Ok(_) => {
+            let _ = replay_store::load_replay(&app, &session_id);
+            match stats_db::get_replay_context_windows(&app, &session_id) {
+                Ok(windows) => windows,
+                Err(error) => {
+                    log::warn!(
+                        "could not backfill replay context windows for {}: {error}",
+                        session_id
+                    );
+                    vec![]
+                }
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "could not load replay context windows for {}: {error}",
+                session_id
+            );
+            vec![]
+        }
+    }
+}
+
+#[tauri::command]
 fn replay_play_in_game(
     app: AppHandle,
     session_id: String,
@@ -1266,6 +1296,7 @@ pub fn run() {
             get_session_run_summary,
             get_session_run_timeline,
             get_session_shot_telemetry,
+            get_session_replay_context_windows,
             replay_play_in_game,
             replay_stop_in_game,
             toggle_settings,

@@ -9,6 +9,7 @@ import type {
   BridgeRunSnapshot,
   BridgeRunTimelinePoint,
   BridgeShotTelemetryEvent,
+  BridgeReplayContextWindow,
 } from "../types/mouse";
 import type { StatsPanelReading } from "../types/overlay";
 import {
@@ -2466,6 +2467,7 @@ function ReplayTab({
   const [runSummary, setRunSummary] = useState<BridgeRunSnapshot | null>(null);
   const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
   const [shotTelemetry, setShotTelemetry] = useState<BridgeShotTelemetryEvent[]>([]);
+  const [replayContextWindows, setReplayContextWindows] = useState<BridgeReplayContextWindow[]>([]);
   const [shotTelemetryDisplayMode, setShotTelemetryDisplayMode] = useState<ShotTelemetryDisplayMode>("context");
   const [loading, setLoading] = useState(false);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
@@ -2478,6 +2480,7 @@ function ReplayTab({
       setRunSummary(null);
       setRunTimeline([]);
       setShotTelemetry([]);
+      setReplayContextWindows([]);
       return () => {
         active = false;
       };
@@ -2488,12 +2491,14 @@ function ReplayTab({
       invoke<BridgeRunSnapshot | null>("get_session_run_summary", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeRunTimelinePoint[]>("get_session_run_timeline", { sessionId: selectedId }).catch(() => []),
       invoke<BridgeShotTelemetryEvent[]>("get_session_shot_telemetry", { sessionId: selectedId }).catch(() => []),
-    ]).then(([payload, summary, timeline, telemetry]) => {
+      invoke<BridgeReplayContextWindow[]>("get_session_replay_context_windows", { sessionId: selectedId }).catch(() => []),
+    ]).then(([payload, summary, timeline, telemetry, contextWindows]) => {
       if (!active) return;
       setReplayPayload(payload);
       setRunSummary(summary);
       setRunTimeline(timeline);
       setShotTelemetry(telemetry);
+      setReplayContextWindows(contextWindows);
       setLoading(false);
     });
 
@@ -2677,8 +2682,30 @@ function ReplayTab({
     };
   }, [nearestTargetProfileEntityCounts, shotTelemetry]);
   const shotTelemetryContext = useMemo(() => {
-    if (shotTelemetry.length === 0) return { windowMs: 10_000, rows: [] as Array<{
+    if (replayContextWindows.length > 0) {
+      return {
+        source: "sql" as const,
+        rows: [...replayContextWindows]
+          .sort((a, b) => b.start_ms - a.start_ms)
+          .map((window) => ({
+            key: `window-${window.window_idx}`,
+            label: window.label,
+            startMs: window.start_ms,
+            endMs: window.end_ms,
+            firedCount: window.fired_count,
+            hitCount: window.hit_count,
+            accuracyPct: window.accuracy_pct,
+            avgBotCount: window.avg_bot_count,
+            nearestLabel: window.primary_target_label ?? "—",
+            nearestDistance: window.avg_nearest_distance,
+            yawError: window.avg_nearest_yaw_error_deg,
+            pitchError: window.avg_nearest_pitch_error_deg,
+          })),
+      };
+    }
+    if (shotTelemetry.length === 0) return { source: "empty" as const, rows: [] as Array<{
       key: string;
+      label: string;
       startMs: number;
       endMs: number;
       firedCount: number;
@@ -2769,7 +2796,7 @@ function ReplayTab({
     }
 
     return {
-      windowMs,
+      source: "derived" as const,
       rows: [...windows.entries()]
         .sort((a, b) => b[0] - a[0])
         .map(([bucketIndex, bucket]) => {
@@ -2777,6 +2804,7 @@ function ReplayTab({
             [...bucket.nearestCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
           return {
             key: `window-${bucketIndex}`,
+            label: nearestLabel,
             startMs: bucket.startMs,
             endMs: bucket.endMs,
             firedCount: bucket.firedCount,
@@ -2790,7 +2818,7 @@ function ReplayTab({
           };
         }),
     };
-  }, [nearestTargetProfileEntityCounts, runDurationSecs, shotTelemetry]);
+  }, [nearestTargetProfileEntityCounts, replayContextWindows, runDurationSecs, shotTelemetry]);
   const shotTelemetrySampleRows = useMemo(() => {
     if (shotTelemetry.length === 0) return [];
     const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
@@ -3128,7 +3156,9 @@ function ReplayTab({
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
                   <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
                     {shotTelemetryDisplayMode === "context"
-                      ? `Showing ${shotTelemetryContext.rows.length.toLocaleString()} full-run context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`
+                      ? shotTelemetryContext.source === "sql"
+                        ? `Showing ${shotTelemetryContext.rows.length.toLocaleString()} persisted context windows backed by SQL and derived from shot telemetry plus run timeline data.`
+                        : `Showing ${shotTelemetryContext.rows.length.toLocaleString()} fallback context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`
                       : `Showing all ${shotTelemetry.length.toLocaleString()} raw persisted telemetry samples for this run.`}
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -3167,7 +3197,7 @@ function ReplayTab({
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
                       <thead>
                         <tr style={{ color: "rgba(255,255,255,0.35)" }}>
-                          {["Window", "Fired", "Hit", "Acc", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                          {["Window", "Context", "Fired", "Hit", "Acc", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
                             <th
                               key={heading}
                               style={{
@@ -3187,6 +3217,9 @@ function ReplayTab({
                           <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                             <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
                               {formatTelemetryWindowLabel(row.startMs, row.endMs)}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.label}
                             </td>
                             <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>
                               {row.firedCount.toLocaleString()}

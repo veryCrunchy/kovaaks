@@ -131,6 +131,31 @@ export interface BridgeShotTelemetryEvent {
   targets: BridgeShotTelemetryTarget[];
 }
 
+export interface BridgeReplayContextWindow {
+  window_idx: number;
+  context_kind: string;
+  label: string;
+  phase: string | null;
+  start_ms: number;
+  end_ms: number;
+  shot_event_count: number;
+  fired_count: number;
+  hit_count: number;
+  accuracy_pct: number | null;
+  avg_bot_count: number | null;
+  primary_target_label: string | null;
+  primary_target_profile: string | null;
+  primary_target_entity_id: string | null;
+  primary_target_share: number | null;
+  avg_nearest_distance: number | null;
+  avg_nearest_yaw_error_deg: number | null;
+  avg_nearest_pitch_error_deg: number | null;
+  avg_score_per_minute: number | null;
+  avg_kills_per_second: number | null;
+  avg_timeline_accuracy_pct: number | null;
+  avg_damage_efficiency: number | null;
+}
+
 export interface BridgeRunSnapshot {
   duration_secs: number | null;
   score_total: number | null;
