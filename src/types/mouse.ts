@@ -133,3 +133,9 @@ export interface ReplayData {
   frames?: ScreenFrame[];
   run_snapshot?: BridgeRunSnapshot | null;
 }
+
+export interface ReplayPayloadData {
+  positions: RawPositionPoint[];
+  metrics: MetricPoint[];
+  frames?: ScreenFrame[];
+}

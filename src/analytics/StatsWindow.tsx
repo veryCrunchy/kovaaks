@@ -5,7 +5,7 @@ import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrows
 import { DebugTab } from "./DebugTab";
 import { MousePathViewer } from "./MousePathViewer";
 import type {
-  ReplayData,
+  ReplayPayloadData,
   BridgeRunSnapshot,
   BridgeRunTimelinePoint,
 } from "../types/mouse";
@@ -2241,17 +2241,39 @@ function ReplayTab({
   const [selectedId, setSelectedId] = useState<string | null>(
     replayRecords.length > 0 ? replayRecords[0].id : null,
   );
-  const [replayData, setReplayData] = useState<ReplayData | null>(null);
+  const [replayPayload, setReplayPayload] = useState<ReplayPayloadData | null>(null);
+  const [runSummary, setRunSummary] = useState<BridgeRunSnapshot | null>(null);
+  const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
   const [loading, setLoading] = useState(false);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
   // const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!selectedId) { setReplayData(null); return; }
+    let active = true;
+    if (!selectedId) {
+      setReplayPayload(null);
+      setRunSummary(null);
+      setRunTimeline([]);
+      return () => {
+        active = false;
+      };
+    }
     setLoading(true);
-    invoke<ReplayData>("load_session_replay", { sessionId: selectedId })
-      .then((d) => { setReplayData(d); setLoading(false); })
-      .catch(() => { setReplayData(null); setLoading(false); });
+    Promise.all([
+      invoke<ReplayPayloadData | null>("get_session_replay_payload", { sessionId: selectedId }).catch(() => null),
+      invoke<BridgeRunSnapshot | null>("get_session_run_summary", { sessionId: selectedId }).catch(() => null),
+      invoke<BridgeRunTimelinePoint[]>("get_session_run_timeline", { sessionId: selectedId }).catch(() => []),
+    ]).then(([payload, summary, timeline]) => {
+      if (!active) return;
+      setReplayPayload(payload);
+      setRunSummary(summary);
+      setRunTimeline(timeline);
+      setLoading(false);
+    });
+
+    return () => {
+      active = false;
+    };
   }, [selectedId]);
 
   // When new sessions arrive, auto-select the newest if nothing is selected
@@ -2262,12 +2284,14 @@ function ReplayTab({
   }, [replayRecords]);
 
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
-  const runSnapshot: BridgeRunSnapshot | null = replayData?.run_snapshot ?? null;
+  const runSnapshot: BridgeRunSnapshot | null = useMemo(
+    () => (runSummary ? { ...runSummary, timeline: runTimeline } : null),
+    [runSummary, runTimeline],
+  );
   const selectedShotTiming = selectedRecord?.shot_timing ?? null;
   // const hasInGameTickStream =
   //   (runSnapshot?.tick_stream_v1?.keyframes?.length ?? 0) > 0
   //   || (runSnapshot?.tick_stream_v1?.deltas?.length ?? 0) > 0;
-  const runTimeline = useMemo(() => runSnapshot?.timeline ?? [], [runSnapshot]);
   const hasRunTimelineSignal = useMemo(
     () => runTimeline.some((point) =>
       point.score_per_minute != null
@@ -2603,7 +2627,7 @@ function ReplayTab({
             </div>
           )}
 
-          {(replayData?.frames?.length ?? 0) === 0 && (
+          {(replayPayload?.frames?.length ?? 0) === 0 && (
             <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.52)", fontSize: 12, lineHeight: 1.6 }}>
               No video frames were saved for this replay.
             </div>
@@ -2648,12 +2672,12 @@ function ReplayTab({
           )}
         </div>
       )}
-      {!loading && replayData && selectedRecord && !runSnapshot && (
+      {!loading && replayPayload && selectedRecord && !runSummary && (
         <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.42)", fontSize: 12, lineHeight: 1.6 }}>
           This replay was saved before bridge timeline persistence was added, so only mouse path data is available.
         </div>
       )}
-      {!loading && replayData && selectedRecord && (
+      {!loading && replayPayload && selectedRecord && (
         <div style={CHART_STYLE}>
           <SectionTitle>
             Mouse path —{" "}
@@ -2661,9 +2685,9 @@ function ReplayTab({
             pts · {formatDateTime(selectedRecord.timestamp)}
           </SectionTitle>
           <MousePathViewer
-            rawPositions={replayData.positions}
-            metricPoints={replayData.metrics}
-            screenFrames={replayData.frames ?? []}
+            rawPositions={replayPayload.positions}
+            metricPoints={replayPayload.metrics}
+            screenFrames={replayPayload.frames ?? []}
           />
         </div>
       )}
