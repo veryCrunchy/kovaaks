@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { useLiveScore } from "../hooks/useLiveScore";
 import { useStatsPanel } from "../hooks/useStatsPanel";
 import { C } from "../design/tokens";
+import type { StatsPanelReading } from "../types/overlay";
 
 interface BridgeMetricEvent {
   ev: string;
@@ -50,7 +51,13 @@ export function BridgeStateDebugHUD() {
 
   useEffect(() => {
     let nextTraceId = 1;
-    const unlisten = listen<BridgeMetricEvent>("bridge-metric", (event) => {
+    const pushTrace = (text: string) => {
+      if (!text) return;
+      const row: MetricTraceRow = { id: nextTraceId++, text };
+      setTraceRows((prev) => (prev[0]?.text === text ? prev : [row, ...prev].slice(0, TRACE_MAX_ROWS)));
+    };
+
+    const unlistenMetric = listen<BridgeMetricEvent>("bridge-metric", (event) => {
       const payload = event.payload;
       if (!INTERESTING_METRICS.has(payload.ev)) return;
 
@@ -72,13 +79,36 @@ export function BridgeStateDebugHUD() {
         : "";
       const fieldLike = payload.field ? ` field=${payload.field}` : "";
       const sourceLike = payload.source ? ` src=${payload.source}` : "";
-      const line = `${payload.ev}${scoreLike}${fieldLike}${sourceLike}`;
-      const row: MetricTraceRow = { id: nextTraceId++, text: line };
-      setTraceRows((prev) => [row, ...prev].slice(0, TRACE_MAX_ROWS));
+      pushTrace(`${payload.ev}${scoreLike}${fieldLike}${sourceLike}`);
+    });
+
+    const unlistenStats = listen<StatsPanelReading>("stats-panel-update", (event) => {
+      const payload = event.payload;
+      if (payload.score_total != null && Number.isFinite(payload.score_total)) {
+        setMetricScoreTotal(payload.score_total);
+      }
+      if (payload.score_total_derived != null && Number.isFinite(payload.score_total_derived)) {
+        setMetricScoreDerived(payload.score_total_derived);
+      }
+      if (payload.scenario_name) {
+        const trimmed = payload.scenario_name.trim();
+        if (trimmed.length > 0) setMetricScenarioName(trimmed);
+      }
+
+      const state = payload.game_state ?? "null";
+      const scenario = payload.scenario_name?.trim() || payload.scenario_type || "Unknown";
+      const score = payload.score_total != null && Number.isFinite(payload.score_total)
+        ? payload.score_total.toFixed(1)
+        : "--";
+      const accuracy = payload.accuracy_pct != null && Number.isFinite(payload.accuracy_pct)
+        ? `${payload.accuracy_pct.toFixed(1)}%`
+        : "--";
+      pushTrace(`stats-panel state=${state} scenario=${scenario} score=${score} acc=${accuracy}`);
     });
 
     return () => {
-      unlisten.then((fn) => fn());
+      unlistenMetric.then((fn) => fn());
+      unlistenStats.then((fn) => fn());
     };
   }, []);
 
@@ -172,7 +202,7 @@ export function BridgeStateDebugHUD() {
             textTransform: "uppercase",
           }}
         >
-          recent bridge metrics
+          recent bridge state
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
           {traceRows.length === 0 && (
