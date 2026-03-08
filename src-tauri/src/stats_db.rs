@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 4;
+const SCHEMA_VERSION: i32 = 5;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -211,7 +211,10 @@ pub fn get_replay_data(
     let positions = query_replay_positions(&conn, session_id)?;
     let metrics = query_replay_metrics(&conn, session_id)?;
     let frames = query_replay_frames(&conn, session_id)?;
-    let run_snapshot = get_run_summary(app, session_id)?;
+    let mut run_snapshot = get_run_summary(app, session_id)?;
+    if let Some(snapshot) = run_snapshot.as_mut() {
+        snapshot.shot_telemetry = query_shot_telemetry(&conn, session_id)?;
+    }
 
     if !has_replay_asset
         && positions.is_empty()
@@ -513,6 +516,75 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if user_version < 5 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS session_shot_events (
+                session_id TEXT NOT NULL,
+                shot_seq_idx INTEGER NOT NULL,
+                event_kind TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                total INTEGER,
+                run_id INTEGER,
+                sample_seq INTEGER,
+                sample_count INTEGER,
+                source TEXT,
+                method TEXT,
+                origin_flag TEXT,
+                player_entity_id TEXT,
+                player_profile TEXT,
+                player_is_player INTEGER,
+                player_is_bot INTEGER,
+                player_x REAL,
+                player_y REAL,
+                player_z REAL,
+                player_pitch REAL,
+                player_yaw REAL,
+                player_roll REAL,
+                player_vx REAL,
+                player_vy REAL,
+                player_vz REAL,
+                PRIMARY KEY(session_id, shot_seq_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_shot_events_session_ts
+                ON session_shot_events(session_id, ts_ms, shot_seq_idx);
+
+            CREATE TABLE IF NOT EXISTS session_shot_targets (
+                session_id TEXT NOT NULL,
+                shot_seq_idx INTEGER NOT NULL,
+                target_idx INTEGER NOT NULL,
+                entity_id TEXT NOT NULL,
+                profile TEXT NOT NULL,
+                is_player INTEGER NOT NULL DEFAULT 0 CHECK (is_player IN (0, 1)),
+                is_bot INTEGER NOT NULL DEFAULT 0 CHECK (is_bot IN (0, 1)),
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                z REAL NOT NULL,
+                pitch REAL NOT NULL,
+                yaw REAL NOT NULL,
+                roll REAL NOT NULL,
+                vx REAL NOT NULL,
+                vy REAL NOT NULL,
+                vz REAL NOT NULL,
+                distance_2d REAL,
+                distance_3d REAL,
+                yaw_error_deg REAL,
+                pitch_error_deg REAL,
+                is_nearest INTEGER NOT NULL DEFAULT 0 CHECK (is_nearest IN (0, 1)),
+                PRIMARY KEY(session_id, shot_seq_idx, target_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_shot_targets_session_seq
+                ON session_shot_targets(session_id, shot_seq_idx, target_idx);
+
+            PRAGMA user_version = 5;
+            COMMIT;
+            ",
+        )?;
+    }
+
     Ok(())
 }
 
@@ -616,6 +688,152 @@ fn query_replay_frames(
         frames.push(row?);
     }
     Ok(frames)
+}
+
+fn query_shot_telemetry(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<crate::bridge::BridgeShotTelemetryEvent>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            e.shot_seq_idx AS shot_seq_idx,
+            e.event_kind AS event_kind,
+            e.ts_ms AS ts_ms,
+            e.total AS total,
+            e.run_id AS run_id,
+            e.sample_seq AS sample_seq,
+            e.sample_count AS sample_count,
+            e.source AS source,
+            e.method AS method,
+            e.origin_flag AS origin_flag,
+            e.player_entity_id AS player_entity_id,
+            e.player_profile AS player_profile,
+            e.player_is_player AS player_is_player,
+            e.player_is_bot AS player_is_bot,
+            e.player_x AS player_x,
+            e.player_y AS player_y,
+            e.player_z AS player_z,
+            e.player_pitch AS player_pitch,
+            e.player_yaw AS player_yaw,
+            e.player_roll AS player_roll,
+            e.player_vx AS player_vx,
+            e.player_vy AS player_vy,
+            e.player_vz AS player_vz,
+            t.target_idx AS target_idx,
+            t.entity_id AS target_entity_id,
+            t.profile AS target_profile,
+            t.is_player AS target_is_player,
+            t.is_bot AS target_is_bot,
+            t.x AS target_x,
+            t.y AS target_y,
+            t.z AS target_z,
+            t.pitch AS target_pitch,
+            t.yaw AS target_yaw,
+            t.roll AS target_roll,
+            t.vx AS target_vx,
+            t.vy AS target_vy,
+            t.vz AS target_vz,
+            t.distance_2d AS target_distance_2d,
+            t.distance_3d AS target_distance_3d,
+            t.yaw_error_deg AS target_yaw_error_deg,
+            t.pitch_error_deg AS target_pitch_error_deg,
+            t.is_nearest AS target_is_nearest
+        FROM session_shot_events e
+        LEFT JOIN session_shot_targets t
+            ON t.session_id = e.session_id
+           AND t.shot_seq_idx = e.shot_seq_idx
+        WHERE e.session_id = ?1
+        ORDER BY e.shot_seq_idx ASC, t.target_idx ASC
+        ",
+    )?;
+
+    let mut rows = stmt.query(params![session_id])?;
+    let mut events = Vec::new();
+    let mut current_seq_idx: Option<i64> = None;
+    let mut current_event: Option<crate::bridge::BridgeShotTelemetryEvent> = None;
+
+    while let Some(row) = rows.next()? {
+        let shot_seq_idx = row.get::<_, i64>("shot_seq_idx")?;
+        if current_seq_idx != Some(shot_seq_idx) {
+            if let Some(event) = current_event.take() {
+                events.push(event);
+            }
+
+            let player_entity_id = row.get::<_, Option<String>>("player_entity_id")?;
+            let player = if let Some(entity_id) = player_entity_id {
+                Some(crate::bridge::BridgeShotTelemetryEntity {
+                    entity_id,
+                    profile: row
+                        .get::<_, Option<String>>("player_profile")?
+                        .unwrap_or_default(),
+                    is_player: row
+                        .get::<_, Option<i64>>("player_is_player")?
+                        .unwrap_or_default()
+                        != 0,
+                    is_bot: row
+                        .get::<_, Option<i64>>("player_is_bot")?
+                        .unwrap_or_default()
+                        != 0,
+                    x: row.get::<_, Option<f64>>("player_x")?.unwrap_or_default(),
+                    y: row.get::<_, Option<f64>>("player_y")?.unwrap_or_default(),
+                    z: row.get::<_, Option<f64>>("player_z")?.unwrap_or_default(),
+                    pitch: row.get::<_, Option<f64>>("player_pitch")?.unwrap_or_default(),
+                    yaw: row.get::<_, Option<f64>>("player_yaw")?.unwrap_or_default(),
+                    roll: row.get::<_, Option<f64>>("player_roll")?.unwrap_or_default(),
+                    vx: row.get::<_, Option<f64>>("player_vx")?.unwrap_or_default(),
+                    vy: row.get::<_, Option<f64>>("player_vy")?.unwrap_or_default(),
+                    vz: row.get::<_, Option<f64>>("player_vz")?.unwrap_or_default(),
+                })
+            } else {
+                None
+            };
+            current_event = Some(crate::bridge::BridgeShotTelemetryEvent {
+                event: row.get::<_, String>("event_kind")?,
+                ts_ms: row.get::<_, i64>("ts_ms")? as u64,
+                total: row.get::<_, Option<i64>>("total")?.map(|value| value as u32),
+                run_id: row.get::<_, Option<i64>>("run_id")?.map(|value| value as u64),
+                sample_seq: row.get::<_, Option<i64>>("sample_seq")?.map(|value| value as u64),
+                sample_count: row.get::<_, Option<i64>>("sample_count")?.map(|value| value as u64),
+                source: row.get("source")?,
+                method: row.get("method")?,
+                origin_flag: row.get("origin_flag")?,
+                player,
+                targets: Vec::new(),
+            });
+            current_seq_idx = Some(shot_seq_idx);
+        }
+
+        let target_entity_id = row.get::<_, Option<String>>("target_entity_id")?;
+        if let (Some(event), Some(entity_id)) = (current_event.as_mut(), target_entity_id) {
+            event.targets.push(crate::bridge::BridgeShotTelemetryTarget {
+                entity_id,
+                profile: row.get::<_, String>("target_profile")?,
+                is_player: row.get::<_, i64>("target_is_player")? != 0,
+                is_bot: row.get::<_, i64>("target_is_bot")? != 0,
+                x: row.get("target_x")?,
+                y: row.get("target_y")?,
+                z: row.get("target_z")?,
+                pitch: row.get("target_pitch")?,
+                yaw: row.get("target_yaw")?,
+                roll: row.get("target_roll")?,
+                vx: row.get("target_vx")?,
+                vy: row.get("target_vy")?,
+                vz: row.get("target_vz")?,
+                distance_2d: row.get("target_distance_2d")?,
+                distance_3d: row.get("target_distance_3d")?,
+                yaw_error_deg: row.get("target_yaw_error_deg")?,
+                pitch_error_deg: row.get("target_pitch_error_deg")?,
+                is_nearest: row.get::<_, i64>("target_is_nearest")? != 0,
+            });
+        }
+    }
+
+    if let Some(event) = current_event {
+        events.push(event);
+    }
+
+    Ok(events)
 }
 
 pub fn upsert_run_capture(
@@ -730,6 +948,14 @@ pub fn upsert_run_capture(
         "DELETE FROM session_run_timelines WHERE session_id = ?1",
         params![session_id],
     )?;
+    tx.execute(
+        "DELETE FROM session_shot_targets WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_shot_events WHERE session_id = ?1",
+        params![session_id],
+    )?;
 
     {
         let mut insert = tx.prepare(
@@ -765,6 +991,124 @@ pub fn upsert_run_capture(
                 point.shots_fired,
                 point.shots_hit,
             ])?;
+        }
+    }
+
+    {
+        let mut insert_event = tx.prepare(
+            "
+            INSERT INTO session_shot_events (
+                session_id,
+                shot_seq_idx,
+                event_kind,
+                ts_ms,
+                total,
+                run_id,
+                sample_seq,
+                sample_count,
+                source,
+                method,
+                origin_flag,
+                player_entity_id,
+                player_profile,
+                player_is_player,
+                player_is_bot,
+                player_x,
+                player_y,
+                player_z,
+                player_pitch,
+                player_yaw,
+                player_roll,
+                player_vx,
+                player_vy,
+                player_vz
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+            ",
+        )?;
+        let mut insert_target = tx.prepare(
+            "
+            INSERT INTO session_shot_targets (
+                session_id,
+                shot_seq_idx,
+                target_idx,
+                entity_id,
+                profile,
+                is_player,
+                is_bot,
+                x,
+                y,
+                z,
+                pitch,
+                yaw,
+                roll,
+                vx,
+                vy,
+                vz,
+                distance_2d,
+                distance_3d,
+                yaw_error_deg,
+                pitch_error_deg,
+                is_nearest
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
+            ",
+        )?;
+
+        for (event_index, event) in snapshot.shot_telemetry.iter().enumerate() {
+            let player = event.player.as_ref();
+            insert_event.execute(params![
+                session_id,
+                event_index as i64,
+                &event.event,
+                event.ts_ms as i64,
+                event.total.map(|value| value as i64),
+                event.run_id.map(|value| value as i64),
+                event.sample_seq.map(|value| value as i64),
+                event.sample_count.map(|value| value as i64),
+                event.source.as_deref(),
+                event.method.as_deref(),
+                event.origin_flag.as_deref(),
+                player.map(|value| value.entity_id.as_str()),
+                player.map(|value| value.profile.as_str()),
+                player.map(|value| if value.is_player { 1i64 } else { 0i64 }),
+                player.map(|value| if value.is_bot { 1i64 } else { 0i64 }),
+                player.map(|value| value.x),
+                player.map(|value| value.y),
+                player.map(|value| value.z),
+                player.map(|value| value.pitch),
+                player.map(|value| value.yaw),
+                player.map(|value| value.roll),
+                player.map(|value| value.vx),
+                player.map(|value| value.vy),
+                player.map(|value| value.vz),
+            ])?;
+
+            for (target_index, target) in event.targets.iter().enumerate() {
+                insert_target.execute(params![
+                    session_id,
+                    event_index as i64,
+                    target_index as i64,
+                    &target.entity_id,
+                    &target.profile,
+                    if target.is_player { 1i64 } else { 0i64 },
+                    if target.is_bot { 1i64 } else { 0i64 },
+                    target.x,
+                    target.y,
+                    target.z,
+                    target.pitch,
+                    target.yaw,
+                    target.roll,
+                    target.vx,
+                    target.vy,
+                    target.vz,
+                    target.distance_2d,
+                    target.distance_3d,
+                    target.yaw_error_deg,
+                    target.pitch_error_deg,
+                    if target.is_nearest { 1i64 } else { 0i64 },
+                ])?;
+            }
         }
     }
 
@@ -847,6 +1191,7 @@ pub fn get_run_summary(
                     challenge_canceled_events: row.get::<_, i64>(28)? as u32,
                 },
                 timeline: vec![],
+                shot_telemetry: vec![],
                 tick_stream_v1: None,
             })
         },
@@ -898,4 +1243,12 @@ pub fn get_run_timeline(
         timeline.push(row?);
     }
     Ok(timeline)
+}
+
+pub fn get_shot_telemetry(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Vec<crate::bridge::BridgeShotTelemetryEvent>> {
+    let conn = connect(app)?;
+    query_shot_telemetry(&conn, session_id)
 }

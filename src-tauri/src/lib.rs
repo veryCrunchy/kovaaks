@@ -892,6 +892,30 @@ fn get_session_run_timeline(
 }
 
 #[tauri::command]
+fn get_session_shot_telemetry(
+    app: AppHandle,
+    session_id: String,
+) -> Vec<bridge::BridgeShotTelemetryEvent> {
+    match stats_db::get_shot_telemetry(&app, &session_id) {
+        Ok(events) if !events.is_empty() => events,
+        Ok(_) => {
+            let _ = replay_store::load_replay(&app, &session_id);
+            match stats_db::get_shot_telemetry(&app, &session_id) {
+                Ok(events) => events,
+                Err(error) => {
+                    log::warn!("could not backfill shot telemetry for {}: {error}", session_id);
+                    vec![]
+                }
+            }
+        }
+        Err(error) => {
+            log::warn!("could not load shot telemetry for {}: {error}", session_id);
+            vec![]
+        }
+    }
+}
+
+#[tauri::command]
 fn replay_play_in_game(
     app: AppHandle,
     session_id: String,
@@ -1260,6 +1284,7 @@ pub fn run() {
             get_session_replay_payload,
             get_session_run_summary,
             get_session_run_timeline,
+            get_session_shot_telemetry,
             replay_play_in_game,
             replay_stop_in_game,
             toggle_settings,
