@@ -2134,7 +2134,7 @@ mod imp {
 
         let now = Instant::now();
         let mut should_emit_stats = false;
-        let mut recovery_signal: Option<(bool, bool)> = None;
+        let mut recovery_signal: Option<(bool, bool, bool)> = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
             match parsed.ev.as_str() {
@@ -2515,15 +2515,23 @@ mod imp {
                 || state.stats.damage_dealt.map_or(false, |v| v > 0.0);
             let has_active_session_metrics = challenge_context || (!paused && !queued && progress_metrics);
             let recovery_challenge_active = challenge_context;
-            recovery_signal = Some((has_active_session_metrics, recovery_challenge_active));
+            let authoritative_active_state = next_game_state_code == 4;
+            recovery_signal = Some((
+                has_active_session_metrics,
+                recovery_challenge_active,
+                authoritative_active_state,
+            ));
         }
 
-        if let Some((has_active_metrics, challenge_active_hint)) = recovery_signal {
+        if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) = recovery_signal {
             let should_start_from_recovery = {
                 let mut state = bridge_session_state().lock().unwrap();
                 if state.session_active {
                     state.recovery_start_streak = 0;
                     false
+                } else if authoritative_active_state {
+                    state.recovery_start_streak = 0;
+                    true
                 } else if has_active_metrics {
                     state.recovery_start_streak = state.recovery_start_streak.saturating_add(1);
                     if state.recovery_start_streak >= 2 {
@@ -2878,7 +2886,7 @@ mod imp {
         let already_loaded = pid
             .map(|p| find_loaded_module(p, UE4SS_DLL).is_some())
             .unwrap_or(false);
-        sync_payload(&payload_root, &game_bin_dir, already_loaded)?;
+        let payload_files_written = sync_payload(&payload_root, &game_bin_dir, already_loaded)?;
         sync_in_game_overlay_bundle(resource_dir, &game_bin_dir, already_loaded)?;
         let managed_mod_dll = game_bin_dir
             .join("Mods")
@@ -3008,13 +3016,22 @@ mod imp {
                 "bridge: UE4SS already loaded in pid {pid}; payload synced. \
                  Runtime/settings changes require game restart."
             );
-            match trigger_hot_reload() {
-                Ok(()) => {
-                    log::info!("bridge: triggered UE4SS hot reload after payload sync");
+            if payload_files_written > 0 {
+                match trigger_hot_reload() {
+                    Ok(()) => {
+                        log::info!(
+                            "bridge: triggered UE4SS hot reload after payload sync (files_written={})",
+                            payload_files_written
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("bridge: UE4SS hot reload failed after payload sync: {e}");
+                    }
                 }
-                Err(e) => {
-                    log::warn!("bridge: UE4SS hot reload failed after payload sync: {e}");
-                }
+            } else {
+                log::info!(
+                    "bridge: payload already up to date for pid {pid}; skipping UE4SS hot reload"
+                );
             }
             return Ok(());
         }
@@ -3877,7 +3894,7 @@ mod imp {
         src_root: &Path,
         dst_root: &Path,
         tolerate_locked_files: bool,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         let profile = read_payload_profile(src_root);
         let desired_files = collect_payload_files(src_root, &profile)?;
 
@@ -3898,31 +3915,8 @@ mod imp {
             );
         }
 
-        // Replace our mod directory atomically-ish so stale files from older builds
-        // never linger across updates.
-        let managed_mod_rel = Path::new("Mods").join("KovaaksBridgeMod");
-        let src_mod_dir = src_root.join(&managed_mod_rel);
-        let dst_mod_dir = dst_root.join(&managed_mod_rel);
-        if src_mod_dir.is_dir() && dst_mod_dir.exists() {
-            if let Err(e) = std::fs::remove_dir_all(&dst_mod_dir) {
-                if tolerate_locked_files && is_permission_denied(&e) {
-                    log::warn!(
-                        "bridge: could not replace runtime directory (in use): {} ({})",
-                        dst_mod_dir.display(),
-                        e
-                    );
-                } else {
-                    return Err(format!(
-                        "Failed to replace runtime directory {}: {}",
-                        dst_mod_dir.display(),
-                        e
-                    ));
-                }
-            }
-        }
-
         let mut copied_paths = Vec::new();
-        let copied = copy_dir_recursive(
+        let written = copy_dir_recursive(
             src_root,
             dst_root,
             src_root,
@@ -3932,17 +3926,17 @@ mod imp {
         )?;
         write_payload_manifest(dst_root, &copied_paths)?;
         if let Err(e) =
-            write_payload_deploy_info(dst_root, src_root, &profile, engine_override, copied)
+            write_payload_deploy_info(dst_root, src_root, &profile, engine_override, written)
         {
             log::warn!("bridge: failed to write payload deploy marker: {e}");
         }
         log::info!(
-            "bridge: synced {} UE4SS payload file(s) from {} to {}",
-            copied,
+            "bridge: synced {} changed UE4SS payload file(s) from {} to {}",
+            written,
             src_root.display(),
             dst_root.display()
         );
-        Ok(())
+        Ok(written)
     }
 
     fn read_payload_profile(src_root: &Path) -> String {
@@ -4378,6 +4372,32 @@ mod imp {
                     ));
                 }
             }
+            if dst_path.is_file() {
+                match files_identical(&src_path, &dst_path) {
+                    Ok(true) => {
+                        if let Ok(rel) = src_path.strip_prefix(src_root) {
+                            let rel = rel
+                                .to_string_lossy()
+                                .replace('\\', "/")
+                                .trim_start_matches('/')
+                                .to_string();
+                            if !rel.is_empty() {
+                                copied_paths.push(rel);
+                            }
+                        }
+                        continue;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        log::warn!(
+                            "bridge: could not compare payload file before sync {}; rewriting ({})",
+                            dst_path.display(),
+                            e
+                        );
+                    }
+                }
+            }
+
             if let Err(e) = std::fs::copy(&src_path, &dst_path) {
                 if tolerate_locked_files && is_permission_denied(&e) {
                     log::warn!(
