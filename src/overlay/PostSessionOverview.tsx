@@ -190,6 +190,7 @@ export function PostSessionOverview({
   };
 
   const scenarioType = statsPanel?.scenario_type ?? "Unknown";
+  const scenarioSubtype = statsPanel?.scenario_subtype ?? null;
   const accent = SCENARIO_COLOR[scenarioType] ?? "#ffffff";
 
   const showKills = scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill" && scenarioType !== "Unknown";
@@ -286,6 +287,15 @@ export function PostSessionOverview({
               >
                 {session.scenario}
               </div>
+              {scenarioSubtype && (
+                <div
+                  className="mb-3 truncate"
+                  style={{ fontSize: 10, color: accent, fontWeight: 600, letterSpacing: "0.08em" }}
+                  title={scenarioSubtype}
+                >
+                  {scenarioSubtype}
+                </div>
+              )}
 
               {/* ── Score ─────────────────────────────────────────────────────── */}
               <div className="flex items-baseline gap-2 mb-4">

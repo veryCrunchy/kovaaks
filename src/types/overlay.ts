@@ -19,7 +19,8 @@ export interface SessionResult {
  * Live reading from the KovaaK's in-game stats panel.
  * Fields are null when the scenario doesn't populate them (e.g. pure tracking
  * has no kills; one-shot scenarios have no damage).
- * The `scenario_type` field is inferred from the presence pattern.
+ * The `scenario_type` field is the broad family and `scenario_subtype` adds
+ * a more specific classifier when telemetry supports it.
  */
 export interface StatsPanelReading {
   session_time_secs: number | null;
@@ -52,6 +53,7 @@ export interface StatsPanelReading {
   scenario_name?: string | null;
   /** "Unknown" | "Tracking" | "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" | "AccuracyDrill" */
   scenario_type: string;
+  scenario_subtype?: string | null;
 }
 
 /** A single shot event detected by the stats-panel delta engine. */

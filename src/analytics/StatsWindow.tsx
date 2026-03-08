@@ -46,6 +46,7 @@ interface SmoothnessSnapshot {
 
 interface StatsPanelSnapshot {
   scenario_type: string;
+  scenario_subtype?: string | null;
   kills: number | null;
   avg_kps: number | null;
   accuracy_pct: number | null;
@@ -1992,6 +1993,8 @@ function PerformanceTab({
 
   const scenarioType =
     perfRecords[perfRecords.length - 1]?.perf_scenario_type ?? "Unknown";
+  const scenarioSubtype =
+    perfRecords[perfRecords.length - 1]?.stats_panel?.scenario_subtype ?? null;
 
   const chartData = perfSorted.map((r, i) => ({
     i: i + 1,
@@ -2010,6 +2013,7 @@ function PerformanceTab({
       {/* Summary cards */}
       <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
         <StatCard label="Scenario Type" value={scenarioType} />
+        {scenarioSubtype && <StatCard label="Scenario Subtype" value={scenarioSubtype} />}
         {avgKps != null && (
           <StatCard
             label="Avg KPS"

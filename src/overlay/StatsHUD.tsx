@@ -37,6 +37,7 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
   if (!reading && !preview) return null;
 
   const scenarioType = reading?.scenario_type ?? "Unknown";
+  const scenarioSubtype = reading?.scenario_subtype ?? null;
   const gameState = (reading?.game_state ?? "menu").toUpperCase();
   const accentColor = SCENARIO_COLOR[scenarioType] ?? "#ffffff";
   const showTTK = scenarioType !== "Tracking" && scenarioType !== "Unknown";
@@ -86,6 +87,11 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
               {`${gameState} · ${scenarioType === "Unknown" ? "IDLE" : scenarioType.toUpperCase().replace("CLICKING", " CLK")}`}
             </span>
           </div>
+          {scenarioSubtype && (
+            <div style={{ marginTop: -4, marginBottom: 6, fontSize: 9, color: "rgba(255,255,255,0.58)" }}>
+              {scenarioSubtype}
+            </div>
+          )}
 
           {/* Stats rows */}
           <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
