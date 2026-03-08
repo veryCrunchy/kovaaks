@@ -23,6 +23,7 @@
     "pipeline:win:dev:stripped": "pwsh ./scripts/dev-pipeline.ps1 -Configuration Debug -ModConfiguration Debug -DevOverlayBuild -RuntimeProfile minimal -SettingsProfile production -StrippedModBuild $true",
     "pipeline:win:release:stripped": "pwsh ./scripts/dev-pipeline.ps1 -RuntimeProfile minimal -SettingsProfile production -StrippedModBuild $true",
     "pipeline:win:release:stripped:devsettings": "pwsh ./scripts/dev-pipeline.ps1 -RuntimeProfile minimal -SettingsProfile development -StrippedModBuild $true",
+    "audit:db": "python3 ./scripts/audit_stats_db.py",
     "build:win": "tauri build --verbose --runner cargo-xwin --target x86_64-pc-windows-msvc",
     "build:win:dev": "tauri build --verbose --no-bundle --runner cargo-xwin --target x86_64-pc-windows-msvc -- --profile dev-windows",
     "build:bridge": "cd kovaaks-bridge && cargo xwin build --target x86_64-pc-windows-msvc --release",

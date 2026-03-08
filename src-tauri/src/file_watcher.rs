@@ -322,9 +322,11 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             }
                             match crate::stats_db::audit_session_sql(app, &session_id) {
                                 Ok(audit) if audit.has_issues() => {
+                                    let _ = crate::stats_db::persist_session_sql_audit(app, &audit);
                                     log::warn!(
-                                        "file_watcher: sql audit failed for {} issues={} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={}",
+                                        "file_watcher: sql audit failed for {} classes={} issues={} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
                                         session_id,
+                                        audit.failure_classes.join(","),
                                         audit.issues.join(" | "),
                                         audit.replay_positions_rows,
                                         audit.replay_metrics_rows,
@@ -333,11 +335,13 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                         audit.run_timeline_rows,
                                         audit.shot_event_rows,
                                         audit.shot_target_rows,
+                                        audit.context_window_rows,
                                     );
                                 }
                                 Ok(audit) => {
+                                    let _ = crate::stats_db::persist_session_sql_audit(app, &audit);
                                     log::info!(
-                                        "file_watcher: sql audit ok for {} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={}",
+                                        "file_watcher: sql audit ok for {} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
                                         session_id,
                                         audit.replay_positions_rows,
                                         audit.replay_metrics_rows,
@@ -346,6 +350,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                         audit.run_timeline_rows,
                                         audit.shot_event_rows,
                                         audit.shot_target_rows,
+                                        audit.context_window_rows,
                                     );
                                 }
                                 Err(error) => {

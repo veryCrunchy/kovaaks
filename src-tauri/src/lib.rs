@@ -990,6 +990,34 @@ fn get_session_replay_context_windows(
 }
 
 #[tauri::command]
+fn get_session_sql_audit(app: AppHandle, session_id: String) -> Option<stats_db::SessionSqlAudit> {
+    match stats_db::audit_session_sql(&app, &session_id) {
+        Ok(audit) => {
+            let _ = stats_db::persist_session_sql_audit(&app, &audit);
+            Some(audit)
+        }
+        Err(error) => {
+            log::warn!("could not load sql audit for {}: {error}", session_id);
+            None
+        }
+    }
+}
+
+#[tauri::command]
+fn get_repo_sql_audit_summary(
+    app: AppHandle,
+    failing_session_limit: Option<usize>,
+) -> Option<stats_db::RepoSqlAuditSummary> {
+    match stats_db::refresh_repo_sql_audit(&app, failing_session_limit) {
+        Ok(summary) => Some(summary),
+        Err(error) => {
+            log::warn!("could not refresh repo sql audit summary: {error}");
+            None
+        }
+    }
+}
+
+#[tauri::command]
 fn replay_play_in_game(
     app: AppHandle,
     session_id: String,
@@ -1297,6 +1325,8 @@ pub fn run() {
             get_session_run_timeline,
             get_session_shot_telemetry,
             get_session_replay_context_windows,
+            get_session_sql_audit,
+            get_repo_sql_audit_summary,
             replay_play_in_game,
             replay_stop_in_game,
             toggle_settings,

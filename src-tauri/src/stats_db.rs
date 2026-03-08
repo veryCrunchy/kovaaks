@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 8;
+const SCHEMA_VERSION: i32 = 9;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -680,6 +680,28 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             COMMIT;
             ",
         )?;
+    }
+
+    if user_version < 9 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            ALTER TABLE sessions ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unknown';
+            ALTER TABLE sessions ADD COLUMN integrity_failure_codes TEXT;
+            ALTER TABLE sessions ADD COLUMN integrity_checked_at_unix_ms INTEGER;
+            PRAGMA user_version = 9;
+            COMMIT;
+            ",
+        )
+        .or_else(|_| {
+            conn.execute_batch(
+                "
+                BEGIN;
+                PRAGMA user_version = 9;
+                COMMIT;
+                ",
+            )
+        })?;
     }
 
     Ok(())
@@ -1994,6 +2016,12 @@ pub fn get_replay_context_windows(
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSqlAuditFinding {
+    pub code: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionSqlAudit {
     pub session_id: String,
     pub session_exists: bool,
@@ -2009,7 +2037,26 @@ pub struct SessionSqlAudit {
     pub context_window_rows: usize,
     pub summary_shots_fired: Option<f64>,
     pub summary_shots_hit: Option<f64>,
+    pub summary_accuracy_pct: Option<f64>,
+    pub integrity_status: String,
+    pub integrity_checked_at_unix_ms: Option<i64>,
+    pub failure_classes: Vec<String>,
+    pub findings: Vec<SessionSqlAuditFinding>,
     pub issues: Vec<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SqlAuditFailureCount {
+    pub code: String,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RepoSqlAuditSummary {
+    pub audited_session_ids: usize,
+    pub incomplete_sessions: usize,
+    pub failure_counts: Vec<SqlAuditFailureCount>,
+    pub sessions: Vec<SessionSqlAudit>,
 }
 
 impl SessionSqlAudit {
@@ -2018,8 +2065,17 @@ impl SessionSqlAudit {
     }
 }
 
-pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSqlAudit> {
-    let conn = connect(app)?;
+fn push_audit_failure(audit: &mut SessionSqlAudit, code: &str, message: impl Into<String>) {
+    let message = message.into();
+    audit.failure_classes.push(code.to_string());
+    audit.findings.push(SessionSqlAuditFinding {
+        code: code.to_string(),
+        message: message.clone(),
+    });
+    audit.issues.push(message);
+}
+
+fn audit_session_sql_with_conn(conn: &Connection, session_id: &str) -> Result<SessionSqlAudit> {
     let mut audit = conn.query_row(
         "
         SELECT
@@ -2035,7 +2091,10 @@ pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSql
             (SELECT COUNT(*) FROM session_shot_targets WHERE session_id = ?1) AS shot_target_rows,
             (SELECT COUNT(*) FROM session_replay_context_windows WHERE session_id = ?1) AS context_window_rows,
             (SELECT shots_fired FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_fired,
-            (SELECT shots_hit FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_hit
+            (SELECT shots_hit FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_hit,
+            (SELECT accuracy_pct FROM session_run_summaries WHERE session_id = ?1) AS summary_accuracy_pct,
+            COALESCE((SELECT integrity_status FROM sessions WHERE id = ?1), 'missing') AS integrity_status,
+            (SELECT integrity_checked_at_unix_ms FROM sessions WHERE id = ?1) AS integrity_checked_at_unix_ms
         ",
         params![session_id],
         |row| {
@@ -2054,52 +2113,179 @@ pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSql
                 context_window_rows: row.get::<_, i64>(10)? as usize,
                 summary_shots_fired: row.get(11)?,
                 summary_shots_hit: row.get(12)?,
+                summary_accuracy_pct: row.get(13)?,
+                integrity_status: row.get(14)?,
+                integrity_checked_at_unix_ms: row.get(15)?,
+                failure_classes: Vec::new(),
+                findings: Vec::new(),
                 issues: Vec::new(),
             })
         },
     )?;
 
     if !audit.session_exists {
-        audit.issues.push("missing sessions row".to_string());
+        push_audit_failure(&mut audit, "missing_sessions_row", "missing sessions row");
     }
     if audit.replay_asset_exists
         && audit.replay_positions_rows == 0
         && audit.replay_metrics_rows == 0
         && audit.replay_frames_rows == 0
     {
-        audit
-            .issues
-            .push("replay asset exists but replay payload tables are empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_replay_payload_rows",
+            "replay asset exists but replay payload tables are empty",
+        );
     }
     if audit.replay_asset_has_run_snapshot && audit.run_summary_rows == 0 {
-        audit
-            .issues
-            .push("replay asset expects run snapshot but session_run_summaries is empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_run_summary_rows",
+            "replay asset expects run snapshot but session_run_summaries is empty",
+        );
     }
     if audit.run_summary_rows > 0 && audit.run_timeline_rows == 0 {
-        audit
-            .issues
-            .push("run summary exists but session_run_timelines is empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_run_timeline_rows",
+            "run summary exists but session_run_timelines is empty",
+        );
     }
     let expects_shot_rows = audit.summary_shots_fired.unwrap_or(0.0) > 0.0
         || audit.summary_shots_hit.unwrap_or(0.0) > 0.0;
     if expects_shot_rows && audit.shot_event_rows == 0 {
-        audit
-            .issues
-            .push("run summary has shots but session_shot_events is empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_shot_event_rows",
+            "run summary has shots but session_shot_events is empty",
+        );
     }
     if audit.shot_event_rows > 0 && audit.shot_target_rows == 0 {
-        audit
-            .issues
-            .push("session_shot_events exists but session_shot_targets is empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_shot_target_rows",
+            "session_shot_events exists but session_shot_targets is empty",
+        );
     }
     if audit.shot_event_rows > 0 && audit.context_window_rows == 0 {
-        audit
-            .issues
-            .push("session_shot_events exists but session_replay_context_windows is empty".to_string());
+        push_audit_failure(
+            &mut audit,
+            "missing_context_window_rows",
+            "session_shot_events exists but session_replay_context_windows is empty",
+        );
+    }
+    if let (Some(shots_fired), Some(shots_hit)) = (audit.summary_shots_fired, audit.summary_shots_hit) {
+        if shots_hit > shots_fired + 0.0001 {
+            push_audit_failure(
+                &mut audit,
+                "impossible_shot_counts",
+                format!(
+                    "shots_hit ({shots_hit:.3}) exceeds shots_fired ({shots_fired:.3})"
+                ),
+            );
+        }
+    }
+    if let Some(accuracy_pct) = audit.summary_accuracy_pct {
+        if !(0.0..=100.0).contains(&accuracy_pct) {
+            push_audit_failure(
+                &mut audit,
+                "impossible_accuracy_pct",
+                format!("accuracy_pct ({accuracy_pct:.3}) is outside 0..=100"),
+            );
+        }
+        if audit.summary_shots_fired.unwrap_or(0.0) <= 0.0 && accuracy_pct > 0.0 {
+            push_audit_failure(
+                &mut audit,
+                "accuracy_without_shots",
+                "accuracy_pct is non-zero while shots_fired is zero or missing",
+            );
+        }
     }
 
     Ok(audit)
+}
+
+pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSqlAudit> {
+    let conn = connect(app)?;
+    audit_session_sql_with_conn(&conn, session_id)
+}
+
+pub fn persist_session_sql_audit(app: &AppHandle, audit: &SessionSqlAudit) -> Result<()> {
+    if !audit.session_exists {
+        return Ok(());
+    }
+    let conn = connect(app)?;
+    let status = if audit.has_issues() { "incomplete" } else { "ok" };
+    let failure_codes = if audit.failure_classes.is_empty() {
+        None
+    } else {
+        Some(audit.failure_classes.join(","))
+    };
+    conn.execute(
+        "
+        UPDATE sessions
+        SET integrity_status = ?2,
+            integrity_failure_codes = ?3,
+            integrity_checked_at_unix_ms = ?4
+        WHERE id = ?1
+        ",
+        params![audit.session_id, status, failure_codes, current_unix_ms()],
+    )?;
+    Ok(())
+}
+
+pub fn refresh_repo_sql_audit(
+    app: &AppHandle,
+    failing_session_limit: Option<usize>,
+) -> Result<RepoSqlAuditSummary> {
+    let conn = connect(app)?;
+    let mut stmt = conn.prepare(
+        "
+        SELECT session_id FROM (
+            SELECT id AS session_id FROM sessions
+            UNION
+            SELECT session_id FROM replay_assets
+        )
+        ORDER BY session_id ASC
+        ",
+    )?;
+    let session_ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    let limit = failing_session_limit.unwrap_or(100);
+    let mut failure_counts = std::collections::HashMap::<String, usize>::new();
+    let mut incomplete_sessions = 0usize;
+    let mut sessions = Vec::new();
+
+    for session_id in &session_ids {
+        let audit = audit_session_sql_with_conn(&conn, session_id)?;
+        if audit.session_exists {
+            persist_session_sql_audit(app, &audit)?;
+        }
+        if audit.has_issues() {
+            incomplete_sessions += 1;
+            for code in &audit.failure_classes {
+                *failure_counts.entry(code.clone()).or_insert(0) += 1;
+            }
+            if sessions.len() < limit {
+                sessions.push(audit);
+            }
+        }
+    }
+
+    let mut failure_counts = failure_counts
+        .into_iter()
+        .map(|(code, count)| SqlAuditFailureCount { code, count })
+        .collect::<Vec<_>>();
+    failure_counts.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.code.cmp(&b.code)));
+
+    Ok(RepoSqlAuditSummary {
+        audited_session_ids: session_ids.len(),
+        incomplete_sessions,
+        failure_counts,
+        sessions,
+    })
 }
 
 pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {

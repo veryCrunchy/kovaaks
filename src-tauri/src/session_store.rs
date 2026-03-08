@@ -248,6 +248,25 @@ fn try_initialize(app: &AppHandle) -> anyhow::Result<SessionStoreInitReport> {
         .unwrap_or_default();
     try_backfill_session_snapshots(app)?;
     try_migrate_session_names(app)?;
+    match crate::stats_db::refresh_repo_sql_audit(app, Some(25)) {
+        Ok(summary) => {
+            if summary.incomplete_sessions > 0 {
+                log::warn!(
+                    "session_store: integrity audit flagged {} incomplete session(s) across {} audited ids",
+                    summary.incomplete_sessions,
+                    summary.audited_session_ids,
+                );
+            } else {
+                log::info!(
+                    "session_store: integrity audit ok across {} audited ids",
+                    summary.audited_session_ids,
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("session_store: integrity audit refresh failed: {error:?}");
+        }
+    }
     log::info!("session_store: using stats db at {}", db_path.display());
     Ok(SessionStoreInitReport {
         imported_legacy: merge.imported,
