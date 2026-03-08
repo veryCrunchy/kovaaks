@@ -2376,6 +2376,7 @@ private:
             }
         }
         if (bridge_connected && !last_bridge_connected_) {
+            flush_pending_shot_telemetry(now, true);
             (void)emit_requested_state_snapshot_safe(now, "bridge_connected");
             std::array<char, 256> sbuf{};
             std::snprintf(
@@ -2397,6 +2398,7 @@ private:
             );
         }
         if (bridge_connected) {
+            flush_pending_shot_telemetry(now, false);
             kmod_replay::BridgeCommand command{};
             while (kmod_replay::poll_bridge_command(command)) {
                 if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
@@ -2853,6 +2855,8 @@ private:
     bool last_bridge_connected_{false};
     const char* emit_method_{"unknown"};
     const char* emit_origin_flag_{"unknown"};
+    std::vector<std::string> pending_shot_telemetry_events_{};
+    uint64_t pending_shot_telemetry_started_ms_{0};
     std::vector<std::pair<RC::Unreal::UFunction*, uint64_t>> live_metric_hook_bindings_{};
     bool live_metric_hooks_registered_{false};
 
@@ -2915,6 +2919,7 @@ private:
         pending_lifecycle_end_ms_ = 0;
         live_metric_receiver_hint_ = nullptr;
         live_metric_receiver_hint_ms_ = 0;
+        flush_pending_shot_telemetry(now, true);
         emit_simple_event("challenge_end");
         emit_simple_event("scenario_end");
         if (completed) {
@@ -4387,8 +4392,88 @@ private:
             }
             msg += "]}";
 
-            kovaaks::RustBridge::emit_json(msg.c_str());
+            queue_shot_telemetry_event(std::move(msg), now);
         }
+    }
+
+    void queue_shot_telemetry_event(std::string&& json, uint64_t now) {
+        if (json.empty()) {
+            return;
+        }
+
+        constexpr size_t k_shot_telemetry_flush_count = 24;
+        constexpr size_t k_shot_telemetry_max_buffered = 512;
+
+        if (pending_shot_telemetry_events_.empty()) {
+            pending_shot_telemetry_started_ms_ = now;
+        }
+        pending_shot_telemetry_events_.emplace_back(std::move(json));
+
+        if (pending_shot_telemetry_events_.size() >= k_shot_telemetry_flush_count) {
+            flush_pending_shot_telemetry(now, false);
+        }
+
+        if (pending_shot_telemetry_events_.size() > k_shot_telemetry_max_buffered) {
+            flush_pending_shot_telemetry(now, true);
+            if (pending_shot_telemetry_events_.size() > k_shot_telemetry_max_buffered) {
+                const size_t trim = pending_shot_telemetry_events_.size() - k_shot_telemetry_max_buffered;
+                pending_shot_telemetry_events_.erase(
+                    pending_shot_telemetry_events_.begin(),
+                    pending_shot_telemetry_events_.begin() + trim
+                );
+                if (pending_shot_telemetry_events_.empty()) {
+                    pending_shot_telemetry_started_ms_ = 0;
+                }
+            }
+        }
+    }
+
+    void flush_pending_shot_telemetry(uint64_t now, bool force) {
+        constexpr size_t k_shot_telemetry_flush_count = 24;
+        constexpr uint64_t k_shot_telemetry_flush_interval_ms = 120;
+
+        if (pending_shot_telemetry_events_.empty() || !kovaaks::RustBridge::is_connected()) {
+            return;
+        }
+
+        const bool aged_enough =
+            pending_shot_telemetry_started_ms_ > 0
+            && safe_elapsed_ms(now, pending_shot_telemetry_started_ms_) >= k_shot_telemetry_flush_interval_ms;
+        if (!force && pending_shot_telemetry_events_.size() < k_shot_telemetry_flush_count && !aged_enough) {
+            return;
+        }
+
+        do {
+            const size_t emit_count = pending_shot_telemetry_events_.size() < k_shot_telemetry_flush_count
+                ? pending_shot_telemetry_events_.size()
+                : k_shot_telemetry_flush_count;
+            if (emit_count == 0) {
+                pending_shot_telemetry_started_ms_ = 0;
+                return;
+            }
+
+            std::string msg;
+            msg.reserve(48 + (emit_count * 640));
+            msg += "{\"ev\":\"shot_telemetry_batch\",\"events\":[";
+            for (size_t index = 0; index < emit_count; ++index) {
+                if (index > 0) {
+                    msg += ",";
+                }
+                msg += pending_shot_telemetry_events_[index];
+            }
+            msg += "]}";
+
+            if (!kovaaks::RustBridge::emit_json(msg.c_str())) {
+                return;
+            }
+
+            pending_shot_telemetry_events_.erase(
+                pending_shot_telemetry_events_.begin(),
+                pending_shot_telemetry_events_.begin() + emit_count
+            );
+            pending_shot_telemetry_started_ms_ =
+                pending_shot_telemetry_events_.empty() ? 0 : now;
+        } while (force && !pending_shot_telemetry_events_.empty());
     }
 
     void emit_state_i32(const char* ev, int32_t& last_value, int32_t value, uint64_t now) {
