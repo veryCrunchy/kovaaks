@@ -133,7 +133,10 @@ pub fn import_csv_history(app: &AppHandle, stats_dir: &str) -> Result<CsvImportS
             }
             Err(error) => {
                 failed += 1;
-                log::warn!("historical csv import: failed to parse {}: {error}", path.display());
+                log::warn!(
+                    "historical csv import: failed to parse {}: {error}",
+                    path.display()
+                );
             }
         }
     }
@@ -277,14 +280,16 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 },
                             );
                             if has_replay {
-                                crate::session_store::set_session_has_replay(app, &session_id, true);
-                            }
-                            if let Some(snapshot) = run_snapshot.as_ref() {
-                                if let Err(error) = crate::stats_db::upsert_run_capture(
+                                crate::session_store::set_session_has_replay(
                                     app,
                                     &session_id,
-                                    snapshot,
-                                ) {
+                                    true,
+                                );
+                            }
+                            if let Some(snapshot) = run_snapshot.as_ref() {
+                                if let Err(error) =
+                                    crate::stats_db::upsert_run_capture(app, &session_id, snapshot)
+                                {
                                     log::warn!(
                                         "file_watcher: could not persist run capture for {}: {error}",
                                         session_id

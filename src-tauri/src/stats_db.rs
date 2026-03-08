@@ -273,9 +273,8 @@ fn db_path(app: &AppHandle) -> Result<PathBuf> {
         .path()
         .app_data_dir()
         .context("could not resolve app data directory for stats database")?;
-    std::fs::create_dir_all(&data_dir).with_context(|| {
-        format!("could not create app data directory {}", data_dir.display())
-    })?;
+    std::fs::create_dir_all(&data_dir)
+        .with_context(|| format!("could not create app data directory {}", data_dir.display()))?;
     Ok(data_dir.join(DB_FILE_NAME))
 }
 
@@ -789,9 +788,13 @@ fn query_shot_telemetry(
                     x: row.get::<_, Option<f64>>("player_x")?.unwrap_or_default(),
                     y: row.get::<_, Option<f64>>("player_y")?.unwrap_or_default(),
                     z: row.get::<_, Option<f64>>("player_z")?.unwrap_or_default(),
-                    pitch: row.get::<_, Option<f64>>("player_pitch")?.unwrap_or_default(),
+                    pitch: row
+                        .get::<_, Option<f64>>("player_pitch")?
+                        .unwrap_or_default(),
                     yaw: row.get::<_, Option<f64>>("player_yaw")?.unwrap_or_default(),
-                    roll: row.get::<_, Option<f64>>("player_roll")?.unwrap_or_default(),
+                    roll: row
+                        .get::<_, Option<f64>>("player_roll")?
+                        .unwrap_or_default(),
                     vx: row.get::<_, Option<f64>>("player_vx")?.unwrap_or_default(),
                     vy: row.get::<_, Option<f64>>("player_vy")?.unwrap_or_default(),
                     vz: row.get::<_, Option<f64>>("player_vz")?.unwrap_or_default(),
@@ -802,10 +805,18 @@ fn query_shot_telemetry(
             current_event = Some(crate::bridge::BridgeShotTelemetryEvent {
                 event: row.get::<_, String>("event_kind")?,
                 ts_ms: row.get::<_, i64>("ts_ms")? as u64,
-                total: row.get::<_, Option<i64>>("total")?.map(|value| value as u32),
-                run_id: row.get::<_, Option<i64>>("run_id")?.map(|value| value as u64),
-                sample_seq: row.get::<_, Option<i64>>("sample_seq")?.map(|value| value as u64),
-                sample_count: row.get::<_, Option<i64>>("sample_count")?.map(|value| value as u64),
+                total: row
+                    .get::<_, Option<i64>>("total")?
+                    .map(|value| value as u32),
+                run_id: row
+                    .get::<_, Option<i64>>("run_id")?
+                    .map(|value| value as u64),
+                sample_seq: row
+                    .get::<_, Option<i64>>("sample_seq")?
+                    .map(|value| value as u64),
+                sample_count: row
+                    .get::<_, Option<i64>>("sample_count")?
+                    .map(|value| value as u64),
                 source: row.get("source")?,
                 method: row.get("method")?,
                 origin_flag: row.get("origin_flag")?,
@@ -817,26 +828,28 @@ fn query_shot_telemetry(
 
         let target_entity_id = row.get::<_, Option<String>>("target_entity_id")?;
         if let (Some(event), Some(entity_id)) = (current_event.as_mut(), target_entity_id) {
-            event.targets.push(crate::bridge::BridgeShotTelemetryTarget {
-                entity_id,
-                profile: row.get::<_, String>("target_profile")?,
-                is_player: row.get::<_, i64>("target_is_player")? != 0,
-                is_bot: row.get::<_, i64>("target_is_bot")? != 0,
-                x: row.get("target_x")?,
-                y: row.get("target_y")?,
-                z: row.get("target_z")?,
-                pitch: row.get("target_pitch")?,
-                yaw: row.get("target_yaw")?,
-                roll: row.get("target_roll")?,
-                vx: row.get("target_vx")?,
-                vy: row.get("target_vy")?,
-                vz: row.get("target_vz")?,
-                distance_2d: row.get("target_distance_2d")?,
-                distance_3d: row.get("target_distance_3d")?,
-                yaw_error_deg: row.get("target_yaw_error_deg")?,
-                pitch_error_deg: row.get("target_pitch_error_deg")?,
-                is_nearest: row.get::<_, i64>("target_is_nearest")? != 0,
-            });
+            event
+                .targets
+                .push(crate::bridge::BridgeShotTelemetryTarget {
+                    entity_id,
+                    profile: row.get::<_, String>("target_profile")?,
+                    is_player: row.get::<_, i64>("target_is_player")? != 0,
+                    is_bot: row.get::<_, i64>("target_is_bot")? != 0,
+                    x: row.get("target_x")?,
+                    y: row.get("target_y")?,
+                    z: row.get("target_z")?,
+                    pitch: row.get("target_pitch")?,
+                    yaw: row.get("target_yaw")?,
+                    roll: row.get("target_roll")?,
+                    vx: row.get("target_vx")?,
+                    vy: row.get("target_vy")?,
+                    vz: row.get("target_vz")?,
+                    distance_2d: row.get("target_distance_2d")?,
+                    distance_3d: row.get("target_distance_3d")?,
+                    yaw_error_deg: row.get("target_yaw_error_deg")?,
+                    pitch_error_deg: row.get("target_pitch_error_deg")?,
+                    is_nearest: row.get::<_, i64>("target_is_nearest")? != 0,
+                });
         }
     }
 
@@ -1262,4 +1275,138 @@ pub fn get_shot_telemetry(
 ) -> Result<Vec<crate::bridge::BridgeShotTelemetryEvent>> {
     let conn = connect(app)?;
     query_shot_telemetry(&conn, session_id)
+}
+
+pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
+    #[derive(Clone)]
+    struct ClassificationRow {
+        session_id: String,
+        stats_panel: crate::session_store::StatsPanelSnapshot,
+        run_summary: Option<crate::bridge::BridgeRunSnapshot>,
+    }
+
+    let mut conn = connect(app)?;
+    let rows = {
+        let mut stmt = conn.prepare(
+            "
+            SELECT
+                sp.session_id,
+                sp.scenario_type,
+                sp.scenario_subtype,
+                sp.kills,
+                sp.avg_kps,
+                sp.accuracy_pct,
+                sp.total_damage,
+                sp.avg_ttk_ms,
+                sp.best_ttk_ms,
+                sp.ttk_std_ms,
+                sp.accuracy_trend,
+                rs.shots_fired,
+                rs.shots_hit,
+                rs.kills,
+                rs.kills_per_second,
+                rs.damage_done,
+                rs.damage_possible
+            FROM session_stats_panels sp
+            LEFT JOIN session_run_summaries rs ON rs.session_id = sp.session_id
+            ",
+        )?;
+        stmt.query_map([], |row| {
+            let shots_fired = row.get::<_, Option<f64>>(11)?;
+            let shots_hit = row.get::<_, Option<f64>>(12)?;
+            let kills = row.get::<_, Option<f64>>(13)?;
+            let kills_per_second = row.get::<_, Option<f64>>(14)?;
+            let damage_done = row.get::<_, Option<f64>>(15)?;
+            let damage_possible = row.get::<_, Option<f64>>(16)?;
+            let has_run_summary = shots_fired.is_some()
+                || shots_hit.is_some()
+                || kills.is_some()
+                || kills_per_second.is_some()
+                || damage_done.is_some()
+                || damage_possible.is_some();
+
+            Ok(ClassificationRow {
+                session_id: row.get(0)?,
+                stats_panel: crate::session_store::StatsPanelSnapshot {
+                    scenario_type: row.get(1)?,
+                    scenario_subtype: row.get(2)?,
+                    kills: row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
+                    avg_kps: row.get(4)?,
+                    accuracy_pct: row.get(5)?,
+                    total_damage: row.get(6)?,
+                    avg_ttk_ms: row.get(7)?,
+                    best_ttk_ms: row.get(8)?,
+                    ttk_std_ms: row.get(9)?,
+                    accuracy_trend: row.get(10)?,
+                },
+                run_summary: has_run_summary.then(|| crate::bridge::BridgeRunSnapshot {
+                    duration_secs: None,
+                    score_total: None,
+                    score_total_derived: None,
+                    score_per_minute: None,
+                    shots_fired,
+                    shots_hit,
+                    kills,
+                    kills_per_second,
+                    damage_done,
+                    damage_possible,
+                    damage_efficiency: None,
+                    accuracy_pct: None,
+                    peak_score_per_minute: None,
+                    peak_kills_per_second: None,
+                    paired_shot_hits: 0,
+                    avg_fire_to_hit_ms: None,
+                    p90_fire_to_hit_ms: None,
+                    avg_shots_to_hit: None,
+                    corrective_shot_ratio: None,
+                    started_at_unix_ms: None,
+                    ended_at_unix_ms: None,
+                    event_counts: crate::bridge::BridgeRunEventCounts::default(),
+                    timeline: vec![],
+                    shot_telemetry: vec![],
+                    tick_stream_v1: None,
+                }),
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut updates = Vec::new();
+    for row in rows {
+        let shot_telemetry = query_shot_telemetry(&conn, &row.session_id)?;
+        let classification = crate::bridge::classify_persisted_session(
+            &row.stats_panel,
+            row.run_summary.as_ref(),
+            &shot_telemetry,
+        );
+        if classification.family == "Unknown" {
+            continue;
+        }
+        if classification.family == row.stats_panel.scenario_type
+            && classification.subtype == row.stats_panel.scenario_subtype
+        {
+            continue;
+        }
+        updates.push((row.session_id, classification));
+    }
+
+    if updates.is_empty() {
+        return Ok(0);
+    }
+
+    let tx = conn.transaction()?;
+    for (session_id, classification) in &updates {
+        tx.execute(
+            "
+            UPDATE session_stats_panels
+            SET scenario_type = ?2,
+                scenario_subtype = ?3
+            WHERE session_id = ?1
+            ",
+            params![session_id, &classification.family, &classification.subtype],
+        )?;
+    }
+    tx.commit()?;
+
+    Ok(updates.len())
 }

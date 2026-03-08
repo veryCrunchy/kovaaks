@@ -446,7 +446,8 @@ fn try_clear_sessions(app: &AppHandle) -> anyhow::Result<()> {
 
 fn try_migrate_session_names(app: &AppHandle) -> anyhow::Result<()> {
     let conn = crate::stats_db::connect(app)?;
-    let mut stmt = conn.prepare("SELECT id, scenario FROM sessions ORDER BY timestamp ASC, id ASC")?;
+    let mut stmt =
+        conn.prepare("SELECT id, scenario FROM sessions ORDER BY timestamp ASC, id ASC")?;
     let rows = stmt.query_map([], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     })?;
@@ -611,7 +612,10 @@ fn try_backfill_session_snapshots(app: &AppHandle) -> anyhow::Result<()> {
 
     tx.commit()?;
     if migrated > 0 {
-        log::info!("session_store: migrated {} session snapshot row(s) into typed SQL tables", migrated);
+        log::info!(
+            "session_store: migrated {} session snapshot row(s) into typed SQL tables",
+            migrated
+        );
     }
     Ok(())
 }
@@ -648,7 +652,10 @@ fn timestamp_matches_at(bytes: &[u8], start: usize) -> bool {
     {
         return false;
     }
-    if DOT_POSITIONS.iter().any(|offset| bytes[start + offset] != b'.') {
+    if DOT_POSITIONS
+        .iter()
+        .any(|offset| bytes[start + offset] != b'.')
+    {
         return false;
     }
     true
@@ -683,9 +690,18 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
 }
 
 fn upsert_session_snapshots(tx: &Transaction<'_>, record: &SessionRecord) -> anyhow::Result<()> {
-    tx.execute("DELETE FROM session_smoothness WHERE session_id = ?1", params![&record.id])?;
-    tx.execute("DELETE FROM session_stats_panels WHERE session_id = ?1", params![&record.id])?;
-    tx.execute("DELETE FROM session_shot_timings WHERE session_id = ?1", params![&record.id])?;
+    tx.execute(
+        "DELETE FROM session_smoothness WHERE session_id = ?1",
+        params![&record.id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_stats_panels WHERE session_id = ?1",
+        params![&record.id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_shot_timings WHERE session_id = ?1",
+        params![&record.id],
+    )?;
 
     if let Some(smoothness) = record.smoothness.as_ref() {
         tx.execute(
@@ -788,14 +804,30 @@ fn smoothness_from_row(row: &Row<'_>) -> rusqlite::Result<Option<SmoothnessSnaps
 
     Ok(Some(SmoothnessSnapshot {
         composite,
-        jitter: row.get::<_, Option<f32>>("smoothness_jitter")?.unwrap_or_default(),
-        overshoot_rate: row.get::<_, Option<f32>>("smoothness_overshoot_rate")?.unwrap_or_default(),
-        velocity_std: row.get::<_, Option<f32>>("smoothness_velocity_std")?.unwrap_or_default(),
-        path_efficiency: row.get::<_, Option<f32>>("smoothness_path_efficiency")?.unwrap_or_default(),
-        avg_speed: row.get::<_, Option<f32>>("smoothness_avg_speed")?.unwrap_or_default(),
-        click_timing_cv: row.get::<_, Option<f32>>("smoothness_click_timing_cv")?.unwrap_or_default(),
-        correction_ratio: row.get::<_, Option<f32>>("smoothness_correction_ratio")?.unwrap_or_default(),
-        directional_bias: row.get::<_, Option<f32>>("smoothness_directional_bias")?.unwrap_or_default(),
+        jitter: row
+            .get::<_, Option<f32>>("smoothness_jitter")?
+            .unwrap_or_default(),
+        overshoot_rate: row
+            .get::<_, Option<f32>>("smoothness_overshoot_rate")?
+            .unwrap_or_default(),
+        velocity_std: row
+            .get::<_, Option<f32>>("smoothness_velocity_std")?
+            .unwrap_or_default(),
+        path_efficiency: row
+            .get::<_, Option<f32>>("smoothness_path_efficiency")?
+            .unwrap_or_default(),
+        avg_speed: row
+            .get::<_, Option<f32>>("smoothness_avg_speed")?
+            .unwrap_or_default(),
+        click_timing_cv: row
+            .get::<_, Option<f32>>("smoothness_click_timing_cv")?
+            .unwrap_or_default(),
+        correction_ratio: row
+            .get::<_, Option<f32>>("smoothness_correction_ratio")?
+            .unwrap_or_default(),
+        directional_bias: row
+            .get::<_, Option<f32>>("smoothness_directional_bias")?
+            .unwrap_or_default(),
     }))
 }
 
@@ -808,7 +840,9 @@ fn stats_panel_from_row(row: &Row<'_>) -> rusqlite::Result<Option<StatsPanelSnap
     Ok(Some(StatsPanelSnapshot {
         scenario_type,
         scenario_subtype: row.get("stats_panel_scenario_subtype")?,
-        kills: row.get::<_, Option<i64>>("stats_panel_kills")?.map(|value| value as u32),
+        kills: row
+            .get::<_, Option<i64>>("stats_panel_kills")?
+            .map(|value| value as u32),
         avg_kps: row.get("stats_panel_avg_kps")?,
         accuracy_pct: row.get("stats_panel_accuracy_pct")?,
         total_damage: row.get("stats_panel_total_damage")?,

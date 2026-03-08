@@ -149,8 +149,55 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 
                 match current_pid {
                     Some(pid) => {
-                        if bridge::is_ue4ss_loaded_for_pid(pid) {
+                        let runtime_loaded = bridge::is_ue4ss_loaded_for_pid(pid);
+                        let bridge_connected = bridge::is_bridge_dll_connected();
+
+                        if runtime_loaded && bridge_connected {
                             last_attempt = None;
+                        } else if runtime_loaded {
+                            let can_attempt = match last_attempt {
+                                Some((attempt_pid, at)) if attempt_pid == pid => {
+                                    at.elapsed() >= reinject_cooldown
+                                }
+                                _ => true,
+                            };
+
+                            if can_attempt {
+                                log::warn!(
+                                    "UE4SS is loaded for KovaaK pid {pid} but the bridge pipe is disconnected; attempting hot reload"
+                                );
+                                match bridge::trigger_hot_reload() {
+                                    Ok(()) => {
+                                        log::info!(
+                                            "UE4SS hot reload triggered for KovaaK pid {pid} to recover bridge connectivity"
+                                        );
+                                    }
+                                    Err(error) => {
+                                        log::warn!(
+                                            "UE4SS hot reload failed for KovaaK pid {pid}: {error}; retrying deploy/inject"
+                                        );
+                                        match deploy_and_inject_ue4ss(&app, &stats_dir) {
+                                            Ok(()) => {
+                                                log::info!(
+                                                    "UE4SS deploy/inject retry finished for KovaaK pid {pid}"
+                                                );
+                                            }
+                                            Err(e) => {
+                                                if bridge::is_injection_deferred_error(&e) {
+                                                    log::info!(
+                                                        "UE4SS deploy/inject deferred for KovaaK pid {pid}: {e}"
+                                                    );
+                                                } else {
+                                                    log::warn!(
+                                                        "UE4SS deploy/inject retry failed for KovaaK pid {pid}: {e}"
+                                                    );
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                last_attempt = Some((pid, std::time::Instant::now()));
+                            }
                         } else {
                             let can_attempt = match last_attempt {
                                 Some((attempt_pid, at)) if attempt_pid == pid => {
@@ -200,6 +247,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
 
 mod bridge;
+mod discord_rpc;
 mod file_watcher;
 mod kovaaks_api;
 mod logger;
@@ -847,7 +895,10 @@ fn get_session_replay_payload(
 }
 
 #[tauri::command]
-fn get_session_run_summary(app: AppHandle, session_id: String) -> Option<bridge::BridgeRunSnapshot> {
+fn get_session_run_summary(
+    app: AppHandle,
+    session_id: String,
+) -> Option<bridge::BridgeRunSnapshot> {
     match stats_db::get_run_summary(&app, &session_id) {
         Ok(Some(summary)) => Some(summary),
         Ok(None) => {
@@ -879,7 +930,10 @@ fn get_session_run_timeline(
             match stats_db::get_run_timeline(&app, &session_id) {
                 Ok(timeline) => timeline,
                 Err(error) => {
-                    log::warn!("could not backfill run timeline for {}: {error}", session_id);
+                    log::warn!(
+                        "could not backfill run timeline for {}: {error}",
+                        session_id
+                    );
                     vec![]
                 }
             }
@@ -903,7 +957,10 @@ fn get_session_shot_telemetry(
             match stats_db::get_shot_telemetry(&app, &session_id) {
                 Ok(events) => events,
                 Err(error) => {
-                    log::warn!("could not backfill shot telemetry for {}: {error}", session_id);
+                    log::warn!(
+                        "could not backfill shot telemetry for {}: {error}",
+                        session_id
+                    );
                     vec![]
                 }
             }
@@ -1328,8 +1385,37 @@ pub fn run() {
                 "AimMod starting up — log file: {}",
                 logger::log_file_path().display()
             );
+            discord_rpc::start();
+            discord_rpc::update_presence_from_bridge(discord_rpc::BridgePresenceState {
+                game_state_code: 0,
+                game_state: "AimMod Running".to_string(),
+                scenario_name: None,
+                scenario_type: None,
+                scenario_subtype: None,
+                time_remaining_secs: None,
+                queue_time_remaining_secs: None,
+            });
 
             session_store::initialize(app.handle());
+            {
+                let app_handle = app.handle().clone();
+                let _ = std::thread::Builder::new()
+                    .name("session-classification-backfill".into())
+                    .spawn(move || match stats_db::backfill_session_classifications(&app_handle) {
+                        Ok(0) => {}
+                        Ok(updated) => {
+                            log::info!(
+                                "stats_db: backfilled stored scenario classification for {} session(s)",
+                                updated
+                            );
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "stats_db: stored scenario classification backfill failed: {error}"
+                            );
+                        }
+                    });
+            }
 
             // Start file watcher
             file_watcher::start(app.handle().clone(), &loaded.stats_dir);
