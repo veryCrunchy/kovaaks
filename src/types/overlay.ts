@@ -13,6 +13,24 @@ export interface SessionResult {
   csv_path: string;
 }
 
+export interface PersistedStatsPanelSnapshot {
+  scenario_type: string;
+  scenario_subtype?: string | null;
+  kills?: number | null;
+  avg_kps?: number | null;
+  accuracy_pct?: number | null;
+  total_damage?: number | null;
+  avg_ttk_ms?: number | null;
+  best_ttk_ms?: number | null;
+  ttk_std_ms?: number | null;
+  accuracy_trend?: number | null;
+}
+
+export interface SessionCompletePayload extends SessionResult {
+  stats_panel?: PersistedStatsPanelSnapshot | null;
+  run_snapshot?: import("./mouse").BridgeRunSnapshot | null;
+}
+
 // ─── Stats panel live payload ────────────────────────────────────────────────
 
 /**

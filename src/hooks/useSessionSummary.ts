@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { listen } from "@tauri-apps/api/event";
-import type { SessionResult, StatsPanelReading } from "../types/overlay";
-import type { MouseMetrics } from "../types/mouse";
+import type {
+  PersistedStatsPanelSnapshot,
+  SessionCompletePayload,
+  SessionResult,
+  StatsPanelReading,
+} from "../types/overlay";
+import type { BridgeRunSnapshot, MouseMetrics } from "../types/mouse";
 
 export interface RunCoachingTip {
   id: string;
@@ -535,6 +540,85 @@ function buildRunSnapshot(
   };
 }
 
+function buildRunSnapshotFromBridge(
+  session: SessionResult,
+  snapshot: BridgeRunSnapshot,
+): ScenarioRunSnapshot {
+  const timeline: RunTimelinePoint[] = (snapshot.timeline ?? []).map((point) => ({
+    tSec: point.t_sec,
+    scorePerMinute: point.score_per_minute,
+    killsPerSecond: point.kills_per_second,
+    accuracyPct: point.accuracy_pct,
+    damageEfficiency: point.damage_efficiency,
+    scoreTotal: point.score_total,
+    scoreTotalDerived: point.score_total_derived,
+    kills: point.kills,
+    shotsFired: point.shots_fired,
+    shotsHit: point.shots_hit,
+  }));
+
+  const snapshotBase: Omit<ScenarioRunSnapshot, "tips"> = {
+    durationSecs: toPositiveOrNull(snapshot.duration_secs) ?? session.duration_secs ?? null,
+    scoreTotal: toPositiveOrNull(snapshot.score_total),
+    scoreTotalDerived: toPositiveOrNull(snapshot.score_total_derived),
+    scorePerMinute: toPositiveOrNull(snapshot.score_per_minute),
+    shotsFired: toPositiveOrNull(snapshot.shots_fired),
+    shotsHit: toPositiveOrNull(snapshot.shots_hit),
+    kills: toPositiveOrNull(snapshot.kills),
+    killsPerSecond: toPositiveOrNull(snapshot.kills_per_second),
+    damageDone: toPositiveOrNull(snapshot.damage_done),
+    damagePossible: toPositiveOrNull(snapshot.damage_possible),
+    damageEfficiency: toPositiveOrNull(snapshot.damage_efficiency),
+    accuracyPct: toPositiveOrNull(snapshot.accuracy_pct),
+    peakScorePerMinute: toPositiveOrNull(snapshot.peak_score_per_minute),
+    peakKillsPerSecond: toPositiveOrNull(snapshot.peak_kills_per_second),
+    shotFiredEvents: snapshot.event_counts?.shot_fired_events ?? 0,
+    shotHitEvents: snapshot.event_counts?.shot_hit_events ?? 0,
+    killEvents: snapshot.event_counts?.kill_events ?? 0,
+    challengeQueuedEvents: snapshot.event_counts?.challenge_queued_events ?? 0,
+    challengeStartEvents: snapshot.event_counts?.challenge_start_events ?? 0,
+    challengeEndEvents: snapshot.event_counts?.challenge_end_events ?? 0,
+    challengeCompleteEvents: snapshot.event_counts?.challenge_complete_events ?? 0,
+    challengeCanceledEvents: snapshot.event_counts?.challenge_canceled_events ?? 0,
+    startedAtMs: snapshot.started_at_unix_ms ?? null,
+    endedAtMs: snapshot.ended_at_unix_ms ?? null,
+    timeline,
+    keyMoments: buildRunMomentInsights(
+      timeline,
+      toPositiveOrNull(snapshot.duration_secs) ?? session.duration_secs ?? null,
+    ),
+  };
+
+  return {
+    ...snapshotBase,
+    tips: buildRunTips(snapshotBase, snapshotBase.keyMoments),
+  };
+}
+
+function normalizePersistedStatsPanel(
+  persisted: PersistedStatsPanelSnapshot | null | undefined,
+  runSnapshot: ScenarioRunSnapshot | null,
+  session: SessionResult,
+): StatsPanelReading | null {
+  if (!persisted) return null;
+  return {
+    session_time_secs: runSnapshot?.durationSecs ?? session.duration_secs ?? null,
+    score_total: runSnapshot?.scoreTotal ?? null,
+    score_total_derived: runSnapshot?.scoreTotalDerived ?? null,
+    kills: persisted.kills ?? null,
+    kps: persisted.avg_kps ?? null,
+    accuracy_hits: null,
+    accuracy_shots: null,
+    accuracy_pct: persisted.accuracy_pct ?? runSnapshot?.accuracyPct ?? null,
+    damage_dealt: persisted.total_damage ?? runSnapshot?.damageDone ?? null,
+    damage_total: runSnapshot?.damagePossible ?? null,
+    spm: runSnapshot?.scorePerMinute ?? null,
+    ttk_secs: persisted.avg_ttk_ms != null ? persisted.avg_ttk_ms / 1000 : null,
+    scenario_type: persisted.scenario_type,
+    scenario_subtype: persisted.scenario_subtype ?? null,
+  };
+}
+
 /**
  * Captures an end-of-run snapshot with bridge pull metrics + key event deltas,
  * then surfaces concise coaching tips for that specific scenario run.
@@ -647,14 +731,23 @@ export function useSessionSummary(): {
       latestStatsPanel.current = e.payload;
       const payload = e.payload;
 
-      if (isFiniteNumber(payload?.session_time_secs)) {
-        if (runStartedAtMs.current === 0 && payload.session_time_secs > 0) {
-          runStartedAtMs.current = Date.now() - payload.session_time_secs * 1000;
+      const durationSecs =
+        isFiniteNumber(payload?.challenge_seconds_total)
+          ? payload.challenge_seconds_total
+          : isFiniteNumber(payload?.session_time_secs)
+          ? payload.session_time_secs
+          : null;
+
+      if (durationSecs != null) {
+        if (runStartedAtMs.current === 0 && durationSecs > 0) {
+          runStartedAtMs.current = Date.now() - durationSecs * 1000;
         }
-        runMetrics.current.durationSecs = payload.session_time_secs;
+        runMetrics.current.durationSecs = durationSecs;
       }
 
       if (isFiniteNumber(payload?.spm)) runMetrics.current.scorePerMinute = payload.spm;
+      if (isFiniteNumber(payload?.score_total)) runMetrics.current.scoreTotal = payload.score_total;
+      if (isFiniteNumber(payload?.score_total_derived)) runMetrics.current.scoreTotalDerived = payload.score_total_derived;
       if (isFiniteNumber(payload?.kps)) runMetrics.current.killsPerSecond = payload.kps;
       if (isFiniteNumber(payload?.kills)) runMetrics.current.kills = payload.kills;
       if (isFiniteNumber(payload?.accuracy_pct)) runMetrics.current.accuracyPct = payload.accuracy_pct;
@@ -662,8 +755,15 @@ export function useSessionSummary(): {
       if (isFiniteNumber(payload?.accuracy_shots)) runMetrics.current.shotsFired = payload.accuracy_shots;
       if (isFiniteNumber(payload?.damage_dealt)) runMetrics.current.damageDone = payload.damage_dealt;
       if (isFiniteNumber(payload?.damage_total)) runMetrics.current.damagePossible = payload.damage_total;
+      if (
+        isFiniteNumber(payload?.damage_dealt)
+        && isFiniteNumber(payload?.damage_total)
+        && payload.damage_total > 0
+      ) {
+        runMetrics.current.damageEfficiency = (payload.damage_dealt / payload.damage_total) * 100;
+      }
 
-      recordTimelinePoint(payload?.session_time_secs ?? null);
+      recordTimelinePoint(durationSecs);
     });
 
     const unlistenBridgeMetric = listen<BridgeMetricEvent>("bridge-metric", (e) => {
@@ -751,21 +851,27 @@ export function useSessionSummary(): {
       recordTimelinePoint();
     });
 
-    const unlistenComplete = listen<SessionResult>("session-complete", (e) => {
+    const unlistenComplete = listen<SessionCompletePayload>("session-complete", (e) => {
       stopTimers();
-      const runSnapshot = buildRunSnapshot(
-        e.payload,
-        runMetrics,
-        runPeakSpm,
-        runPeakKps,
-        runCounts,
-        runTimeline,
-        runStartedAtMs.current,
-      );
+      const session = e.payload as SessionResult;
+      const runSnapshot = e.payload.run_snapshot
+        ? buildRunSnapshotFromBridge(session, e.payload.run_snapshot)
+        : buildRunSnapshot(
+            session,
+            runMetrics,
+            runPeakSpm,
+            runPeakKps,
+            runCounts,
+            runTimeline,
+            runStartedAtMs.current,
+          );
+      const statsPanel =
+        normalizePersistedStatsPanel(e.payload.stats_panel, runSnapshot, session)
+        ?? latestStatsPanel.current;
       setSummary({
-        session: e.payload,
+        session,
         metrics: latestMetrics.current,
-        statsPanel: latestStatsPanel.current,
+        statsPanel,
         runSnapshot,
       });
       setDismissProgress(0);
