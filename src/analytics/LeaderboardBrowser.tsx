@@ -137,24 +137,11 @@ export function LeaderboardBrowser() {
   // ── Load recent scenarios from session history ──────────────────────────────
 
   useEffect(() => {
-    invoke<{ scenario: string; timestamp: string }[]>("get_session_history")
+    invoke<{ scenario: string; timestamp: string }[]>("get_recent_session_scenarios", {
+      limit: 15,
+    })
       .then((records) => {
-        // Sort by timestamp descending, deduplicate on normalised name, cap at 15
-        const sorted = [...records].sort((a, b) =>
-          b.timestamp > a.timestamp ? 1 : -1
-        );
-        const seen = new Set<string>();
-        const unique: string[] = [];
-        for (const r of sorted) {
-          // Strip KovaaK's datestamp suffix, same as StatsWindow.normalizeScenario
-          const raw = r.scenario;
-          const m = raw.match(/\d{4}\.\d{2}\.\d{2}-\d{2}\.\d{2}\.\d{2}/);
-          const sep = m && m.index !== undefined ? raw.lastIndexOf(" - ", m.index) : -1;
-          const name = sep >= 0 ? raw.slice(0, sep) : raw;
-          if (!seen.has(name)) { seen.add(name); unique.push(name); }
-          if (unique.length >= 15) break;
-        }
-        return Promise.all(unique.map(resolveScenarioByName));
+        return Promise.all(records.map((record) => resolveScenarioByName(record.scenario)));
       })
       .then((results) => {
         setRecentScenarios(results.filter((r): r is ScenarioSearchResult => r !== null));
