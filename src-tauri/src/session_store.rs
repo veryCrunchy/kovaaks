@@ -6,10 +6,12 @@
 use anyhow::Context;
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use tauri::AppHandle;
 
 const LEGACY_STORE_PATH: &str = "sessions.json";
 const LEGACY_STORE_KEY: &str = "history";
+const DEFAULT_PAGE_LIMIT: usize = 500;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -134,6 +136,21 @@ pub struct SessionStoreInitReport {
     pub total_after: usize,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionHistoryPage {
+    pub records: Vec<SessionRecord>,
+    pub total: usize,
+    pub offset: usize,
+    pub limit: usize,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentScenarioRecord {
+    pub scenario: String,
+    pub timestamp: String,
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 pub fn initialize(app: &AppHandle) {
@@ -169,12 +186,38 @@ where
     }
 }
 
-pub fn get_all_sessions(app: &AppHandle) -> Vec<SessionRecord> {
-    match try_get_all_sessions(app) {
+pub fn get_session_page(app: &AppHandle, offset: usize, limit: usize) -> SessionHistoryPage {
+    match try_get_session_page(app, offset, limit) {
+        Ok(page) => page,
+        Err(error) => {
+            log::warn!("session_store: paged read error: {error:?}");
+            SessionHistoryPage {
+                records: vec![],
+                total: 0,
+                offset,
+                limit,
+                has_more: false,
+            }
+        }
+    }
+}
+
+pub fn get_recent_scenarios(app: &AppHandle, limit: usize) -> Vec<RecentScenarioRecord> {
+    match try_get_recent_scenarios(app, limit) {
         Ok(records) => records,
         Err(error) => {
-            log::warn!("session_store: read error: {error:?}");
+            log::warn!("session_store: recent scenarios read error: {error:?}");
             vec![]
+        }
+    }
+}
+
+pub fn get_personal_best_for_scenario(app: &AppHandle, scenario_name: &str) -> Option<u32> {
+    match try_get_personal_best_for_scenario(app, scenario_name) {
+        Ok(score) => score,
+        Err(error) => {
+            log::warn!("session_store: personal best read error: {error:?}");
+            None
         }
     }
 }
@@ -262,35 +305,109 @@ where
     Ok(result)
 }
 
-fn try_get_all_sessions(app: &AppHandle) -> anyhow::Result<Vec<SessionRecord>> {
+fn try_get_session_page(
+    app: &AppHandle,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<SessionHistoryPage> {
     let conn = crate::stats_db::connect(app)?;
+    let total = count_sessions(&conn)?;
+    let limit = limit.max(1);
+    let records = query_sessions(&conn, offset, limit)?;
+    let loaded = offset.saturating_add(records.len());
+
+    Ok(SessionHistoryPage {
+        records,
+        total,
+        offset,
+        limit,
+        has_more: loaded < total,
+    })
+}
+
+fn try_get_recent_scenarios(
+    app: &AppHandle,
+    limit: usize,
+) -> anyhow::Result<Vec<RecentScenarioRecord>> {
+    let conn = crate::stats_db::connect(app)?;
+    let desired = limit.max(1);
+    let batch_size = desired.max(50);
+    let mut recent = Vec::with_capacity(desired);
+    let mut seen = HashSet::new();
+    let mut offset = 0usize;
+
+    loop {
+        let mut stmt = conn.prepare(
+            "
+            SELECT scenario, timestamp
+            FROM sessions
+            ORDER BY timestamp DESC, id DESC
+            LIMIT ?1 OFFSET ?2
+            ",
+        )?;
+        let rows = stmt
+            .query_map(params![batch_size as i64, offset as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        if rows.is_empty() {
+            break;
+        }
+
+        for (scenario, timestamp) in &rows {
+            let normalized = normalize_scenario_name(scenario);
+            if seen.insert(normalized.clone()) {
+                recent.push(RecentScenarioRecord {
+                    scenario: normalized,
+                    timestamp: timestamp.clone(),
+                });
+                if recent.len() >= desired {
+                    return Ok(recent);
+                }
+            }
+        }
+
+        if rows.len() < batch_size {
+            break;
+        }
+
+        offset = offset.saturating_add(rows.len());
+    }
+
+    Ok(recent)
+}
+
+fn try_get_personal_best_for_scenario(
+    app: &AppHandle,
+    scenario_name: &str,
+) -> anyhow::Result<Option<u32>> {
+    let conn = crate::stats_db::connect(app)?;
+    let target = normalize_scenario_name(scenario_name);
     let mut stmt = conn.prepare(
         "
-        SELECT
-            id,
-            scenario,
-            score,
-            accuracy,
-            kills,
-            deaths,
-            duration_secs,
-            avg_ttk,
-            damage_done,
-            timestamp,
-            smoothness_json,
-            stats_panel_json,
-            shot_timing_json,
-            has_replay
+        SELECT scenario, score
         FROM sessions
-        ORDER BY timestamp ASC, id ASC
+        WHERE score IS NOT NULL
+        ORDER BY score DESC
         ",
     )?;
-    let rows = stmt.query_map([], row_to_session_record)?;
-    let mut sessions = Vec::new();
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+    })?;
+
     for row in rows {
-        sessions.push(row?);
+        let (scenario, score) = row?;
+        if normalize_scenario_name(&scenario) != target {
+            continue;
+        }
+        if !score.is_finite() {
+            continue;
+        }
+        return Ok(Some(score.max(0.0).round() as u32));
     }
-    Ok(sessions)
+
+    Ok(None)
 }
 
 fn try_clear_sessions(app: &AppHandle) -> anyhow::Result<()> {
@@ -340,6 +457,84 @@ fn load_legacy_sessions(app: &AppHandle) -> Option<Vec<SessionRecord>> {
             None
         }
     }
+}
+
+fn count_sessions(conn: &Connection) -> anyhow::Result<usize> {
+    conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+        .context("could not count sessions")
+}
+
+fn query_sessions(
+    conn: &Connection,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<Vec<SessionRecord>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            id,
+            scenario,
+            score,
+            accuracy,
+            kills,
+            deaths,
+            duration_secs,
+            avg_ttk,
+            damage_done,
+            timestamp,
+            smoothness_json,
+            stats_panel_json,
+            shot_timing_json,
+            has_replay
+        FROM sessions
+        ORDER BY timestamp ASC, id ASC
+        LIMIT ?1 OFFSET ?2
+        ",
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_session_record)?;
+    let mut sessions = Vec::with_capacity(limit.min(DEFAULT_PAGE_LIMIT));
+    for row in rows {
+        sessions.push(row?);
+    }
+    Ok(sessions)
+}
+
+fn normalize_scenario_name(name: &str) -> String {
+    let stripped = crate::file_watcher::strip_challenge_suffix(name);
+    if let Some(ts_start) = timestamp_marker_start(&stripped) {
+        if let Some(sep) = stripped[..ts_start].rfind(" - ") {
+            return stripped[..sep].to_string();
+        }
+    }
+    stripped.to_string()
+}
+
+fn timestamp_marker_start(value: &str) -> Option<usize> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 19 {
+        return None;
+    }
+
+    (0..=bytes.len() - 19).find(|start| timestamp_matches_at(bytes, *start))
+}
+
+fn timestamp_matches_at(bytes: &[u8], start: usize) -> bool {
+    const DIGIT_POSITIONS: [usize; 14] = [0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18];
+    const DOT_POSITIONS: [usize; 4] = [4, 7, 13, 16];
+
+    if bytes.get(start + 10) != Some(&b'-') {
+        return false;
+    }
+    if DIGIT_POSITIONS
+        .iter()
+        .any(|offset| !bytes[start + offset].is_ascii_digit())
+    {
+        return false;
+    }
+    if DOT_POSITIONS.iter().any(|offset| bytes[start + offset] != b'.') {
+        return false;
+    }
+    true
 }
 
 fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
