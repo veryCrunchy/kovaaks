@@ -79,6 +79,7 @@ struct BridgeStatsPanelEvent {
     game_state: String,
     scenario_name: Option<String>,
     scenario_type: String,
+    scenario_subtype: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
@@ -332,7 +333,7 @@ pub struct RuntimeFlagState {
 #[allow(unsafe_op_in_unsafe_fn)]
 mod imp {
     use super::BridgeStatsPanelEvent;
-    use std::collections::{HashSet, VecDeque};
+    use std::collections::{HashMap, HashSet, VecDeque};
     use std::ffi::OsStr;
     use std::io::{Read, Seek, SeekFrom};
     use std::os::windows::ffi::OsStrExt;
@@ -596,6 +597,7 @@ mod imp {
         queue_last_value: Option<f64>,
         challenge_lifecycle_active: bool,
         challenge_lifecycle_at: Option<Instant>,
+        recent_ttk_secs: VecDeque<f64>,
     }
 
     #[derive(Clone, Debug, Default)]
@@ -631,6 +633,7 @@ mod imp {
     const MAX_PENDING_SHOT_EVENTS: usize = 4096;
     const MAX_SHOT_LATENCY_SAMPLES: usize = 8192;
     const MAX_SHOT_TELEMETRY_EVENTS: usize = 8192;
+    const MAX_SCENARIO_TTK_SAMPLES: usize = 96;
     const MAX_TICK_STREAM_KEYFRAMES: usize = 12000;
     const MAX_TICK_STREAM_DELTAS: usize = 72000;
     const RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS: f64 = 1.25;
@@ -1663,6 +1666,7 @@ mod imp {
                     game_state: "menu".to_string(),
                     scenario_name: None,
                     scenario_type: "Unknown".to_string(),
+                    scenario_subtype: None,
                 },
                 last_nonzero_spm: None,
                 last_nonzero_damage_done: None,
@@ -1676,6 +1680,7 @@ mod imp {
                 queue_last_value: None,
                 challenge_lifecycle_active: false,
                 challenge_lifecycle_at: None,
+                recent_ttk_secs: VecDeque::with_capacity(MAX_SCENARIO_TTK_SAMPLES),
             })
         })
     }
@@ -1721,6 +1726,7 @@ mod imp {
                 game_state: "menu".to_string(),
                 scenario_name: None,
                 scenario_type: "Unknown".to_string(),
+                scenario_subtype: None,
             };
             state.last_nonzero_spm = None;
             state.last_nonzero_damage_done = None;
@@ -1734,6 +1740,7 @@ mod imp {
             state.queue_last_value = None;
             state.challenge_lifecycle_active = false;
             state.challenge_lifecycle_at = None;
+            state.recent_ttk_secs.clear();
         }
     }
 
@@ -1745,6 +1752,7 @@ mod imp {
 
     fn map_stats_panel_snapshot(
         stats: &BridgeStatsPanelEvent,
+        ttk_summary: Option<&TtkSampleSummary>,
     ) -> Option<crate::session_store::StatsPanelSnapshot> {
         let has_signal = stats.kills.is_some()
             || stats.kps.is_some()
@@ -1761,20 +1769,25 @@ mod imp {
 
         Some(crate::session_store::StatsPanelSnapshot {
             scenario_type: stats.scenario_type.clone(),
+            scenario_subtype: stats.scenario_subtype.clone(),
             kills: stats.kills,
             avg_kps: stats.kps.map(|value| value as f32),
             accuracy_pct: stats.accuracy_pct.map(|value| value as f32),
             total_damage: stats.damage_dealt.map(|value| value as f32),
-            avg_ttk_ms: stats.ttk_secs.map(|value| (value * 1000.0) as f32),
-            best_ttk_ms: None,
-            ttk_std_ms: None,
+            avg_ttk_ms: stats
+                .ttk_secs
+                .or_else(|| ttk_summary.map(|summary| summary.mean_secs))
+                .map(|value| (value * 1000.0) as f32),
+            best_ttk_ms: ttk_summary.map(|summary| (summary.min_secs * 1000.0) as f32),
+            ttk_std_ms: ttk_summary.map(|summary| (summary.stddev_secs * 1000.0) as f32),
             accuracy_trend: None,
         })
     }
 
     pub fn take_stats_panel_snapshot() -> Option<crate::session_store::StatsPanelSnapshot> {
         let state = bridge_compat_state().lock().ok()?;
-        map_stats_panel_snapshot(&state.stats)
+        let ttk_summary = summarize_ttk_samples(&state.recent_ttk_secs);
+        map_stats_panel_snapshot(&state.stats, ttk_summary.as_ref())
     }
 
     fn authoritative_run_time_hint_from_stats(stats: &BridgeStatsPanelEvent) -> Option<f64> {
@@ -2024,20 +2037,277 @@ mod imp {
         }
     }
 
-    fn infer_scenario_type(stats: &BridgeStatsPanelEvent) -> &'static str {
+    #[derive(Clone, Debug, Default)]
+    struct ShotTelemetrySummary {
+        sample_count: usize,
+        avg_bot_count: Option<f64>,
+        mode_bot_count: Option<u32>,
+        max_bot_count: Option<u32>,
+        nearest_switch_rate: Option<f64>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct TtkSampleSummary {
+        mean_secs: f64,
+        min_secs: f64,
+        stddev_secs: f64,
+        sample_count: usize,
+    }
+
+    #[derive(Clone, Debug)]
+    struct ScenarioClassification {
+        family: &'static str,
+        subtype: Option<String>,
+    }
+
+    fn push_ttk_sample(state: &mut BridgeCompatState, ttk_secs: f64) {
+        if !ttk_secs.is_finite() || ttk_secs <= 0.0 || ttk_secs >= 120.0 {
+            return;
+        }
+        state.recent_ttk_secs.push_back(ttk_secs);
+        if state.recent_ttk_secs.len() > MAX_SCENARIO_TTK_SAMPLES {
+            let trim = state.recent_ttk_secs.len() - MAX_SCENARIO_TTK_SAMPLES;
+            state.recent_ttk_secs.drain(..trim);
+        }
+    }
+
+    fn summarize_ttk_samples(samples: &VecDeque<f64>) -> Option<TtkSampleSummary> {
+        if samples.is_empty() {
+            return None;
+        }
+
+        let values: Vec<f64> = samples
+            .iter()
+            .copied()
+            .filter(|value| value.is_finite() && *value > 0.0 && *value < 120.0)
+            .collect();
+        if values.is_empty() {
+            return None;
+        }
+
+        let sample_count = values.len();
+        let mean_secs = values.iter().sum::<f64>() / sample_count as f64;
+        let min_secs = values.iter().copied().fold(f64::INFINITY, f64::min);
+        let variance = values
+            .iter()
+            .map(|value| {
+                let delta = *value - mean_secs;
+                delta * delta
+            })
+            .sum::<f64>()
+            / sample_count as f64;
+
+        Some(TtkSampleSummary {
+            mean_secs,
+            min_secs,
+            stddev_secs: variance.sqrt(),
+            sample_count,
+        })
+    }
+
+    fn summarize_shot_telemetry(events: &[super::BridgeShotTelemetryEvent]) -> ShotTelemetrySummary {
+        let mut bot_counts = Vec::new();
+        let mut count_freq = HashMap::<u32, usize>::new();
+        let mut max_bot_count = 0u32;
+        let mut transitions = 0usize;
+        let mut switches = 0usize;
+        let mut previous_nearest: Option<String> = None;
+
+        for event in events {
+            let bot_count = event.targets.iter().filter(|target| target.is_bot).count() as u32;
+            if bot_count == 0 {
+                continue;
+            }
+
+            bot_counts.push(bot_count);
+            *count_freq.entry(bot_count).or_insert(0) += 1;
+            max_bot_count = max_bot_count.max(bot_count);
+
+            let nearest = event
+                .targets
+                .iter()
+                .find(|target| target.is_bot && target.is_nearest)
+                .or_else(|| event.targets.iter().find(|target| target.is_bot))
+                .map(|target| target.entity_id.clone());
+
+            if let Some(nearest) = nearest {
+                if let Some(previous) = previous_nearest.as_ref() {
+                    transitions += 1;
+                    if previous != &nearest {
+                        switches += 1;
+                    }
+                }
+                previous_nearest = Some(nearest);
+            }
+        }
+
+        if bot_counts.is_empty() {
+            return ShotTelemetrySummary::default();
+        }
+
+        let avg_bot_count = bot_counts.iter().map(|value| *value as f64).sum::<f64>()
+            / bot_counts.len() as f64;
+        let mode_bot_count = count_freq
+            .into_iter()
+            .max_by_key(|(bot_count, freq)| (*freq, *bot_count))
+            .map(|(bot_count, _)| bot_count);
+
+        ShotTelemetrySummary {
+            sample_count: bot_counts.len(),
+            avg_bot_count: Some(avg_bot_count),
+            mode_bot_count,
+            max_bot_count: Some(max_bot_count),
+            nearest_switch_rate: if transitions > 0 {
+                Some(switches as f64 / transitions as f64)
+            } else {
+                None
+            },
+        }
+    }
+
+    fn current_shot_telemetry_summary() -> ShotTelemetrySummary {
+        let Ok(state) = run_capture_state().lock() else {
+            return ShotTelemetrySummary::default();
+        };
+        summarize_shot_telemetry(&state.shot_telemetry)
+    }
+
+    fn tracking_density_subtype(bot_count: Option<u32>) -> String {
+        match bot_count.unwrap_or(0) {
+            0 | 1 => "Single Bot Tracking".to_string(),
+            2..=5 => "Sparse Multi Bot Tracking".to_string(),
+            6..=10 => "Dense Multi Bot Tracking".to_string(),
+            _ => "Wide Tracking".to_string(),
+        }
+    }
+
+    fn one_shot_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+        let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+        match (bot_count.unwrap_or(0), is_switching) {
+            (0 | 1, _) => "Static One-Shot".to_string(),
+            (2..=5, true) => "Sparse Switching One-Shot".to_string(),
+            (6..=10, true) => "Dense Switching One-Shot".to_string(),
+            (2..=5, false) => "Cluster One-Shot".to_string(),
+            (6..=10, false) => "Crowd One-Shot".to_string(),
+            (_, true) => "Wide Switching One-Shot".to_string(),
+            _ => "Wide One-Shot".to_string(),
+        }
+    }
+
+    fn multi_hit_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+        let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+        match (bot_count.unwrap_or(0), is_switching) {
+            (0 | 1, _) => "Single Target Multi-Hit".to_string(),
+            (2..=5, true) => "Sparse Switching Multi-Hit".to_string(),
+            (6..=10, true) => "Dense Switching Multi-Hit".to_string(),
+            (2..=5, false) => "Cluster Multi-Hit".to_string(),
+            (6..=10, false) => "Crowd Multi-Hit".to_string(),
+            (_, true) => "Wide Switching Multi-Hit".to_string(),
+            _ => "Wide Multi-Hit".to_string(),
+        }
+    }
+
+    fn reactive_subtype(bot_count: Option<u32>) -> String {
+        match bot_count.unwrap_or(0) {
+            0 | 1 => "Single Target Reactive".to_string(),
+            2..=5 => "Sparse Reactive".to_string(),
+            6..=10 => "Dense Reactive".to_string(),
+            _ => "Wide Reactive".to_string(),
+        }
+    }
+
+    fn accuracy_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+        let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+        match (bot_count.unwrap_or(0), is_switching) {
+            (0 | 1, _) => "Single Target Precision".to_string(),
+            (_, true) => "Switching Precision".to_string(),
+            (2..=5, false) => "Multi Target Precision".to_string(),
+            _ => "Wide Precision".to_string(),
+        }
+    }
+
+    fn infer_scenario_classification(
+        stats: &BridgeStatsPanelEvent,
+        shot_summary: &ShotTelemetrySummary,
+        ttk_summary: Option<&TtkSampleSummary>,
+    ) -> ScenarioClassification {
         let kills = stats.kills.unwrap_or(0);
         let shots = stats.accuracy_shots.unwrap_or(0);
-        let dmg_total = stats.damage_total.unwrap_or(0.0);
-        if kills > 0 && dmg_total > 0.0 {
-            return "MultiHitClicking";
+        let damage_total = stats.damage_total.unwrap_or(0.0);
+        let damage_dealt = stats.damage_dealt.unwrap_or(0.0);
+        let bot_count = shot_summary
+            .mode_bot_count
+            .or(shot_summary.max_bot_count)
+            .or_else(|| {
+                shot_summary
+                    .avg_bot_count
+                    .map(|value| value.round().max(0.0) as u32)
+            });
+        let switch_rate = shot_summary.nearest_switch_rate.unwrap_or(0.0);
+        let live_ttk_secs = stats.ttk_secs.or_else(|| ttk_summary.map(|summary| summary.mean_secs));
+        let ttk_std_secs = ttk_summary.map(|summary| summary.stddev_secs);
+        let low_or_zero_ttk = live_ttk_secs.map_or(false, |value| value <= 0.05);
+        let stable_ttk = ttk_summary.map_or(false, |summary| {
+            summary.sample_count >= 4
+                && summary.mean_secs > 0.0
+                && (summary.stddev_secs <= 0.08
+                    || (summary.stddev_secs / summary.mean_secs.max(0.05)) <= 0.18)
+        });
+        let tracking_candidate =
+            (kills == 0
+                && damage_total <= 0.0001
+                && damage_dealt <= 0.0001
+                && shot_summary.sample_count >= 6
+                && (low_or_zero_ttk
+                    || stable_ttk
+                    || bot_count.map_or(false, |value| (1..=5).contains(&value) || (8..=10).contains(&value))))
+                || (low_or_zero_ttk
+                    && bot_count.map_or(false, |value| (1..=5).contains(&value) || (8..=10).contains(&value)));
+
+        if tracking_candidate {
+            return ScenarioClassification {
+                family: "Tracking",
+                subtype: Some(tracking_density_subtype(bot_count)),
+            };
         }
+
+        if kills > 0 && (damage_total > 0.0001 || damage_dealt > 0.0001) {
+            return ScenarioClassification {
+                family: "MultiHitClicking",
+                subtype: Some(multi_hit_subtype(bot_count, switch_rate)),
+            };
+        }
+
         if kills > 0 {
-            return "OneShotClicking";
+            let reactive_candidate = live_ttk_secs.map_or(false, |value| value >= 0.45)
+                || ttk_std_secs.map_or(false, |value| value >= 0.16)
+                || stats
+                    .kps
+                    .map_or(false, |value| value > 0.0 && value <= 2.25 && shots > kills.saturating_add(5));
+            if reactive_candidate {
+                return ScenarioClassification {
+                    family: "ReactiveClicking",
+                    subtype: Some(reactive_subtype(bot_count)),
+                };
+            }
+
+            return ScenarioClassification {
+                family: "OneShotClicking",
+                subtype: Some(one_shot_subtype(bot_count, switch_rate)),
+            };
         }
-        if shots > 0 && kills == 0 {
-            return "AccuracyDrill";
+
+        if shots > 0 {
+            return ScenarioClassification {
+                family: "AccuracyDrill",
+                subtype: Some(accuracy_subtype(bot_count, switch_rate)),
+            };
         }
-        "Unknown"
+
+        ScenarioClassification {
+            family: "Unknown",
+            subtype: None,
+        }
     }
 
     fn derive_game_state(state: &BridgeCompatState, now: Instant) -> (i32, &'static str) {
@@ -2465,6 +2735,9 @@ mod imp {
                     }
                     if value > 0.000001 {
                         let ttk_secs = 1.0 / value;
+                        if ttk_secs.is_finite() && ttk_secs > 0.0 && ttk_secs < 120.0 {
+                            push_ttk_sample(&mut state, ttk_secs);
+                        }
                         if ttk_secs.is_finite()
                             && ttk_secs > 0.0
                             && ttk_secs < 120.0
@@ -2706,9 +2979,15 @@ mod imp {
                 }
             }
 
-            let inferred = infer_scenario_type(&state.stats).to_string();
-            if state.stats.scenario_type != inferred {
-                state.stats.scenario_type = inferred;
+            let shot_summary = current_shot_telemetry_summary();
+            let ttk_summary = summarize_ttk_samples(&state.recent_ttk_secs);
+            let inferred = infer_scenario_classification(&state.stats, &shot_summary, ttk_summary.as_ref());
+            if state.stats.scenario_type != inferred.family {
+                state.stats.scenario_type = inferred.family.to_string();
+                should_emit_stats = true;
+            }
+            if state.stats.scenario_subtype != inferred.subtype {
+                state.stats.scenario_subtype = inferred.subtype;
                 should_emit_stats = true;
             }
 

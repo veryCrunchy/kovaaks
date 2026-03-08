@@ -47,6 +47,9 @@ pub struct SmoothnessSnapshot {
 pub struct StatsPanelSnapshot {
     /// Scenario type inferred from populated fields.
     pub scenario_type: String,
+    /// Finer scenario classification that preserves the broad family above.
+    #[serde(default)]
+    pub scenario_subtype: Option<String>,
     /// Final kill count (None for pure tracking).
     #[serde(default)]
     pub kills: Option<u32>,
@@ -498,6 +501,7 @@ fn query_sessions(
             sm.correction_ratio AS smoothness_correction_ratio,
             sm.directional_bias AS smoothness_directional_bias,
             sp.scenario_type AS stats_panel_scenario_type,
+            sp.scenario_subtype AS stats_panel_scenario_subtype,
             sp.kills AS stats_panel_kills,
             sp.avg_kps AS stats_panel_avg_kps,
             sp.accuracy_pct AS stats_panel_accuracy_pct,
@@ -699,6 +703,7 @@ fn upsert_session_snapshots(tx: &Transaction<'_>, record: &SessionRecord) -> any
             INSERT INTO session_stats_panels (
                 session_id,
                 scenario_type,
+                scenario_subtype,
                 kills,
                 avg_kps,
                 accuracy_pct,
@@ -708,11 +713,12 @@ fn upsert_session_snapshots(tx: &Transaction<'_>, record: &SessionRecord) -> any
                 ttk_std_ms,
                 accuracy_trend
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             ",
             params![
                 &record.id,
                 &stats_panel.scenario_type,
+                &stats_panel.scenario_subtype,
                 stats_panel.kills.map(|value| value as i64),
                 stats_panel.avg_kps,
                 stats_panel.accuracy_pct,
@@ -779,6 +785,7 @@ fn stats_panel_from_row(row: &Row<'_>) -> rusqlite::Result<Option<StatsPanelSnap
 
     Ok(Some(StatsPanelSnapshot {
         scenario_type,
+        scenario_subtype: row.get("stats_panel_scenario_subtype")?,
         kills: row.get::<_, Option<i64>>("stats_panel_kills")?.map(|value| value as u32),
         avg_kps: row.get("stats_panel_avg_kps")?,
         accuracy_pct: row.get("stats_panel_accuracy_pct")?,

@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 5;
+const SCHEMA_VERSION: i32 = 6;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -580,6 +580,17 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 ON session_shot_targets(session_id, shot_seq_idx, target_idx);
 
             PRAGMA user_version = 5;
+            COMMIT;
+            ",
+        )?;
+    }
+
+    if user_version < 6 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            ALTER TABLE session_stats_panels ADD COLUMN scenario_subtype TEXT;
+            PRAGMA user_version = 6;
             COMMIT;
             ",
         )?;
