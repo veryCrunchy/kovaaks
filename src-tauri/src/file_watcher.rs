@@ -220,8 +220,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             );
                             // Capture smoothness summary BEFORE draining buffers
                             let smoothness = crate::mouse_hook::session_summary();
-                            // OCR-based stats snapshot is disabled; rely on direct bridge/memory data.
-                            let stats_panel = None;
+                            let stats_panel = crate::bridge::take_stats_panel_snapshot();
                             // Seal session tracking first so no new samples/frames are
                             // appended while we are draining buffers for persistence.
                             crate::mouse_hook::stop_session_tracking();
@@ -255,9 +254,21 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                     positions: raw_positions,
                                     metrics: metric_points,
                                     frames: screen_frames,
-                                    run_snapshot,
+                                    run_snapshot: run_snapshot.clone(),
                                 },
                             );
+                            if let Some(snapshot) = run_snapshot.as_ref() {
+                                if let Err(error) = crate::stats_db::upsert_run_capture(
+                                    app,
+                                    &session_id,
+                                    snapshot,
+                                ) {
+                                    log::warn!(
+                                        "file_watcher: could not persist run capture for {}: {error}",
+                                        session_id
+                                    );
+                                }
+                            }
                             // Persist to session history
                             let record = crate::session_store::SessionRecord {
                                 id: session_id,
