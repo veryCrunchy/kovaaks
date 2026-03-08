@@ -2482,6 +2482,7 @@ private:
             while (kmod_replay::poll_bridge_command(command)) {
                 if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
                     const auto request_reason = command.reason.empty() ? std::string{"unknown"} : command.reason;
+                    flush_pending_shot_telemetry(now, true);
                     (void)emit_requested_state_snapshot_safe(now, request_reason);
                     std::array<char, 256> sbuf{};
                     std::snprintf(
@@ -4341,6 +4342,11 @@ private:
         bool is_nearest
     ) -> void {
         kmod_replay::replay_append_entity_json(out, target_entity);
+        if (!out.empty() && out.back() == '}') {
+            // replay_append_entity_json emits a full object; keep it open so
+            // target-specific distance/error fields stay inside the same JSON object.
+            out.pop_back();
+        }
 
         if (player_entity) {
             constexpr double kPi = 3.14159265358979323846;
@@ -4376,6 +4382,23 @@ private:
         out += "}";
     }
 
+    static auto is_placeholder_shot_target(const kmod_replay::ReplayEntity& entity) -> bool {
+        constexpr float k_epsilon = 0.001f;
+        const bool zero_location =
+            std::fabs(entity.location.x) <= k_epsilon
+            && std::fabs(entity.location.y) <= k_epsilon
+            && std::fabs(entity.location.z) <= k_epsilon;
+        const bool zero_velocity =
+            std::fabs(entity.velocity.x) <= k_epsilon
+            && std::fabs(entity.velocity.y) <= k_epsilon
+            && std::fabs(entity.velocity.z) <= k_epsilon;
+        const bool zero_rotation =
+            std::fabs(entity.rotation.pitch) <= k_epsilon
+            && std::fabs(entity.rotation.yaw) <= k_epsilon
+            && std::fabs(entity.rotation.roll) <= k_epsilon;
+        return zero_location && zero_velocity && zero_rotation;
+    }
+
     void emit_shot_target_telemetry(const char* shot_event, int32_t delta, int32_t total, uint64_t now) {
         if (!shot_event || delta <= 0 || total < 0) {
             return;
@@ -4408,6 +4431,26 @@ private:
             if (entity.is_bot) {
                 target_entities.emplace_back(&entity);
             }
+        }
+
+        const bool has_non_placeholder_target = std::any_of(
+            target_entities.begin(),
+            target_entities.end(),
+            [](const kmod_replay::ReplayEntity* entity) {
+                return entity && !is_placeholder_shot_target(*entity);
+            }
+        );
+        if (has_non_placeholder_target) {
+            target_entities.erase(
+                std::remove_if(
+                    target_entities.begin(),
+                    target_entities.end(),
+                    [](const kmod_replay::ReplayEntity* entity) {
+                        return !entity || is_placeholder_shot_target(*entity);
+                    }
+                ),
+                target_entities.end()
+            );
         }
 
         size_t nearest_target_index = std::numeric_limits<size_t>::max();
