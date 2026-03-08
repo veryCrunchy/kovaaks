@@ -1,4 +1,6 @@
 import { useEffect, useState } from "react";
+import { C } from "../design/tokens";
+import { Dot, Badge } from "../design/ui";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -171,26 +173,27 @@ export function SmoothnessReport() {
   return (
     <div
       className="p-6 min-h-screen"
-      style={{ background: "#0a0a0f", color: "#fff", fontFamily: "'JetBrains Mono', monospace" }}
+      style={{ background: C.bg, color: C.text, fontFamily: "'JetBrains Mono', monospace" }}
     >
       <h1
         className="text-xl font-bold mb-6"
-        style={{ color: "#00f5a0", letterSpacing: "0.1em" }}
+        style={{ color: C.accent, letterSpacing: "0.1em" }}
       >
         SMOOTHNESS REPORT
       </h1>
 
       {loading ? (
-        <div style={{ color: "rgba(255,255,255,0.4)" }}>Loading session data…</div>
+        <div style={{ color: C.textFaint }}>Loading session data…</div>
       ) : points.length === 0 ? (
-        <div style={{ color: "rgba(255,255,255,0.4)", display: "flex", alignItems: "center", gap: 12 }}>
+        <div style={{ color: C.textFaint, display: "flex", alignItems: "center", gap: 12 }}>
           No session data yet. Play a scenario first.
           <button
             onClick={() => { setLoading(true); fetchSessionData(); }}
+            className="am-btn"
             style={{
-              background: "rgba(0,245,160,0.1)",
-              border: "1px solid rgba(0,245,160,0.3)",
-              color: "#00f5a0",
+              background: C.accentDim,
+              border: `1px solid ${C.accentBorder}`,
+              color: C.accent,
               borderRadius: 6,
               padding: "3px 12px",
               cursor: "pointer",
@@ -237,13 +240,13 @@ export function SmoothnessReport() {
                 key={label}
                 className="rounded-xl p-4"
                 style={{
-                  background: "rgba(255,255,255,0.04)",
-                  border: "1px solid rgba(255,255,255,0.07)",
+                  background: C.surface,
+                  border: `1px solid ${C.border}`,
                 }}
               >
                 <div
                   className="text-xs uppercase tracking-wider mb-1"
-                  style={{ color: "rgba(255,255,255,0.4)" }}
+                  style={{ color: C.textFaint }}
                 >
                   {label}
                 </div>
@@ -276,8 +279,8 @@ export function SmoothnessReport() {
                 />
                 <Tooltip
                   contentStyle={{
-                    background: "#111",
-                    border: "1px solid #333",
+                    background: C.glassDark,
+                    border: `1px solid ${C.border}`,
                     borderRadius: 8,
                     fontSize: 12,
                   }}
@@ -308,8 +311,8 @@ export function SmoothnessReport() {
                 <YAxis tick={{ fill: "rgba(255,255,255,0.35)", fontSize: 10 }} />
                 <Tooltip
                   contentStyle={{
-                    background: "#111",
-                    border: "1px solid #333",
+                    background: C.glassDark,
+                    border: `1px solid ${C.border}`,
                     borderRadius: 8,
                     fontSize: 12,
                   }}
@@ -338,8 +341,8 @@ export function SmoothnessReport() {
                 <YAxis tick={{ fill: "rgba(255,255,255,0.35)", fontSize: 10 }} />
                 <Tooltip
                   contentStyle={{
-                    background: "#111",
-                    border: "1px solid #333",
+                    background: C.glassDark,
+                    border: `1px solid ${C.border}`,
                     borderRadius: 8,
                     fontSize: 12,
                   }}
@@ -365,8 +368,8 @@ export function SmoothnessReport() {
                 />
                 <Tooltip
                   contentStyle={{
-                    background: "#111",
-                    border: "1px solid #333",
+                    background: C.glassDark,
+                    border: `1px solid ${C.border}`,
                     borderRadius: 8,
                     fontSize: 12,
                   }}
@@ -400,8 +403,8 @@ export function SmoothnessReport() {
                 />
                 <Tooltip
                   contentStyle={{
-                    background: "#111",
-                    border: "1px solid #333",
+                    background: C.glassDark,
+                    border: `1px solid ${C.border}`,
                     borderRadius: 8,
                     fontSize: 12,
                   }}
@@ -424,7 +427,7 @@ export function SmoothnessReport() {
             <div className="mt-8">
               <h2
                 className="text-sm font-semibold uppercase tracking-widest mb-4"
-                style={{ color: "rgba(255,255,255,0.5)" }}
+                style={{ color: C.textMuted }}
               >
                 Issues Detected
               </h2>
@@ -434,31 +437,24 @@ export function SmoothnessReport() {
                     key={i}
                     className="rounded-xl p-4"
                     style={{
-                      background: `${SEVERITY_COLOR[issue.severity]}10`,
-                      border: `1px solid ${SEVERITY_COLOR[issue.severity]}30`,
+                      background: C.surface,
+                      border: `1px solid ${C.border}`,
+                      borderLeft: `3px solid ${SEVERITY_COLOR[issue.severity]}`,
                     }}
                   >
                     <div className="flex items-center gap-2 mb-1">
-                      <div
-                        className="w-1.5 h-1.5 rounded-full"
-                        style={{ background: SEVERITY_COLOR[issue.severity] }}
-                      />
+                      <Dot color={SEVERITY_COLOR[issue.severity]} />
                       <span
                         className="text-sm font-semibold"
                         style={{ color: SEVERITY_COLOR[issue.severity] }}
                       >
                         {issue.title}
                       </span>
-                      <span
-                        className="text-xs uppercase ml-1"
-                        style={{ color: `${SEVERITY_COLOR[issue.severity]}80` }}
-                      >
-                        {issue.severity}
-                      </span>
+                      <Badge color={SEVERITY_COLOR[issue.severity]}>{issue.severity}</Badge>
                     </div>
                     <p
                       className="text-xs leading-relaxed"
-                      style={{ color: "rgba(255,255,255,0.55)" }}
+                      style={{ color: C.textSub }}
                     >
                       {issue.description}
                     </p>
@@ -484,13 +480,14 @@ function ChartSection({
     <div
       className="rounded-xl p-4 mb-4"
       style={{
-        background: "rgba(255,255,255,0.03)",
-        border: "1px solid rgba(255,255,255,0.06)",
+        background: C.glass,
+        border: `1px solid ${C.border}`,
+        backdropFilter: "blur(16px) saturate(180%)",
       }}
     >
       <h3
         className="text-xs uppercase tracking-widest mb-3"
-        style={{ color: "rgba(255,255,255,0.4)" }}
+        style={{ color: C.textFaint }}
       >
         {title}
       </h3>

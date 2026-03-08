@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { C } from "../design/tokens";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -560,20 +561,20 @@ function triBoolMatch(value: boolean | undefined, filter: TriBoolFilter): boolea
 
 // ─── Sub-components ───────────────────────────────────────────────────────────
 
-const LABEL_COL: React.CSSProperties = { color: "rgba(255,255,255,0.35)", fontSize: 11, fontFamily: "monospace" };
+const LABEL_COL: React.CSSProperties = { color: C.textMuted, fontSize: 11, fontFamily: "monospace" };
 const VALUE_COL: React.CSSProperties = { fontFamily: "monospace", fontSize: 12, fontVariantNumeric: "tabular-nums" };
 
 const INPUT: React.CSSProperties = {
-  background: "rgba(255,255,255,0.06)",
-  border: "1px solid rgba(255,255,255,0.12)",
-  borderRadius: 4, color: "#fff", fontFamily: "monospace", fontSize: 12,
+  background: C.surface,
+  border: `1px solid ${C.border}`,
+  borderRadius: 4, color: C.text, fontFamily: "monospace", fontSize: 12,
   padding: "3px 7px", outline: "none",
 };
 
 const BTN = (accent = false): React.CSSProperties => ({
-  background: accent ? "rgba(0,245,160,0.12)" : "rgba(255,255,255,0.06)",
-  border: `1px solid ${accent ? "rgba(0,245,160,0.3)" : "rgba(255,255,255,0.12)"}`,
-  borderRadius: 4, color: accent ? "#00f5a0" : "rgba(255,255,255,0.7)",
+  background: accent ? C.accentDim : C.surface,
+  border: `1px solid ${accent ? C.accentBorder : C.border}`,
+  borderRadius: 4, color: accent ? C.accent : C.textSub,
   fontFamily: "monospace", fontSize: 11, padding: "3px 10px",
   cursor: "pointer", flexShrink: 0,
 });
@@ -2516,16 +2517,16 @@ export function DebugTab() {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 0 }}>
       {/* Sub-tab bar */}
-      <div style={{ display: "flex", gap: 0, borderBottom: "1px solid rgba(255,255,255,0.08)", marginBottom: 20 }}>
+      <div style={{ display: "flex", gap: 0, borderBottom: `1px solid ${C.border}`, marginBottom: 20 }}>
         {subTabs.map((t) => (
           <button
             key={t.id}
             onClick={() => setSub(t.id)}
             style={{
               background: "none", border: "none",
-              borderBottom: sub === t.id ? "2px solid rgba(0,245,160,0.7)" : "2px solid transparent",
+              borderBottom: sub === t.id ? `2px solid ${C.accent}` : "2px solid transparent",
               padding: "7px 14px", marginBottom: -1, cursor: "pointer",
-              color: sub === t.id ? "#fff" : "rgba(255,255,255,0.35)",
+              color: sub === t.id ? C.text : C.textFaint,
               fontFamily: "monospace", fontSize: 12,
               fontWeight: sub === t.id ? 600 : 400,
             }}

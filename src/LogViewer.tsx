@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { C } from "./design/tokens";
 
 interface LogEntry {
   ts: number;
@@ -113,9 +114,9 @@ export function LogViewer() {
         display: "flex",
         flexDirection: "column",
         height: "100vh",
-        background: "#0a0a0f",
-        color: "#fff",
-        fontFamily: "'JetBrains Mono', 'Cascadia Code', monospace",
+        background: C.bg,
+        color: C.text,
+        fontFamily: "'JetBrains Mono', monospace",
         fontSize: 12,
       }}
     >
@@ -124,39 +125,43 @@ export function LogViewer() {
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 8,
-          padding: "8px 12px",
-          borderBottom: "1px solid rgba(255,255,255,0.08)",
-          background: "rgba(0,0,0,0.4)",
+          gap: 6,
+          padding: "8px 14px",
+          borderBottom: `1px solid ${C.border}`,
+          background: "rgba(255,255,255,0.018)",
           flexShrink: 0,
           flexWrap: "wrap",
         }}
       >
-        <span style={{ color: "#00f5a0", fontWeight: 700, letterSpacing: 2, marginRight: 4 }}>
+        <span style={{ color: C.accent, fontWeight: 800, letterSpacing: "0.15em", fontSize: 10, marginRight: 4 }}>
           LOGS
         </span>
 
         {/* Level filter buttons */}
-        {(["ALL", "ERROR", "WARN", "INFO", "DEBUG"] as LevelFilter[]).map((l) => (
-          <button
-            key={l}
-            onClick={() => setFilter(l)}
-            style={{
-              padding: "2px 8px",
-              borderRadius: 4,
-              border: filter === l
-                ? `1px solid ${l === "ALL" ? "#00f5a0" : LEVEL_COLOR[l]}`
-                : "1px solid rgba(255,255,255,0.1)",
-              background: filter === l ? "rgba(255,255,255,0.07)" : "transparent",
-              color: l === "ALL" ? (filter === "ALL" ? "#00f5a0" : "rgba(255,255,255,0.45)") : (filter === l ? LEVEL_COLOR[l] : "rgba(255,255,255,0.35)"),
-              cursor: "pointer",
-              fontSize: 11,
-              fontFamily: "inherit",
-            }}
-          >
-            {l}
-          </button>
-        ))}
+        {(["ALL", "ERROR", "WARN", "INFO", "DEBUG"] as LevelFilter[]).map((l) => {
+          const active = filter === l;
+          const color = l === "ALL" ? C.accent : LEVEL_COLOR[l];
+          return (
+            <button
+              key={l}
+              onClick={() => setFilter(l)}
+              className="am-btn"
+              style={{
+                padding: "2px 8px",
+                borderRadius: 4,
+                border: active ? `1px solid ${color}50` : `1px solid ${C.border}`,
+                background: active ? `${color}14` : "transparent",
+                color: active ? color : C.textMuted,
+                cursor: "pointer",
+                fontSize: 10,
+                fontFamily: "inherit",
+                fontWeight: active ? 700 : 400,
+              }}
+            >
+              {l}
+            </button>
+          );
+        })}
 
         {/* Search */}
         <input
@@ -164,40 +169,28 @@ export function LogViewer() {
           placeholder="Filter…"
           value={search}
           onChange={(e) => setSearch(e.target.value)}
-          style={{
-            marginLeft: "auto",
-            background: "rgba(255,255,255,0.05)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 4,
-            color: "#fff",
-            padding: "2px 8px",
-            fontSize: 12,
-            fontFamily: "inherit",
-            outline: "none",
-            width: 180,
-          }}
+          className="am-input"
+          style={{ marginLeft: "auto", width: 180, padding: "3px 9px" }}
         />
 
         {/* Count */}
-        <span style={{ color: "rgba(255,255,255,0.3)", minWidth: 60, textAlign: "right" }}>
+        <span style={{ color: C.textFaint, minWidth: 60, textAlign: "right", fontSize: 11 }}>
           {visible.length}/{entries.length}
         </span>
 
         {/* Auto-scroll indicator */}
         <button
-          onClick={() => {
-            setAutoScroll(true);
-            bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-          }}
+          onClick={() => { setAutoScroll(true); bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }}
           style={{
-            padding: "2px 8px",
+            padding: "2px 9px",
             borderRadius: 4,
-            border: `1px solid ${autoScroll ? "rgba(0,245,160,0.3)" : "rgba(255,255,255,0.1)"}`,
-            background: autoScroll ? "rgba(0,245,160,0.07)" : "transparent",
-            color: autoScroll ? "#00f5a0" : "rgba(255,255,255,0.3)",
+            border: `1px solid ${autoScroll ? C.accentBorder : C.border}`,
+            background: autoScroll ? C.accentDim : "transparent",
+            color: autoScroll ? C.accent : C.textMuted,
             cursor: "pointer",
-            fontSize: 11,
+            fontSize: 10,
             fontFamily: "inherit",
+            fontWeight: autoScroll ? 700 : 400,
           }}
           title="Scroll to bottom / follow"
         >
@@ -208,17 +201,15 @@ export function LogViewer() {
         <button
           onClick={handleExport}
           style={{
-            padding: "2px 8px",
+            padding: "2px 9px",
             borderRadius: 4,
-            border: "1px solid rgba(96,165,250,0.3)",
+            border: `1px solid ${C.info}30`,
             background: "transparent",
-            color: "rgba(96,165,250,0.7)",
+            color: `${C.info}b0`,
             cursor: "pointer",
-            fontSize: 11,
+            fontSize: 10,
             fontFamily: "inherit",
           }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#60a5fa"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "rgba(96,165,250,0.7)"; }}
           title="Save all logs to a .txt file"
         >
           Export
@@ -228,17 +219,15 @@ export function LogViewer() {
         <button
           onClick={handleClear}
           style={{
-            padding: "2px 8px",
+            padding: "2px 9px",
             borderRadius: 4,
-            border: "1px solid rgba(255,100,100,0.2)",
+            border: `1px solid ${C.dangerBorder}`,
             background: "transparent",
-            color: "rgba(255,100,100,0.6)",
+            color: `${C.danger}99`,
             cursor: "pointer",
-            fontSize: 11,
+            fontSize: 10,
             fontFamily: "inherit",
           }}
-          onMouseEnter={(e) => { (e.currentTarget as HTMLElement).style.color = "#ff6b6b"; }}
-          onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.color = "rgba(255,100,100,0.6)"; }}
         >
           Clear
         </button>
@@ -248,14 +237,10 @@ export function LogViewer() {
       <div
         ref={containerRef}
         onScroll={onScroll}
-        style={{
-          flex: 1,
-          overflowY: "auto",
-          padding: "4px 0",
-        }}
+        style={{ flex: 1, overflowY: "auto", padding: "4px 0" }}
       >
         {visible.length === 0 && (
-          <div style={{ padding: "24px 16px", color: "rgba(255,255,255,0.2)", textAlign: "center" }}>
+          <div style={{ padding: "24px 16px", color: C.textFaint, textAlign: "center" }}>
             No log entries yet
           </div>
         )}
@@ -266,25 +251,19 @@ export function LogViewer() {
               display: "grid",
               gridTemplateColumns: "86px 52px 1fr",
               gap: "0 10px",
-              padding: "1.5px 12px",
+              padding: "1.5px 14px",
               lineHeight: "1.6",
-              borderBottom: "1px solid rgba(255,255,255,0.02)",
+              borderBottom: `1px solid ${C.borderSub}`,
             }}
           >
-            <span style={{ color: "rgba(255,255,255,0.25)", whiteSpace: "nowrap" }}>
+            <span style={{ color: C.textFaint, whiteSpace: "nowrap" }}>
               {fmt(e.ts)}
             </span>
-            <span
-              style={{
-                color: LEVEL_COLOR[e.level] ?? "#fff",
-                fontWeight: LEVEL_WEIGHT[e.level] ?? "400",
-                whiteSpace: "nowrap",
-              }}
-            >
+            <span style={{ color: LEVEL_COLOR[e.level] ?? C.text, fontWeight: LEVEL_WEIGHT[e.level] ?? "400", whiteSpace: "nowrap" }}>
               {e.level}
             </span>
-            <span style={{ color: "rgba(255,255,255,0.85)", wordBreak: "break-word" }}>
-              <span style={{ color: "rgba(255,255,255,0.3)" }}>[{e.target}] </span>
+            <span style={{ color: C.textSub, wordBreak: "break-word" }}>
+              <span style={{ color: C.textFaint }}>[{e.target}] </span>
               {e.message}
             </span>
           </div>

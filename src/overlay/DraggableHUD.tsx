@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { C } from "../design/tokens";
 
 interface Pos {
   x: number;
@@ -623,7 +624,7 @@ export function DraggableHUD({
         cursor: layoutMode ? (isDragging.current ? "grabbing" : "grab") : "default",
         userSelect: "none",
         zIndex: 50,
-        outline: layoutMode ? "2px dashed rgba(0,245,160,0.6)" : "none",
+        outline: layoutMode ? `2px dashed ${C.accent}99` : "none",
         outlineOffset: 6,
         borderRadius: layoutMode ? 8 : 0,
         transition: "outline 0.15s",
@@ -643,12 +644,12 @@ export function DraggableHUD({
             fontFamily: "'JetBrains Mono', monospace",
           }}
         >
-          <span style={{ fontSize: 9, color: "rgba(0,245,160,0.7)", letterSpacing: "0.05em", whiteSpace: "nowrap" }}>
+          <span style={{ fontSize: 9, color: `${C.accent}99`, letterSpacing: "0.06em", whiteSpace: "nowrap", fontFamily: "'JetBrains Mono', monospace" }}>
             drag \u00b7 scroll to resize
           </span>
           <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
-            <ScaleBtn label="-" onClick={(e) => { e.stopPropagation(); applyScale(scale - SCALE_STEP); }} />
-            <span style={{ fontSize: 9, color: "rgba(0,245,160,0.55)", minWidth: 32, textAlign: "center" }}>
+            <ScaleBtn label="−" onClick={(e) => { e.stopPropagation(); applyScale(scale - SCALE_STEP); }} />
+            <span style={{ fontSize: 9, color: C.accent, minWidth: 32, textAlign: "center", fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
               {Math.round(scale * 100)}%
             </span>
             <ScaleBtn label="+" onClick={(e) => { e.stopPropagation(); applyScale(scale + SCALE_STEP); }} />
@@ -666,15 +667,16 @@ function ScaleBtn({ label, onClick }: { label: string; onClick: (e: React.MouseE
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onClick}
       style={{
-        background: "rgba(0,245,160,0.12)",
-        border: "1px solid rgba(0,245,160,0.3)",
-        borderRadius: 3,
-        color: "#00f5a0",
+        background: `${C.accent}14`,
+        border: `1px solid ${C.accent}40`,
+        borderRadius: 4,
+        color: C.accent,
         cursor: "pointer",
-        fontSize: 11,
-        fontFamily: "inherit",
+        fontSize: 12,
+        fontFamily: "'JetBrains Mono', monospace",
         lineHeight: 1,
-        padding: "1px 5px",
+        padding: "2px 6px",
+        fontWeight: 700,
       }}
     >
       {label}

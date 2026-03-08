@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { C } from "../design/tokens";
 import type { MetricPoint, RawPositionPoint, ScreenFrame } from "../types/mouse";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -542,17 +543,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
       <div
         className="rounded-xl p-4 mb-4"
         style={{
-          background: "rgba(255,255,255,0.03)",
-          border:     "1px solid rgba(255,255,255,0.06)",
+          background: C.surface,
+          border: `1px solid ${C.border}`,
         }}
       >
         <h3
           className="text-xs uppercase tracking-widest mb-2"
-          style={{ color: "rgba(255,255,255,0.4)" }}
+          style={{ color: C.textFaint }}
         >
           Mouse Path Replay
         </h3>
-        <p style={{ color: "rgba(255,255,255,0.3)", fontSize: 13 }}>
+        <p style={{ color: C.textMuted, fontSize: 13 }}>
           No path data recorded. Mouse tracking requires at least one active session.
         </p>
       </div>
@@ -565,22 +566,23 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
       <div
         className="rounded-xl overflow-hidden"
         style={{
-          background: "rgba(255,255,255,0.025)",
-          border:     "1px solid rgba(255,255,255,0.08)",
+          background: C.glass,
+          border: `1px solid ${C.border}`,
+          backdropFilter: "blur(16px) saturate(180%)",
         }}
       >
         {/* Header */}
         <div
           className="flex items-center justify-between px-4 py-2"
-          style={{ borderBottom: "1px solid rgba(255,255,255,0.06)" }}
+          style={{ borderBottom: `1px solid ${C.borderSub}` }}
         >
           <h3
             className="text-xs uppercase tracking-widest"
-            style={{ color: "rgba(255,255,255,0.4)" }}
+            style={{ color: C.textFaint }}
           >
             Mouse Path Replay
           </h3>
-          <div className="flex items-center gap-3" style={{ fontSize: 11, color: "rgba(255,255,255,0.35)" }}>
+          <div className="flex items-center gap-3" style={{ fontSize: 11, color: C.textFaint }}>
             {/* Stat pills */}
             {hasVideo && (
               <span style={{ color: "rgba(0,245,160,0.7)" }}>
@@ -608,8 +610,8 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
         <div
           className="flex items-center gap-3 px-4 py-1.5 text-xs"
           style={{
-            borderBottom: "1px solid rgba(255,255,255,0.04)",
-            color: "rgba(255,255,255,0.3)",
+            borderBottom: `1px solid ${C.borderSub}`,
+            color: C.textFaint,
           }}
         >
           <span>Speed:</span>
@@ -671,13 +673,13 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
         {/* Controls */}
         <div
           className="px-4 py-3 flex flex-col gap-2"
-          style={{ borderTop: "1px solid rgba(255,255,255,0.06)" }}
+          style={{ borderTop: `1px solid ${C.borderSub}` }}
         >
           {/* Timeline scrubber */}
           <div className="flex items-center gap-3">
             <span
               className="tabular-nums"
-              style={{ color: "rgba(255,255,255,0.45)", fontSize: 11, minWidth: 60 }}
+              style={{ color: C.textMuted, fontSize: 11, minWidth: 60 }}
             >
               {formatMs(showFull ? durationMs : playbackMs)}
             </span>
@@ -693,7 +695,7 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             />
             <span
               className="tabular-nums"
-              style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, minWidth: 60, textAlign: "right" }}
+              style={{ color: C.textFaint, fontSize: 11, minWidth: 60, textAlign: "right" }}
             >
               {formatMs(durationMs)}
             </span>
@@ -704,12 +706,12 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             {/* Play / pause */}
             <button
               onClick={handlePlayPause}
-              className="rounded-lg px-4 py-1.5 text-sm font-semibold transition-colors"
+              className="am-btn rounded-lg px-4 py-1.5 text-sm font-semibold"
               style={{
-                background:  isPlaying ? "rgba(0,245,160,0.15)" : "rgba(0,245,160,0.12)",
-                border:      "1px solid rgba(0,245,160,0.3)",
-                color:       "#00f5a0",
-                cursor:      "pointer",
+                background: isPlaying ? C.accentDim : `${C.accent}1f`,
+                border: `1px solid ${C.accentBorder}`,
+                color: C.accent,
+                cursor: "pointer",
               }}
             >
               {isPlaying ? "⏸ Pause" : playbackMs >= durationMs ? "↺ Replay" : "▶ Play"}
@@ -718,12 +720,12 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             {/* Reset */}
             <button
               onClick={() => { setIsPlaying(false); setPlaybackMs(0); setShowFull(false); }}
-              className="rounded-lg px-3 py-1.5 text-sm transition-colors"
+              className="am-btn rounded-lg px-3 py-1.5 text-sm"
               style={{
                 background: "rgba(255,255,255,0.05)",
-                border:     "1px solid rgba(255,255,255,0.1)",
-                color:      "rgba(255,255,255,0.5)",
-                cursor:     "pointer",
+                border: `1px solid ${C.border}`,
+                color: C.textMuted,
+                cursor: "pointer",
               }}
             >
               ↺ Reset
@@ -732,12 +734,12 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             {/* Show full path toggle */}
             <button
               onClick={handleShowFull}
-              className="rounded-lg px-3 py-1.5 text-sm transition-colors"
+              className="am-btn rounded-lg px-3 py-1.5 text-sm"
               style={{
                 background: showFull ? "rgba(167,139,250,0.18)" : "rgba(167,139,250,0.08)",
-                border:     `1px solid rgba(167,139,250,${showFull ? 0.5 : 0.2})`,
-                color:      "#a78bfa",
-                cursor:     "pointer",
+                border: `1px solid rgba(167,139,250,${showFull ? 0.5 : 0.2})`,
+                color: "#a78bfa",
+                cursor: "pointer",
               }}
             >
               {showFull ? "● Full Path" : "Show Full Path"}
@@ -745,17 +747,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
 
             {/* Speed selector */}
             <div className="flex items-center gap-1 ml-auto">
-              <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginRight: 4 }}>Speed</span>
+              <span style={{ color: C.textFaint, fontSize: 11, marginRight: 4 }}>Speed</span>
               {SPEED_OPTIONS.map((s) => (
                 <button
                   key={s}
                   onClick={() => setSpeed(s)}
-                  className="rounded px-2 py-1 text-xs transition-colors"
+                  className="am-btn rounded px-2 py-1 text-xs"
                   style={{
-                    background: speed === s ? "rgba(0,180,255,0.2)"   : "rgba(255,255,255,0.05)",
-                    border:     speed === s ? "1px solid rgba(0,180,255,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                    color:      speed === s ? "#00b4ff" : "rgba(255,255,255,0.4)",
-                    cursor:     "pointer",
+                    background: speed === s ? `${C.info}33` : "rgba(255,255,255,0.05)",
+                    border: `1px solid ${speed === s ? `${C.info}80` : C.borderSub}`,
+                    color: speed === s ? C.info : C.textMuted,
+                    cursor: "pointer",
                   }}
                 >
                   {s}×
@@ -767,21 +769,21 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           {/* Trail fade + video opacity row */}
           <div
             className="flex items-center gap-4 flex-wrap"
-            style={{ borderTop: "1px solid rgba(255,255,255,0.04)", paddingTop: 8 }}
+            style={{ borderTop: `1px solid ${C.borderSub}`, paddingTop: 8 }}
           >
             {/* Trail fade */}
             <div className="flex items-center gap-1">
-              <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginRight: 4 }}>Trail</span>
+              <span style={{ color: C.textFaint, fontSize: 11, marginRight: 4 }}>Trail</span>
               {TRAIL_OPTIONS.map(({ label, ms }) => (
                 <button
                   key={label}
                   onClick={() => setTrailFadeMs(ms)}
-                  className="rounded px-2 py-1 text-xs"
+                  className="am-btn rounded px-2 py-1 text-xs"
                   style={{
-                    background: trailFadeMs === ms ? "rgba(167,139,250,0.2)"  : "rgba(255,255,255,0.05)",
-                    border:     trailFadeMs === ms ? "1px solid rgba(167,139,250,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                    color:      trailFadeMs === ms ? "#a78bfa" : "rgba(255,255,255,0.4)",
-                    cursor:     "pointer",
+                    background: trailFadeMs === ms ? "rgba(167,139,250,0.2)" : "rgba(255,255,255,0.05)",
+                    border: `1px solid ${trailFadeMs === ms ? "rgba(167,139,250,0.5)" : C.borderSub}`,
+                    color: trailFadeMs === ms ? "#a78bfa" : C.textMuted,
+                    cursor: "pointer",
                   }}
                 >
                   {label}
@@ -791,17 +793,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
 
             {/* Viewport size — selects the monitor resolution so the FOV rect scales correctly */}
             <div className="flex items-center gap-1">
-              <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginRight: 4 }}>FOV</span>
+              <span style={{ color: C.textFaint, fontSize: 11, marginRight: 4 }}>FOV</span>
               {VIEWPORT_PRESETS.map(({ label, w }) => (
                 <button
                   key={label}
                   onClick={() => setViewportW(w)}
-                  className="rounded px-2 py-1 text-xs"
+                  className="am-btn rounded px-2 py-1 text-xs"
                   style={{
                     background: viewportW === w ? "rgba(0,210,255,0.18)" : "rgba(255,255,255,0.05)",
-                    border:     viewportW === w ? "1px solid rgba(0,210,255,0.5)" : "1px solid rgba(255,255,255,0.08)",
-                    color:      viewportW === w ? "#00d2ff" : "rgba(255,255,255,0.4)",
-                    cursor:     "pointer",
+                    border: `1px solid ${viewportW === w ? "rgba(0,210,255,0.5)" : C.borderSub}`,
+                    color: viewportW === w ? "#00d2ff" : C.textMuted,
+                    cursor: "pointer",
                   }}
                 >
                   {label}
@@ -812,17 +814,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             {/* Video opacity — only shown when game recording is available */}
             {hasVideo && (
               <div className="flex items-center gap-1 ml-auto">
-                <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 11, marginRight: 4 }}>Video</span>
+                <span style={{ color: C.textFaint, fontSize: 11, marginRight: 4 }}>Video</span>
                 {BG_OPACITY_OPTIONS.map(({ label, v }) => (
                   <button
                     key={label}
                     onClick={() => setBgOpacity(v)}
-                    className="rounded px-2 py-1 text-xs"
+                    className="am-btn rounded px-2 py-1 text-xs"
                     style={{
-                      background: bgOpacity === v ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.05)",
-                      border:     bgOpacity === v ? "1px solid rgba(0,245,160,0.4)" : "1px solid rgba(255,255,255,0.08)",
-                      color:      bgOpacity === v ? "#00f5a0" : "rgba(255,255,255,0.4)",
-                      cursor:     "pointer",
+                      background: bgOpacity === v ? C.accentDim : "rgba(255,255,255,0.05)",
+                      border: `1px solid ${bgOpacity === v ? C.accentBorder : C.borderSub}`,
+                      color: bgOpacity === v ? C.accent : C.textMuted,
+                      cursor: "pointer",
                     }}
                   >
                     {label}
@@ -839,16 +841,17 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
         <div
           className="rounded-xl px-4 py-3"
           style={{
-            background: "rgba(255,80,30,0.06)",
-            border:     "1px solid rgba(255,80,30,0.2)",
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+            borderLeft: `3px solid ${C.danger}`,
           }}
         >
           <div className="flex items-center gap-2 mb-1">
-            <span style={{ color: "#ff6b6b", fontSize: 13, fontWeight: 600 }}>
+            <span style={{ color: C.danger, fontSize: 13, fontWeight: 600 }}>
               ▲ {overshoots.length} Overshoot{overshoots.length !== 1 ? "s" : ""} Detected
             </span>
           </div>
-          <p style={{ color: "rgba(255,255,255,0.5)", fontSize: 12, lineHeight: 1.5 }}>
+          <p style={{ color: C.textSub, fontSize: 12, lineHeight: 1.5 }}>
             Orange triangles indicate where your cursor reversed direction sharply after a fast
             movement — a sign the flick carried past the intended target.
           </p>
@@ -860,13 +863,14 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
         <div
           className="rounded-xl px-4 py-4"
           style={{
-            background: `${suggestion.color}0d`,
-            border:     `1px solid ${suggestion.color}40`,
+            background: C.surface,
+            border: `1px solid ${C.border}`,
+            borderLeft: `3px solid ${suggestion.color}`,
           }}
         >
           <div className="flex items-start justify-between gap-3 mb-2">
             <span style={{ color: suggestion.color, fontSize: 13, fontWeight: 700 }}>
-              🎯 Sensitivity Training Suggestion
+              Sensitivity Training Suggestion
             </span>
             <span
               className="rounded-full px-3 py-0.5 text-xs font-bold"
@@ -886,12 +890,12 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           >
             {suggestion.headline}
           </p>
-          <p style={{ color: "rgba(255,255,255,0.55)", fontSize: 12, lineHeight: 1.6 }}>
+          <p style={{ color: C.textSub, fontSize: 12, lineHeight: 1.6 }}>
             {suggestion.detail}
           </p>
           <p
             className="mt-2 text-xs italic"
-            style={{ color: "rgba(255,255,255,0.3)" }}
+            style={{ color: C.textFaint }}
           >
             This is a temporary training sensitivity — not a permanent setting. Switch back after 5–10 runs.
           </p>

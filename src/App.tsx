@@ -1,4 +1,5 @@
 import { lazy, Suspense, useEffect, useState } from "react";
+import { C } from "./design/tokens";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { VSMode } from "./overlay/VSMode";
@@ -607,26 +608,28 @@ export default function App() {
             bottom: 24,
             left: "50%",
             transform: "translateX(-50%)",
-            background: "rgba(8,8,14,0.92)",
-            border: "1px solid rgba(255,255,255,0.1)",
-            borderRadius: 10,
-            padding: "8px 16px",
+            background: C.glassDark,
+            border: `1px solid ${C.border}`,
+            borderRadius: 12,
+            padding: "8px 14px",
             fontFamily: "'JetBrains Mono', monospace",
-            backdropFilter: "blur(12px)",
-            boxShadow: "0 4px 24px rgba(0,0,0,0.5)",
+            backdropFilter: "blur(20px) saturate(180%)",
+            boxShadow: "0 8px 32px rgba(0,0,0,0.6), inset 0 1px 0 rgba(255,255,255,0.06)",
             pointerEvents: "auto",
           }}
         >
-          <span className="text-xs" style={{ color: "rgba(255,255,255,0.45)" }}>
+          <span style={{ fontSize: 10, color: C.textMuted, letterSpacing: "0.04em" }}>
             Drag HUDs to reposition
           </span>
+          <div style={{ width: 1, height: 16, background: C.border }} />
           <label
             style={{
               display: "flex",
               alignItems: "center",
-              gap: 6,
+              gap: 5,
               fontSize: 10,
-              color: "rgba(255,255,255,0.72)",
+              color: gridMode ? C.accent : C.textMuted,
+              cursor: "pointer",
             }}
           >
             <input
@@ -636,43 +639,49 @@ export default function App() {
             />
             Grid
           </label>
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
-            {[8, 12, 16, 24, 32].map((size) => (
-              <button
-                key={size}
-                onClick={() => setGridSize(size)}
-                style={{
-                  background: gridSize === size ? "rgba(0,245,160,0.25)" : "rgba(255,255,255,0.08)",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  borderRadius: 5,
-                  color: "rgba(255,255,255,0.88)",
-                  cursor: "pointer",
-                  fontSize: 10,
-                  padding: "2px 6px",
-                  fontFamily: "inherit",
-                }}
-              >
-                {size}
-              </button>
-            ))}
-          </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+          {gridMode && (
+            <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
+              {[8, 12, 16, 24, 32].map((size) => (
+                <button
+                  key={size}
+                  onClick={() => setGridSize(size)}
+                  style={{
+                    background: gridSize === size ? `${C.accent}22` : "rgba(255,255,255,0.06)",
+                    border: `1px solid ${gridSize === size ? C.accentBorder : C.border}`,
+                    borderRadius: 5,
+                    color: gridSize === size ? C.accent : C.textMuted,
+                    cursor: "pointer",
+                    fontSize: 10,
+                    padding: "2px 7px",
+                    fontFamily: "inherit",
+                    fontWeight: gridSize === size ? 700 : 400,
+                  }}
+                >
+                  {size}
+                </button>
+              ))}
+            </div>
+          )}
+          <div style={{ width: 1, height: 16, background: C.border }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
             <PresetBtn label="Corners" onClick={() => applyPreset("corners")} />
             <PresetBtn label="Right Stack" onClick={() => applyPreset("right-stack")} />
             <PresetBtn label="Focus" onClick={() => applyPreset("focus-center")} />
           </div>
+          <div style={{ width: 1, height: 16, background: C.border }} />
           <button
             onClick={() => setMode(returnMode)}
             style={{
-              background: "#00f5a0",
+              background: C.accent,
               border: "none",
               borderRadius: 6,
               color: "#000",
               cursor: "pointer",
               fontSize: 11,
-              fontWeight: 700,
-              padding: "3px 14px",
+              fontWeight: 800,
+              padding: "4px 16px",
               fontFamily: "inherit",
+              letterSpacing: "0.04em",
             }}
           >
             Done
@@ -717,14 +726,15 @@ function PresetBtn({ label, onClick }: { label: string; onClick: () => void }) {
     <button
       onClick={onClick}
       style={{
-        background: "rgba(255,255,255,0.08)",
-        border: "1px solid rgba(255,255,255,0.22)",
+        background: "rgba(255,255,255,0.07)",
+        border: `1px solid ${C.border}`,
         borderRadius: 5,
-        color: "rgba(255,255,255,0.9)",
+        color: C.textSub,
         cursor: "pointer",
         fontSize: 10,
-        padding: "2px 8px",
+        padding: "3px 9px",
         fontFamily: "'JetBrains Mono', monospace",
+        fontWeight: 500,
       }}
     >
       {label}

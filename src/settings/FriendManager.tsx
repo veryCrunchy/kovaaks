@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { C } from "../design/tokens";
 import type { AppSettings } from "../types/settings";
 import type { ActiveSteamUser, FriendProfile, MostPlayedEntry } from "../types/friends";
 
@@ -24,7 +25,7 @@ function Avatar({ url, name }: { url: string; name: string }) {
     return (
       <div
         className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
-        style={{ background: "rgba(0,245,160,0.12)", color: "#00f5a0" }}
+        style={{ background: C.accentDim, color: C.accent }}
       >
         {name.slice(0, 1).toUpperCase()}
       </div>
@@ -36,7 +37,7 @@ function Avatar({ url, name }: { url: string; name: string }) {
       alt={name}
       onError={() => setErr(true)}
       className="w-10 h-10 rounded-full object-cover flex-shrink-0"
-      style={{ border: "1px solid rgba(255,255,255,0.1)" }}
+      style={{ border: `1px solid ${C.border}` }}
     />
   );
 }
@@ -55,14 +56,14 @@ function MostPlayedRow({ username }: { username: string }) {
 
   if (loading) {
     return (
-      <p className="text-xs mt-2 ml-1" style={{ color: "rgba(255,255,255,0.25)" }}>
+      <p className="text-xs mt-2 ml-1" style={{ color: C.textMuted }}>
         Loading scenarios…
       </p>
     );
   }
   if (!entries || entries.length === 0) {
     return (
-      <p className="text-xs mt-2 ml-1" style={{ color: "rgba(255,255,255,0.2)" }}>
+      <p className="text-xs mt-2 ml-1" style={{ color: C.textFaint }}>
         No scenarios found.
       </p>
     );
@@ -73,12 +74,12 @@ function MostPlayedRow({ username }: { username: string }) {
         <div key={e.scenario_name} className="flex items-center justify-between gap-2">
           <span
             className="text-xs truncate"
-            style={{ color: "rgba(255,255,255,0.45)", maxWidth: 200 }}
+            style={{ color: C.textMuted, maxWidth: 200 }}
             title={e.scenario_name}
           >
             {e.scenario_name}
           </span>
-          <span className="text-xs tabular-nums flex-shrink-0" style={{ color: "rgba(255,255,255,0.3)" }}>
+          <span className="text-xs tabular-nums flex-shrink-0" style={{ color: C.textFaint }}>
             {e.counts.plays} plays · {Math.round(e.score).toLocaleString()}
           </span>
         </div>
@@ -219,11 +220,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     <div className="p-8 max-w-2xl" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
       <h1
         className="text-lg font-bold mb-2 tracking-wider"
-        style={{ color: "rgba(255,255,255,0.9)" }}
+        style={{ color: C.text }}
       >
         Friends
       </h1>
-      <p className="text-xs mb-6" style={{ color: "rgba(255,255,255,0.35)" }}>
+      <p className="text-xs mb-6" style={{ color: C.textFaint }}>
         Add friends by KovaaK's username, Steam64 ID, vanity URL, or steamcommunity.com link.
         Friends with a linked KovaaK's account support VS-mode score comparison.
       </p>
@@ -233,8 +234,8 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         <div
           className="flex items-center justify-between gap-3 mb-5 px-4 py-3 rounded-xl"
           style={{
-            background: "rgba(23,144,255,0.06)",
-            border: "1px solid rgba(23,144,255,0.18)",
+            background: `${C.info}0f`,
+            border: `1px solid ${C.info}30`,
           }}
         >
           <div className="flex items-center gap-3 min-w-0">
@@ -243,21 +244,21 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                 src={steamUser.avatar_url}
                 alt={steamUser.display_name}
                 className="w-8 h-8 rounded-full flex-shrink-0"
-                style={{ border: "1px solid rgba(23,144,255,0.3)" }}
+                style={{ border: `1px solid ${C.info}50` }}
               />
             ) : (
               <div
                 className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
-                style={{ background: "rgba(23,144,255,0.15)", color: "#1790ff" }}
+                style={{ background: `${C.info}25`, color: C.info }}
               >
                 {steamUser.display_name.slice(0, 1).toUpperCase()}
               </div>
             )}
             <div className="min-w-0">
-              <div className="text-xs font-semibold truncate" style={{ color: "#fff" }}>
+              <div className="text-xs font-semibold truncate" style={{ color: C.text }}>
                 {steamUser.display_name}
               </div>
-              <div className="text-xs" style={{ color: "rgba(23,144,255,0.7)" }}>
+              <div className="text-xs" style={{ color: `${C.info}b0` }}>
                 Steam detected
               </div>
             </div>
@@ -265,11 +266,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           <button
             onClick={handleImportSteam}
             disabled={importing}
-            className="px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0"
+            className="am-btn px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0"
             style={{
-              background: importing ? "rgba(23,144,255,0.08)" : "rgba(23,144,255,0.15)",
-              border: "1px solid rgba(23,144,255,0.35)",
-              color: importing ? "rgba(23,144,255,0.4)" : "#1790ff",
+              background: importing ? `${C.info}14` : `${C.info}25`,
+              border: `1px solid ${C.info}59`,
+              color: importing ? `${C.info}66` : C.info,
               cursor: importing ? "not-allowed" : "pointer",
             }}
           >
@@ -284,11 +285,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           <button
             key={t.value}
             onClick={() => setSearchType(t.value)}
-            className="px-3 py-1 rounded text-xs"
+            className="am-btn px-3 py-1 rounded text-xs"
             style={{
-              background: searchType === t.value ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.04)",
-              border: searchType === t.value ? "1px solid rgba(0,245,160,0.4)" : "1px solid rgba(255,255,255,0.08)",
-              color: searchType === t.value ? "#00f5a0" : "rgba(255,255,255,0.35)",
+              background: searchType === t.value ? C.accentDim : "rgba(255,255,255,0.04)",
+              border: `1px solid ${searchType === t.value ? C.accentBorder : C.borderSub}`,
+              color: searchType === t.value ? C.accent : C.textFaint,
               cursor: "pointer",
             }}
           >
@@ -306,22 +307,16 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           onChange={(e) => { setInput(e.target.value); setError(null); }}
           onKeyDown={handleKeyDown}
           disabled={adding}
-          className="flex-1 rounded-lg px-3 py-2 text-sm"
-          style={{
-            background: "rgba(255,255,255,0.05)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            color: "#fff",
-            outline: "none",
-            opacity: adding ? 0.6 : 1,
-          }}
+          className="am-input flex-1 rounded-lg px-3 py-2 text-sm"
+          style={{ opacity: adding ? 0.6 : 1 }}
         />
         <button
           onClick={handleAdd}
           disabled={adding || !input.trim()}
-          className="px-4 py-2 rounded-lg text-sm font-semibold"
+          className="am-btn px-4 py-2 rounded-lg text-sm font-semibold"
           style={{
-            background: input.trim() ? "#00f5a0" : "rgba(0,245,160,0.15)",
-            color: input.trim() ? "#000" : "rgba(0,245,160,0.35)",
+            background: input.trim() ? C.accent : C.accentDim,
+            color: input.trim() ? "#000" : `${C.accent}59`,
             cursor: adding || !input.trim() ? "not-allowed" : "pointer",
             border: "none",
             minWidth: 80,
@@ -337,9 +332,9 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         <div
           className="mb-4 px-4 py-3 rounded-lg text-sm"
           style={{
-            background: "rgba(255,77,77,0.1)",
-            border: "1px solid rgba(255,77,77,0.3)",
-            color: "#ff6b6b",
+            background: `${C.danger}1a`,
+            border: `1px solid ${C.dangerBorder}`,
+            color: C.danger,
           }}
         >
           {error}
@@ -349,9 +344,9 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         <div
           className="mb-4 px-4 py-3 rounded-lg text-sm"
           style={{
-            background: "rgba(0,245,160,0.08)",
-            border: "1px solid rgba(0,245,160,0.25)",
-            color: "#00f5a0",
+            background: C.accentDim,
+            border: `1px solid ${C.accentBorder}`,
+            color: C.accent,
           }}
         >
           {success}
@@ -363,8 +358,8 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         <div
           className="rounded-xl p-8 text-center text-sm"
           style={{
-            border: "1px dashed rgba(255,255,255,0.1)",
-            color: "rgba(255,255,255,0.3)",
+            border: `1px dashed ${C.border}`,
+            color: C.textFaint,
           }}
         >
           No friends added yet. Enter a KovaaK's username, Steam name, or Steam ID above.
@@ -376,8 +371,8 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
               key={f.username}
               className="rounded-xl overflow-hidden"
               style={{
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.07)",
+                background: C.surface,
+                border: `1px solid ${C.border}`,
               }}
             >
               {/* Main row */}
@@ -386,7 +381,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                   <Avatar url={f.avatar_url} name={f.steam_account_name || f.username} />
                   <div className="min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="text-sm font-semibold truncate" style={{ color: "#fff" }}>
+                      <span className="text-sm font-semibold truncate" style={{ color: C.text }}>
                         {f.steam_account_name || f.username}
                       </span>
                       {f.country && (
@@ -397,14 +392,14 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                       {f.kovaaks_plus && (
                         <span
                           className="text-xs px-1.5 py-0.5 rounded font-bold"
-                          style={{ background: "rgba(255,180,0,0.15)", color: "#ffb400" }}
+                          style={{ background: `${C.warn}25`, color: C.warn }}
                         >
                           K+
                         </span>
                       )}
                     </div>
                     {f.steam_account_name && f.steam_account_name !== f.username && (
-                      <span className="text-xs" style={{ color: "rgba(255,255,255,0.35)" }}>
+                      <span className="text-xs" style={{ color: C.textFaint }}>
                         @{f.username}
                       </span>
                     )}
@@ -417,12 +412,10 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                     className="px-2 py-1.5 rounded text-xs font-semibold"
                     style={{
                       background: selectedOpponent === f.username
-                        ? "rgba(255,107,107,0.18)"
+                        ? `${C.danger}2e`
                         : "rgba(255,255,255,0.04)",
-                      border: selectedOpponent === f.username
-                        ? "1px solid rgba(255,107,107,0.45)"
-                        : "1px solid rgba(255,255,255,0.1)",
-                      color: selectedOpponent === f.username ? "#ff6b6b" : "rgba(255,255,255,0.35)",
+                      border: `1px solid ${selectedOpponent === f.username ? C.dangerBorder : C.borderSub}`,
+                      color: selectedOpponent === f.username ? C.danger : C.textFaint,
                       cursor: "pointer",
                     }}
                     title={selectedOpponent === f.username ? "Remove as opponent" : "Set as battle opponent"}
@@ -434,8 +427,8 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                     className="px-2 py-1 rounded text-xs"
                     style={{
                       background: "rgba(255,255,255,0.04)",
-                      border: "1px solid rgba(255,255,255,0.1)",
-                      color: "rgba(255,255,255,0.4)",
+                      border: `1px solid ${C.borderSub}`,
+                      color: C.textMuted,
                       cursor: "pointer",
                     }}
                     title="Show most-played scenarios"
@@ -448,9 +441,9 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                     rel="noopener noreferrer"
                     className="px-2 py-1 rounded text-xs"
                     style={{
-                      background: "rgba(0,180,255,0.06)",
-                      border: "1px solid rgba(0,180,255,0.15)",
-                      color: "rgba(0,180,255,0.6)",
+                      background: `${C.info}0f`,
+                      border: `1px solid ${C.info}26`,
+                      color: `${C.info}99`,
                       textDecoration: "none",
                     }}
                   >
@@ -460,9 +453,9 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                     onClick={() => handleRemove(f.username)}
                     className="px-3 py-1 rounded-lg text-xs"
                     style={{
-                      background: "rgba(255,77,77,0.08)",
-                      border: "1px solid rgba(255,77,77,0.2)",
-                      color: "#ff6b6b",
+                      background: `${C.danger}14`,
+                      border: `1px solid ${C.dangerBorder}`,
+                      color: C.danger,
                       cursor: "pointer",
                     }}
                   >
@@ -475,11 +468,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
               {expanded === f.username && (
                 <div
                   className="px-4 pb-3"
-                  style={{ borderTop: "1px solid rgba(255,255,255,0.05)" }}
+                  style={{ borderTop: `1px solid ${C.borderSub}` }}
                 >
                   <p
                     className="text-xs mt-2 mb-1 uppercase tracking-widest"
-                    style={{ color: "rgba(255,255,255,0.2)" }}
+                    style={{ color: C.textFaint }}
                   >
                     Most played
                   </p>
@@ -491,7 +484,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         </div>
       )}
 
-      <p className="text-xs mt-6" style={{ color: "rgba(255,255,255,0.2)" }}>
+      <p className="text-xs mt-6" style={{ color: C.textFaint }}>
         Scores are fetched live from kovaaks.com — no files to export or share.
       </p>
     </div>

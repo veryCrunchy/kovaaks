@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { C } from "../design/tokens";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -50,14 +51,14 @@ interface ScenarioDetails {
 const PAGE_SIZE = 100;
 const SCENARIO_PAGE = 20;
 
-const BG = "#0a0a0f";
-const BORDER = "rgba(255,255,255,0.07)";
-const ACCENT = "#00f5a0";
-const MUTED = "rgba(255,255,255,0.3)";
-const MUTED2 = "rgba(255,255,255,0.45)";
-const DIVIDER = "rgba(255,255,255,0.06)";
-const CARD_BG = "rgba(255,255,255,0.04)";
-const SIDEBAR_BG = "rgba(255,255,255,0.015)";
+const BG = C.bg;
+const BORDER = C.border;
+const ACCENT = C.accent;
+const MUTED = C.textMuted;
+const MUTED2 = C.textSub;
+const DIVIDER = C.borderSub;
+const CARD_BG = C.surface;
+const SIDEBAR_BG = C.glassDark;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -260,15 +261,12 @@ export function LeaderboardBrowser() {
             placeholder="Search scenarios..."
             value={query}
             onChange={(e) => handleSearch(e.target.value)}
+            className="am-input"
             style={{
               width: "100%",
-              background: "rgba(255,255,255,0.06)",
-              border: `1px solid rgba(255,255,255,0.1)`,
               borderRadius: 7,
               padding: "6px 10px",
-              color: "#fff",
               fontSize: 12,
-              outline: "none",
               boxSizing: "border-box",
               fontFamily: "inherit",
             }}
@@ -420,15 +418,9 @@ function ScenarioRow({
       style={{
         padding: "9px 12px",
         cursor: "pointer",
-        background: active ? "rgba(0,245,160,0.08)" : "transparent",
+        background: active ? `${C.accent}14` : "transparent",
         borderLeft: active ? `2px solid ${ACCENT}` : "2px solid transparent",
-        transition: "background 0.1s",
-      }}
-      onMouseEnter={(e) => {
-        if (!active) (e.currentTarget as HTMLDivElement).style.background = "rgba(255,255,255,0.03)";
-      }}
-      onMouseLeave={(e) => {
-        if (!active) (e.currentTarget as HTMLDivElement).style.background = "transparent";
+        transition: "background 0.12s",
       }}
     >
       <div style={{ fontWeight: active ? 600 : 400, marginBottom: 2, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: active ? "#fff" : "rgba(255,255,255,0.65)", fontSize: 12 }}>
@@ -480,10 +472,8 @@ function LeaderboardTable({ entries, loading }: { entries: LeaderboardEntry[]; l
             style={{
               background: "transparent",
               borderBottom: `1px solid ${DIVIDER}`,
-              transition: "background 0.1s",
+              transition: "background 0.12s",
             }}
-            onMouseEnter={(el) => { (el.currentTarget as HTMLTableRowElement).style.background = "rgba(255,255,255,0.03)"; }}
-            onMouseLeave={(el) => { (el.currentTarget as HTMLTableRowElement).style.background = "transparent"; }}
           >
             {/* Rank */}
             <td style={{ padding: "9px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
