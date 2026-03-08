@@ -3811,6 +3811,16 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
     [analysisRecords],
   );
 
+  const rawSorted = useMemo(
+    () =>
+      [...records].sort((a, b) => {
+        const da = parseTimestamp(a.timestamp)?.getTime() ?? 0;
+        const db = parseTimestamp(b.timestamp)?.getTime() ?? 0;
+        return da - db;
+      }),
+    [records],
+  );
+
   const warmupIds = useMemo(() => classifyWarmup(sorted), [sorted]);
   const hasWarmup = warmupIds.size > 0;
 
@@ -3825,6 +3835,18 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
     if (sessionFilter === "warmedup") return sorted.filter((r) => !warmupIds.has(r.id));
     return sorted;
   }, [sorted, warmupIds, sessionFilter]);
+
+  const replayFilteredRecords = useMemo(() => {
+    if (sessionFilter === "warmup") return records.filter((r) => warmupIds.has(r.id));
+    if (sessionFilter === "warmedup") return records.filter((r) => !warmupIds.has(r.id));
+    return records;
+  }, [records, warmupIds, sessionFilter]);
+
+  const replayFilteredSorted = useMemo(() => {
+    if (sessionFilter === "warmup") return rawSorted.filter((r) => warmupIds.has(r.id));
+    if (sessionFilter === "warmedup") return rawSorted.filter((r) => !warmupIds.has(r.id));
+    return rawSorted;
+  }, [rawSorted, warmupIds, sessionFilter]);
 
   const best = Math.max(...filteredRecords.map((r) => r.score), 0);
   const hasSmooth = analysisRecords.some((r) => r.smoothness != null);
@@ -4010,7 +4032,7 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
         />
       )}
       {activeTab === "replay" && (
-        <ReplayTab records={filteredRecords} sorted={filteredSorted} warmupIds={warmupIds} />
+        <ReplayTab records={replayFilteredRecords} sorted={replayFilteredSorted} warmupIds={warmupIds} />
       )}
       {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
         </>

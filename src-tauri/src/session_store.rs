@@ -176,6 +176,15 @@ pub fn add_session(app: &AppHandle, record: SessionRecord) {
     let _ = merge_sessions(app, vec![record]);
 }
 
+pub fn set_session_has_replay(app: &AppHandle, session_id: &str, has_replay: bool) {
+    if let Err(error) = try_set_session_has_replay(app, session_id, has_replay) {
+        log::warn!(
+            "session_store: could not update replay flag for {}: {error}",
+            session_id
+        );
+    }
+}
+
 pub fn merge_sessions<I>(app: &AppHandle, records: I) -> SessionMergeResult
 where
     I: IntoIterator<Item = SessionRecord>,
@@ -308,6 +317,19 @@ where
     result.total_after = tx.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))?;
     tx.commit()?;
     Ok(result)
+}
+
+fn try_set_session_has_replay(
+    app: &AppHandle,
+    session_id: &str,
+    has_replay: bool,
+) -> anyhow::Result<()> {
+    let conn = crate::stats_db::connect(app)?;
+    conn.execute(
+        "UPDATE sessions SET has_replay = ?2 WHERE id = ?1",
+        params![session_id, if has_replay { 1i64 } else { 0i64 }],
+    )?;
+    Ok(())
 }
 
 fn try_get_session_page(

@@ -241,37 +241,15 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                         .map(|v| v as f32),
                                 }
                             });
-                            // Build session id and save replay file
+                            // Build session id and persist the session row before
+                            // child replay/run tables, which are foreign-keyed to sessions.
                             let session_id = format!(
                                 "{}-{}",
                                 result.scenario.to_lowercase().replace(' ', "_"),
                                 result.timestamp
                             );
-                            let has_replay = crate::replay_store::save_replay(
-                                app,
-                                &session_id,
-                                crate::replay_store::ReplayData {
-                                    positions: raw_positions,
-                                    metrics: metric_points,
-                                    frames: screen_frames,
-                                    run_snapshot: run_snapshot.clone(),
-                                },
-                            );
-                            if let Some(snapshot) = run_snapshot.as_ref() {
-                                if let Err(error) = crate::stats_db::upsert_run_capture(
-                                    app,
-                                    &session_id,
-                                    snapshot,
-                                ) {
-                                    log::warn!(
-                                        "file_watcher: could not persist run capture for {}: {error}",
-                                        session_id
-                                    );
-                                }
-                            }
-                            // Persist to session history
                             let record = crate::session_store::SessionRecord {
-                                id: session_id,
+                                id: session_id.clone(),
                                 scenario: result.scenario.clone(),
                                 score: result.score,
                                 accuracy: result.accuracy,
@@ -284,9 +262,35 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 smoothness,
                                 stats_panel,
                                 shot_timing,
-                                has_replay,
+                                has_replay: false,
                             };
                             crate::session_store::add_session(app, record);
+
+                            let has_replay = crate::replay_store::save_replay(
+                                app,
+                                &session_id,
+                                crate::replay_store::ReplayData {
+                                    positions: raw_positions,
+                                    metrics: metric_points,
+                                    frames: screen_frames,
+                                    run_snapshot: run_snapshot.clone(),
+                                },
+                            );
+                            if has_replay {
+                                crate::session_store::set_session_has_replay(app, &session_id, true);
+                            }
+                            if let Some(snapshot) = run_snapshot.as_ref() {
+                                if let Err(error) = crate::stats_db::upsert_run_capture(
+                                    app,
+                                    &session_id,
+                                    snapshot,
+                                ) {
+                                    log::warn!(
+                                        "file_watcher: could not persist run capture for {}: {error}",
+                                        session_id
+                                    );
+                                }
+                            }
                             let _ = app.emit(EVENT_SESSION_COMPLETE, &result);
                             // Bring the stats window to the foreground so the
                             // user sees results immediately without manual action.
