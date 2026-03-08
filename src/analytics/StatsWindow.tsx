@@ -10,11 +10,13 @@ import type {
   BridgeRunTimelinePoint,
   BridgeShotTelemetryEvent,
 } from "../types/mouse";
+import type { StatsPanelReading } from "../types/overlay";
 import {
   LineChart,
   Line,
   BarChart,
   Bar,
+  Brush,
   Cell,
   RadarChart,
   PolarGrid,
@@ -32,6 +34,7 @@ import {
 } from "recharts";
 import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
 import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
+import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -137,6 +140,7 @@ interface BridgeParsedEvent {
 }
 
 type Tab = "overview" | "movement" | "performance" | "coaching" | "replay" | "leaderboard";
+type DateRangePreset = "all" | "30d" | "90d" | "365d";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -180,6 +184,8 @@ const STATS_WINDOW_STORAGE_KEYS = {
   scenarioTab: "stats-window:scenario-tab",
   sessionFilter: "stats-window:session-filter",
   scenarioSort: "stats-window:scenario-sort",
+  dateRange: "stats-window:date-range",
+  compareScenario: "stats-window:compare-scenario",
 } as const;
 
 function readStoredValue(key: string): string | null {
@@ -200,6 +206,21 @@ function writeStoredValue(key: string, value: string | null) {
   } catch {
     // Ignore storage failures in restricted environments.
   }
+}
+
+interface DrillRecommendation {
+  label: string;
+  query: string;
+}
+
+interface ScenarioSummary {
+  sessions: number;
+  best: number;
+  avgScore: number;
+  recentAvg: number;
+  avgAccuracy: number | null;
+  totalDurationSecs: number;
+  latestTimestamp: string | null;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -261,6 +282,92 @@ function formatPlayTime(secs: number): string {
   if (h === 0) return `${m}m`;
   if (m === 0) return `${h}h`;
   return `${h}h ${m}m`;
+}
+
+function getDateRangeCutoff(range: DateRangePreset): number | null {
+  if (range === "all") return null;
+  const now = Date.now();
+  if (range === "30d") return now - 30 * 24 * 60 * 60 * 1000;
+  if (range === "90d") return now - 90 * 24 * 60 * 60 * 1000;
+  return now - 365 * 24 * 60 * 60 * 1000;
+}
+
+function withinDateRange(timestamp: string, range: DateRangePreset): boolean {
+  const cutoff = getDateRangeCutoff(range);
+  if (cutoff == null) return true;
+  const ts = parseTimestamp(timestamp)?.getTime();
+  return ts != null && ts >= cutoff;
+}
+
+function summarizeScenario(records: SessionRecord[]): ScenarioSummary | null {
+  if (records.length === 0) return null;
+  const ordered = [...records].sort((a, b) =>
+    (parseTimestamp(a.timestamp)?.getTime() ?? 0) - (parseTimestamp(b.timestamp)?.getTime() ?? 0),
+  );
+  const accuracyRecords = records.filter((record) => record.accuracy > 0);
+  const latest = ordered[ordered.length - 1] ?? null;
+
+  return {
+    sessions: records.length,
+    best: Math.max(...records.map((record) => record.score), 0),
+    avgScore: mean(records.map((record) => record.score)),
+    recentAvg: mean(ordered.slice(-5).map((record) => record.score)),
+    avgAccuracy: accuracyRecords.length > 0 ? mean(accuracyRecords.map((record) => record.accuracy)) : null,
+    totalDurationSecs: records.reduce((sum, record) => sum + (record.duration_secs ?? 0), 0),
+    latestTimestamp: latest?.timestamp ?? null,
+  };
+}
+
+function drillRecommendationsForCard(title: string, scenarioType: string): DrillRecommendation[] {
+  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+  const lower = title.toLowerCase();
+
+  if (lower.includes("warm-up") || lower.includes("warmup")) {
+    return [
+      { label: "Smoothbot", query: "Smoothbot" },
+      { label: "Wide Wall", query: "Wide Wall" },
+      { label: "Centering", query: "Centering" },
+    ];
+  }
+  if (lower.includes("shot recovery") || lower.includes("recover")) {
+    return [
+      { label: "Pasu", query: "Pasu" },
+      { label: "1w4ts", query: "1w4ts" },
+      { label: "Microshot", query: "Microshot" },
+    ];
+  }
+  if (lower.includes("click timing") || lower.includes("rhythm")) {
+    return [
+      { label: "Microshot", query: "Microshot" },
+      { label: "Tile Frenzy", query: "Tile Frenzy" },
+      { label: "1wall 6targets", query: "1wall 6targets" },
+    ];
+  }
+  if (lower.includes("overshooting") || lower.includes("speed-accuracy")) {
+    return isTracking
+      ? [
+          { label: "Smoothbot", query: "Smoothbot" },
+          { label: "Air", query: "Air" },
+          { label: "Centering", query: "Centering" },
+        ]
+      : [
+          { label: "Pasu", query: "Pasu" },
+          { label: "1w4ts", query: "1w4ts" },
+          { label: "Floating Heads", query: "Floating Heads" },
+        ];
+  }
+  if (lower.includes("tracking") || isTracking) {
+    return [
+      { label: "Smoothbot", query: "Smoothbot" },
+      { label: "Air Angelic", query: "Air Angelic" },
+      { label: "Centering", query: "Centering" },
+    ];
+  }
+  return [
+    { label: "Pasu", query: "Pasu" },
+    { label: "1w4ts", query: "1w4ts" },
+    { label: "Microshot", query: "Microshot" },
+  ];
 }
 
 function formatTelemetryOffset(ms: number): string {
@@ -1244,11 +1351,13 @@ function OverviewTab({
   sorted,
   best,
   warmupIds,
+  onJumpToReplay,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
   best: number;
   warmupIds: Set<string>;
+  onJumpToReplay: (sessionId: string) => void;
 }) {
   const avgScore = mean(records.map((r) => r.score));
   const accRecords = records.filter((r) => r.accuracy > 0);
@@ -1402,7 +1511,7 @@ function OverviewTab({
             </span>
           )}
         </div>
-        <ResponsiveContainer width="100%" height={160}>
+        <ResponsiveContainer width="100%" height={chartData.length > 40 ? 220 : 160}>
           <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
             <XAxis
@@ -1462,6 +1571,15 @@ function OverviewTab({
                 connectNulls
               />
             )}
+            {chartData.length > 40 && (
+              <Brush
+                dataKey="i"
+                height={24}
+                stroke={C.accent}
+                travellerWidth={8}
+                fill="rgba(255,255,255,0.04)"
+              />
+            )}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -1472,7 +1590,7 @@ function OverviewTab({
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ color: "rgba(255,255,255,0.3)", textAlign: "left" }}>
-              {["Date", "Score", "Acc", "Kills", "Duration", "Smooth"].map((h) => (
+              {["Date", "Score", "Acc", "Kills", "Duration", "Smooth", "Replay"].map((h) => (
                 <th
                   key={h}
                   style={{
@@ -1490,9 +1608,13 @@ function OverviewTab({
             {recentRuns.map((r, idx) => {
               const isBest = r.score === best;
               const isWarmup = warmupIds.has(r.id);
+              const replayable = r.has_replay;
               return (
                 <tr
                   key={r.id}
+                  onClick={() => {
+                    if (replayable) onJumpToReplay(r.id);
+                  }}
                   style={{
                     borderBottom: "1px solid rgba(255,255,255,0.04)",
                     opacity: isWarmup ? 0.55 : 1,
@@ -1501,6 +1623,7 @@ function OverviewTab({
                       : idx % 2 === 0
                         ? "transparent"
                         : "rgba(255,255,255,0.01)",
+                    cursor: replayable ? "pointer" : "default",
                   }}
                 >
                   <td style={{ padding: "8px 4px 8px 0", color: "rgba(255,255,255,0.5)" }}>
@@ -1550,11 +1673,107 @@ function OverviewTab({
                   >
                     {r.smoothness ? r.smoothness.composite.toFixed(1) : "—"}
                   </td>
+                  <td style={{ padding: "8px 4px", color: replayable ? C.accent : "rgba(255,255,255,0.25)", fontSize: 11, fontWeight: replayable ? 700 : 400 }}>
+                    {replayable ? "Open" : "—"}
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
+      </div>
+    </div>
+  );
+}
+
+function ScenarioComparisonCard({
+  leftLabel,
+  left,
+  rightLabel,
+  right,
+}: {
+  leftLabel: string;
+  left: ScenarioSummary;
+  rightLabel: string;
+  right: ScenarioSummary;
+}) {
+  const rows = [
+    {
+      label: "Best score",
+      leftValue: fmtScore(left.best),
+      rightValue: fmtScore(right.best),
+      leftRaw: left.best,
+      rightRaw: right.best,
+    },
+    {
+      label: "Average score",
+      leftValue: fmtScore(left.avgScore),
+      rightValue: fmtScore(right.avgScore),
+      leftRaw: left.avgScore,
+      rightRaw: right.avgScore,
+    },
+    {
+      label: "Recent avg",
+      leftValue: fmtScore(left.recentAvg),
+      rightValue: fmtScore(right.recentAvg),
+      leftRaw: left.recentAvg,
+      rightRaw: right.recentAvg,
+    },
+    {
+      label: "Accuracy",
+      leftValue: left.avgAccuracy != null ? `${(left.avgAccuracy * 100).toFixed(1)}%` : "—",
+      rightValue: right.avgAccuracy != null ? `${(right.avgAccuracy * 100).toFixed(1)}%` : "—",
+      leftRaw: left.avgAccuracy ?? -1,
+      rightRaw: right.avgAccuracy ?? -1,
+    },
+    {
+      label: "Play volume",
+      leftValue: `${left.sessions} runs`,
+      rightValue: `${right.sessions} runs`,
+      leftRaw: left.sessions,
+      rightRaw: right.sessions,
+    },
+  ];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 14 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1fr) 120px minmax(0, 1fr)", gap: 10, alignItems: "center" }}>
+        <div style={{ fontSize: 13, color: C.text, fontWeight: 700 }}>{leftLabel}</div>
+        <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", textAlign: "center", fontWeight: 700 }}>
+          Metric
+        </div>
+        <div style={{ fontSize: 13, color: C.text, fontWeight: 700, textAlign: "right" }}>{rightLabel}</div>
+      </div>
+      {rows.map((row) => {
+        const leftBetter = row.leftRaw > row.rightRaw;
+        const rightBetter = row.rightRaw > row.leftRaw;
+        return (
+          <div
+            key={row.label}
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(0, 1fr) 120px minmax(0, 1fr)",
+              gap: 10,
+              alignItems: "center",
+              background: "rgba(255,255,255,0.025)",
+              border: `1px solid ${C.borderSub}`,
+              borderRadius: 10,
+              padding: "10px 12px",
+            }}
+          >
+            <div style={{ color: leftBetter ? C.accent : C.textSub, fontWeight: leftBetter ? 700 : 500 }}>
+              {row.leftValue}
+            </div>
+            <div style={{ color: C.textFaint, textAlign: "center", fontSize: 11 }}>{row.label}</div>
+            <div style={{ color: rightBetter ? C.accent : C.textSub, textAlign: "right", fontWeight: rightBetter ? 700 : 500 }}>
+              {row.rightValue}
+            </div>
+          </div>
+        );
+      })}
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, color: C.textFaint, fontSize: 11, flexWrap: "wrap" }}>
+        <span>{left.latestTimestamp ? `Last played ${relativeTime(left.latestTimestamp)}` : "No recent timestamp"}</span>
+        <span>{right.latestTimestamp ? `Last played ${relativeTime(right.latestTimestamp)}` : "No recent timestamp"}</span>
       </div>
     </div>
   );
@@ -2188,15 +2407,21 @@ function ReplayTab({
   records,
   sorted,
   warmupIds,
+  requestedSelectedId,
+  onRequestedSelectedIdHandled,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
   warmupIds: Set<string>;
+  requestedSelectedId?: string | null;
+  onRequestedSelectedIdHandled?: () => void;
 }) {
   const replayRecords = useMemo(
     () => [...sorted].reverse().filter((r) => r.has_replay),
     [sorted],
   );
+  const [sortBy, setSortBy] = useState<"date" | "score" | "duration">("date");
+  const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [selectedId, setSelectedId] = useState<string | null>(
     replayRecords.length > 0 ? replayRecords[0].id : null,
   );
@@ -2245,6 +2470,36 @@ function ReplayTab({
       setSelectedId(replayRecords[0].id);
     }
   }, [replayRecords]);
+
+  useEffect(() => {
+    if (!requestedSelectedId) return;
+    if (replayRecords.some((record) => record.id === requestedSelectedId)) {
+      setSelectedId(requestedSelectedId);
+    }
+    onRequestedSelectedIdHandled?.();
+  }, [onRequestedSelectedIdHandled, replayRecords, requestedSelectedId]);
+
+  const sortedReplayRecords = useMemo(() => {
+    const next = [...replayRecords];
+    next.sort((a, b) => {
+      const direction = sortDir === "asc" ? 1 : -1;
+      if (sortBy === "score") return (a.score - b.score) * direction;
+      if (sortBy === "duration") return ((a.duration_secs ?? 0) - (b.duration_secs ?? 0)) * direction;
+      const aTs = parseTimestamp(a.timestamp)?.getTime() ?? 0;
+      const bTs = parseTimestamp(b.timestamp)?.getTime() ?? 0;
+      return (aTs - bTs) * direction;
+    });
+    return next;
+  }, [replayRecords, sortBy, sortDir]);
+
+  const toggleReplaySort = (column: "date" | "score" | "duration") => {
+    if (sortBy === column) {
+      setSortDir((prev) => (prev === "desc" ? "asc" : "desc"));
+      return;
+    }
+    setSortBy(column);
+    setSortDir(column === "date" ? "desc" : "desc");
+  };
 
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
   const runSnapshot: BridgeRunSnapshot | null = useMemo(
@@ -2415,11 +2670,46 @@ function ReplayTab({
       {/* Session selector */}
       <div style={CHART_STYLE}>
         <SectionTitle>Select session</SectionTitle>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
+          <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}>
+            Pick any run to inspect the replay, shot telemetry, and exact run timeline.
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <span style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+              Sort
+            </span>
+            {(["date", "score", "duration"] as const).map((column) => {
+              const active = sortBy === column;
+              return (
+                <button
+                  key={column}
+                  type="button"
+                  onClick={() => toggleReplaySort(column)}
+                  style={{
+                    background: active ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${active ? C.accentBorder : C.border}`,
+                    borderRadius: 999,
+                    color: active ? C.accent : C.textMuted,
+                    cursor: "pointer",
+                    fontSize: 10,
+                    padding: "5px 8px",
+                    fontFamily: "inherit",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.06em",
+                    fontWeight: 700,
+                  }}
+                >
+                  {column === "date" ? "Date" : column === "score" ? "Score" : "Duration"} {active ? (sortDir === "desc" ? "↓" : "↑") : ""}
+                </button>
+              );
+            })}
+          </div>
+        </div>
         <div style={{ maxHeight: 180, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ color: "rgba(255,255,255,0.3)" }}>
-                {["Date", "Score", "Acc", "Smooth"].map((h) => (
+                {["Date", "Score", "Duration", "Acc", "Smooth"].map((h) => (
                   <th
                     key={h}
                     style={{
@@ -2435,7 +2725,7 @@ function ReplayTab({
               </tr>
             </thead>
             <tbody>
-              {replayRecords.map((r) => {
+              {sortedReplayRecords.map((r) => {
                 const active = r.id === selectedId;
                 const isWarmup = warmupIds.has(r.id);
                 return (
@@ -2469,6 +2759,9 @@ function ReplayTab({
                     </td>
                     <td style={{ padding: "7px 4px", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(255,255,255,0.7)" }}>
                       {fmtScore(r.score)}
+                    </td>
+                    <td style={{ padding: "7px 4px", color: "rgba(255,255,255,0.5)" }}>
+                      {fmtDuration(r.duration_secs)}
                     </td>
                     <td style={{ padding: "7px 4px", color: "rgba(255,255,255,0.5)" }}>
                       {r.accuracy > 0 ? (r.accuracy * 100).toFixed(1) + "%" : "—"}
@@ -3025,6 +3318,7 @@ interface CoachingCardData {
   badgeColor: string;
   body: string;
   tip: string;
+  drills?: DrillRecommendation[];
 }
 
 function generateCoachingCards(
@@ -3274,10 +3568,21 @@ function generateCoachingCards(
     }
   }
 
-  return cards.slice(0, 7);
+  return cards
+    .map((card) => ({
+      ...card,
+      drills: drillRecommendationsForCard(card.title, scenarioType),
+    }))
+    .slice(0, 7);
 }
 
-function CoachingCard({ card }: { card: CoachingCardData }) {
+function CoachingCard({
+  card,
+  onExploreDrill,
+}: {
+  card: CoachingCardData;
+  onExploreDrill: (query: string) => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   return (
     <div
@@ -3374,6 +3679,37 @@ function CoachingCard({ card }: { card: CoachingCardData }) {
               {card.tip}
             </p>
           </div>
+          {(card.drills?.length ?? 0) > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+                Recommended drill searches
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {(card.drills ?? []).map((drill) => (
+                  <button
+                    key={`${card.title}:${drill.query}`}
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onExploreDrill(drill.query);
+                    }}
+                    style={{
+                      background: "rgba(255,255,255,0.05)",
+                      border: `1px solid ${C.border}`,
+                      borderRadius: 999,
+                      color: C.textSub,
+                      cursor: "pointer",
+                      fontSize: 11,
+                      padding: "6px 10px",
+                      fontFamily: "inherit",
+                    }}
+                  >
+                    {drill.label} ↗
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -3484,11 +3820,13 @@ function CoachingTab({
   sorted,
   warmupIds,
   sessionFilter,
+  onExploreDrill,
 }: {
   records: AnalyticsSessionRecord[];
   sorted: AnalyticsSessionRecord[];
   warmupIds: Set<string>;
   sessionFilter: SessionFilter;
+  onExploreDrill: (query: string) => void;
 }) {
   // CoachingTab always works on the full dataset and handles splits internally.
   const warmupSorted  = sorted.filter((r) => warmupIds.has(r.id));
@@ -3907,7 +4245,7 @@ function CoachingTab({
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <SectionTitle>Coaching Insights — click any card to expand</SectionTitle>
           {coachingCards.map((card, i) => (
-            <CoachingCard key={i} card={card} />
+            <CoachingCard key={i} card={card} onExploreDrill={onExploreDrill} />
           ))}
         </div>
       )}
@@ -3919,7 +4257,15 @@ function CoachingTab({
 
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
-function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionRecord[]; scenarioName: string }) {
+function ScenarioDetails({
+  records,
+  scenarioName,
+  onExploreDrill,
+}: {
+  records: AnalyticsSessionRecord[];
+  scenarioName: string;
+  onExploreDrill: (query: string) => void;
+}) {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
     return stored === "movement"
@@ -3934,6 +4280,7 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionFilter);
     return stored === "warmup" || stored === "warmedup" ? stored : "all";
   });
+  const [replayJumpId, setReplayJumpId] = useState<string | null>(null);
   const analysisRecords = useMemo(
     () => records.filter((record) => record.isReliableForAnalysis),
     [records],
@@ -4107,7 +4454,16 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
       </div>
 
       {activeTab === "overview" && (
-        <OverviewTab records={filteredRecords} sorted={filteredSorted} best={best} warmupIds={warmupIds} />
+        <OverviewTab
+          records={filteredRecords}
+          sorted={filteredSorted}
+          best={best}
+          warmupIds={warmupIds}
+          onJumpToReplay={(sessionId) => {
+            setReplayJumpId(sessionId);
+            setActiveTab("replay");
+          }}
+        />
       )}
       {activeTab === "movement" && <MovementTab records={filteredRecords} sorted={filteredSorted} />}
       {activeTab === "performance" && (
@@ -4119,10 +4475,17 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
           sorted={sorted}
           warmupIds={warmupIds}
           sessionFilter={sessionFilter}
+          onExploreDrill={onExploreDrill}
         />
       )}
       {activeTab === "replay" && (
-        <ReplayTab records={replayFilteredRecords} sorted={replayFilteredSorted} warmupIds={warmupIds} />
+        <ReplayTab
+          records={replayFilteredRecords}
+          sorted={replayFilteredSorted}
+          warmupIds={warmupIds}
+          requestedSelectedId={replayJumpId}
+          onRequestedSelectedIdHandled={() => setReplayJumpId(null)}
+        />
       )}
       {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
         </>
@@ -4155,6 +4518,16 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioSort);
     return stored === "plays" || stored === "type" ? stored : "recent";
   });
+  const [dateRange, setDateRange] = useState<DateRangePreset>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.dateRange);
+    return stored === "30d" || stored === "90d" || stored === "365d" ? stored : "all";
+  });
+  const [compareScenario, setCompareScenario] = useState<string | null>(
+    () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.compareScenario),
+  );
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [pendingClear, setPendingClear] = useState<{ records: SessionRecord[]; selectedScenario: string | null } | null>(null);
+  const [leaderboardSeedQuery, setLeaderboardSeedQuery] = useState<string | null>(null);
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
 
@@ -4162,20 +4535,36 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedScenario;
   const searchInputRef = useRef<HTMLInputElement>(null);
-  const analyticsRecords = useMemo(() => buildAnalyticsRecords(records), [records]);
+  const clearTimerRef = useRef<number | null>(null);
+  const visibleRecords = useMemo(
+    () => records.filter((record) => withinDateRange(record.timestamp, dateRange)),
+    [dateRange, records],
+  );
+  const analyticsRecords = useMemo(() => buildAnalyticsRecords(visibleRecords), [visibleRecords]);
   const flaggedRecordCount = useMemo(
     () => analyticsRecords.filter((record) => !record.isReliableForAnalysis).length,
     [analyticsRecords],
   );
   const totalPlaySeconds = useMemo(
-    () => records.reduce((sum, r) => sum + (r.duration_secs ?? 0), 0),
-    [records],
+    () => visibleRecords.reduce((sum, r) => sum + (r.duration_secs ?? 0), 0),
+    [visibleRecords],
   );
 
   // "/" shortcut to focus search
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement).tagName)) {
+      const tagName = (e.target as HTMLElement)?.tagName ?? "";
+      const inField = ["INPUT", "TEXTAREA", "SELECT"].includes(tagName);
+      if (!inField && e.shiftKey && e.key === "?") {
+        e.preventDefault();
+        setHelpOpen(true);
+        return;
+      }
+      if (e.key === "Escape") {
+        setHelpOpen(false);
+        return;
+      }
+      if (e.key === "/" && !e.shiftKey && !inField) {
         e.preventDefault();
         searchInputRef.current?.focus();
       }
@@ -4257,6 +4646,14 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   }, [scenarioSort]);
 
   useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.dateRange, dateRange === "all" ? null : dateRange);
+  }, [dateRange]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.compareScenario, compareScenario);
+  }, [compareScenario]);
+
+  useEffect(() => {
     loadHistory(false);
     let lastBridgeRefresh = 0;
     const maybeRefreshHistory = (force = false) => {
@@ -4285,18 +4682,36 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     });
 
     // Keep a tiny live snapshot so Session Stats isn't empty while no run is persisted yet.
+    const unlistenStatsPanel = listen<StatsPanelReading>("stats-panel-update", (event) => {
+      const payload = event.payload;
+      setLiveBridgeStats((prev) => {
+        const next = {
+          ...prev,
+          pull_shots_fired_total: payload.accuracy_shots ?? prev.pull_shots_fired_total,
+          pull_shots_hit_total: payload.accuracy_hits ?? prev.pull_shots_hit_total,
+          pull_kills_total: payload.kills ?? prev.pull_kills_total,
+          pull_score_per_minute: payload.spm ?? prev.pull_score_per_minute,
+          pull_score_total_derived: payload.score_total_derived ?? prev.pull_score_total_derived,
+          pull_score_total: payload.score_total ?? prev.pull_score_total,
+          pull_damage_done: payload.damage_dealt ?? prev.pull_damage_done,
+          pull_damage_possible: payload.damage_total ?? prev.pull_damage_possible,
+          pull_damage_efficiency:
+            payload.damage_dealt != null
+            && payload.damage_total != null
+            && payload.damage_total > 0
+              ? payload.damage_dealt / payload.damage_total
+              : prev.pull_damage_efficiency,
+          pull_kills_per_second: payload.kps ?? prev.pull_kills_per_second,
+          pull_seconds_total: payload.session_time_secs ?? prev.pull_seconds_total,
+        };
+        return next;
+      });
+    });
+
     const unlistenBridgeMetric = listen<BridgeParsedEvent>("bridge-metric", (event) => {
       const ev = String(event.payload?.ev ?? "");
-      const value = event.payload?.value;
       const delta = event.payload?.delta;
       if (!ev) return;
-
-      if (ev.startsWith("pull_") && typeof value === "number" && Number.isFinite(value)) {
-        setLiveBridgeStats((prev) => {
-          if (prev[ev] === value) return prev;
-          return { ...prev, [ev]: value };
-        });
-      }
 
       if (
         ev === "shot_fired" ||
@@ -4322,19 +4737,52 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     return () => {
       unlistenComplete.then((fn) => fn());
       unlistenBridgeParsed.then((fn) => fn());
+      unlistenStatsPanel.then((fn) => fn());
       unlistenBridgeMetric.then((fn) => fn());
     };
   }, []);
 
   async function handleClear() {
+    if (pendingClear) return;
     if (!confirmClear) {
       setConfirmClear(true);
       return;
     }
-    await invoke("clear_session_history");
+    setConfirmClear(false);
+    setPendingClear({ records, selectedScenario });
     setRecords([]);
     setSelectedScenario(null);
-    setConfirmClear(false);
+    if (clearTimerRef.current != null) window.clearTimeout(clearTimerRef.current);
+    clearTimerRef.current = window.setTimeout(() => {
+      void invoke("clear_session_history")
+        .then(() => setImportStatus("Session history cleared."))
+        .catch((error) => {
+          setImportStatus(String(error));
+          setPendingClear((snapshot) => {
+            if (snapshot) {
+              setRecords(snapshot.records);
+              setSelectedScenario(snapshot.selectedScenario);
+            }
+            return null;
+          });
+        })
+        .finally(() => {
+          clearTimerRef.current = null;
+          setPendingClear(null);
+        });
+    }, 5000);
+  }
+
+  function handleUndoClear() {
+    if (!pendingClear) return;
+    if (clearTimerRef.current != null) {
+      window.clearTimeout(clearTimerRef.current);
+      clearTimerRef.current = null;
+    }
+    setRecords(pendingClear.records);
+    setSelectedScenario(pendingClear.selectedScenario);
+    setPendingClear(null);
+    setImportStatus("Clear canceled.");
   }
 
   async function handleImportHistory() {
@@ -4361,6 +4809,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       setImportingHistory(false);
     }
   }
+
+  useEffect(() => () => {
+    if (clearTimerRef.current != null) {
+      window.clearTimeout(clearTimerRef.current);
+    }
+  }, []);
 
   const scenarioGroups = useMemo(() => {
     const q = search.toLowerCase();
@@ -4468,10 +4922,39 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     () => scenarioGroups.find((g) => g.name === selectedScenario) ?? null,
     [scenarioGroups, selectedScenario],
   );
+  const compareRecords = useMemo(
+    () => analyticsRecords.filter((record) => record.normalizedScenario === compareScenario),
+    [analyticsRecords, compareScenario],
+  );
+  const compareSummary = useMemo(
+    () => summarizeScenario(compareRecords),
+    [compareRecords],
+  );
+  const selectedSummary = useMemo(
+    () => summarizeScenario(selectedRecords),
+    [selectedRecords],
+  );
+
+  useEffect(() => {
+    if (selectedScenario && scenarioGroups.some((group) => group.name === selectedScenario)) return;
+    if (scenarioGroups.length > 0) {
+      setSelectedScenario(scenarioGroups[0].name);
+      return;
+    }
+    setSelectedScenario(null);
+  }, [scenarioGroups, selectedScenario]);
+
+  useEffect(() => {
+    if (!compareScenario) return;
+    if (compareScenario === selectedScenario || !scenarioGroups.some((group) => group.name === compareScenario)) {
+      setCompareScenario(null);
+    }
+  }, [compareScenario, scenarioGroups, selectedScenario]);
 
   return (
     <div
       style={{
+        position: "relative",
         display: "flex",
         flexDirection: "column",
         height: embedded ? "100%" : "100vh",
@@ -4518,6 +5001,23 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             </button>
           );
         })}
+        <button
+          type="button"
+          onClick={() => setHelpOpen(true)}
+          style={{
+            marginLeft: "auto",
+            background: "none",
+            border: "none",
+            color: C.textFaint,
+            cursor: "pointer",
+            fontFamily: "inherit",
+            fontSize: 12,
+            padding: "12px 0 12px 18px",
+          }}
+          title="Shortcuts (?)"
+        >
+          ? Shortcuts
+        </button>
       </div>
 
       {/* ── Sessions content ── */}
@@ -4598,6 +5098,35 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               <option value="type">Scenario Type</option>
             </select>
           </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
+            <span
+              style={{
+                fontSize: 9,
+                color: C.textFaint,
+                textTransform: "uppercase",
+                letterSpacing: "0.1em",
+                fontWeight: 600,
+                whiteSpace: "nowrap",
+              }}
+            >
+              Range
+            </span>
+            <select
+              value={dateRange}
+              onChange={(e) => setDateRange(e.target.value as DateRangePreset)}
+              className="am-input"
+              style={{
+                flex: 1,
+                boxSizing: "border-box",
+                padding: "5px 8px",
+              }}
+            >
+              <option value="all">All time</option>
+              <option value="30d">Last 30 days</option>
+              <option value="90d">Last 90 days</option>
+              <option value="365d">Last year</option>
+            </select>
+          </div>
         </div>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
@@ -4618,7 +5147,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             >
               {records.length === 0
                 ? "No sessions recorded yet. Sessions are saved automatically when you finish a run."
-                : "No matches."}
+                : visibleRecords.length === 0
+                  ? "No sessions in this date range yet."
+                  : "No matches."}
             </div>
           ) : (
             scenarioGroups.map((g) => {
@@ -4711,7 +5242,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             }}
           >
             <span style={{ fontSize: 10, color: C.textFaint }}>
-              {records.length} sessions
+              {visibleRecords.length} session{visibleRecords.length === 1 ? "" : "s"}
+              {dateRange !== "all" && records.length !== visibleRecords.length ? ` of ${records.length}` : ""}
               {totalPlaySeconds > 0 && ` · ${formatPlayTime(totalPlaySeconds)}`}
               {flaggedRecordCount > 0 && ` · ${flaggedRecordCount} flagged`}
             </span>
@@ -4726,14 +5258,38 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               </Btn>
               <Btn
                 size="xs"
-                variant={confirmClear ? "danger" : "ghost"}
+                variant={confirmClear || pendingClear ? "danger" : "ghost"}
                 onClick={handleClear}
-                onBlur={() => setConfirmClear(false)}
+                onBlur={() => {
+                  if (!pendingClear) setConfirmClear(false);
+                }}
+                disabled={pendingClear != null}
               >
-                {confirmClear ? "Confirm clear" : "Clear"}
+                {pendingClear ? "Pending clear…" : confirmClear ? "Confirm clear" : "Clear"}
               </Btn>
             </div>
           </div>
+          {pendingClear && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 8,
+                padding: "8px 10px",
+                borderRadius: 10,
+                background: `${C.warn}14`,
+                border: `1px solid ${C.warn}40`,
+                color: C.textSub,
+                fontSize: 10,
+              }}
+            >
+              <span>Session history will be cleared in a few seconds.</span>
+              <Btn size="xs" variant="ghost" onClick={handleUndoClear}>
+                Undo
+              </Btn>
+            </div>
+          )}
           {importStatus && (
             <div style={{ fontSize: 10, color: C.textFaint, lineHeight: 1.5 }}>
               {importStatus}
@@ -4769,7 +5325,49 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                 </div>
               )}
             </div>
-            <ScenarioDetails records={selectedRecords} scenarioName={selectedScenario!} />
+            <div style={{ ...CHART_STYLE, marginBottom: 20 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                <div>
+                  <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+                    Compare scenarios
+                  </div>
+                  <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+                    Put your current scenario next to another one to compare score ceiling, accuracy, and play volume.
+                  </div>
+                </div>
+                <select
+                  value={compareScenario ?? ""}
+                  onChange={(event) => setCompareScenario(event.target.value || null)}
+                  className="am-input"
+                  style={{ minWidth: 260, boxSizing: "border-box", padding: "7px 10px" }}
+                >
+                  <option value="">No comparison</option>
+                  {scenarioGroups
+                    .filter((group) => group.name !== selectedScenario)
+                    .map((group) => (
+                      <option key={group.name} value={group.name}>
+                        {group.name}
+                      </option>
+                    ))}
+                </select>
+              </div>
+              {selectedSummary && compareSummary && compareScenario && (
+                <ScenarioComparisonCard
+                  leftLabel={selectedScenario}
+                  left={selectedSummary}
+                  rightLabel={compareScenario}
+                  right={compareSummary}
+                />
+              )}
+            </div>
+            <ScenarioDetails
+              records={selectedRecords}
+              scenarioName={selectedScenario!}
+              onExploreDrill={(query) => {
+                setLeaderboardSeedQuery(query);
+                setRootMode("leaderboards");
+              }}
+            />
           </>
         ) : (
           <div
@@ -4783,11 +5381,66 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               gap: 12,
             }}
           >
-            <div>
-              {records.length === 0
-                ? "Play a session to start recording stats."
-                : "Select a scenario from the sidebar."}
-            </div>
+            {records.length === 0 ? (
+              <div
+                style={{
+                  width: "min(720px, 100%)",
+                  background: "rgba(255,255,255,0.03)",
+                  border: `1px solid ${C.border}`,
+                  borderRadius: 16,
+                  padding: "22px 24px",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 18,
+                }}
+              >
+                <div>
+                  <div style={{ fontSize: 11, color: C.accent, textTransform: "uppercase", letterSpacing: "0.12em", fontWeight: 700 }}>
+                    First run setup
+                  </div>
+                  <div style={{ marginTop: 6, fontSize: 22, color: C.text, fontWeight: 700 }}>
+                    Session Stats comes alive after your first run.
+                  </div>
+                  <div style={{ marginTop: 8, fontSize: 13, color: C.textSub, lineHeight: 1.7 }}>
+                    Once a session is recorded, this view will group scenarios, chart progress, surface coaching patterns, and let you inspect saved replays.
+                  </div>
+                </div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
+                  {[
+                    { title: "1. Play a run", detail: "Finish any KovaaK's scenario once. AimMod saves the result automatically." },
+                    { title: "2. Or import history", detail: "Pull existing CSV session files from your stats folder if you already have prior runs." },
+                    { title: "3. Use shortcuts", detail: "Press `?` any time for keyboard help, or `/` to jump into search once history exists." },
+                  ].map((step) => (
+                    <div
+                      key={step.title}
+                      style={{
+                        background: "rgba(255,255,255,0.025)",
+                        border: `1px solid ${C.borderSub}`,
+                        borderRadius: 12,
+                        padding: "14px 14px 12px",
+                      }}
+                    >
+                      <div style={{ color: C.text, fontSize: 13, fontWeight: 700, marginBottom: 6 }}>{step.title}</div>
+                      <div style={{ color: C.textFaint, fontSize: 12, lineHeight: 1.6 }}>{step.detail}</div>
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <Btn size="sm" variant="primary" onClick={handleImportHistory} disabled={importingHistory}>
+                    {importingHistory ? "Importing…" : "Import CSV History"}
+                  </Btn>
+                  <Btn size="sm" variant="ghost" onClick={() => setHelpOpen(true)}>
+                    Open Shortcuts
+                  </Btn>
+                </div>
+              </div>
+            ) : (
+              <div>
+                {visibleRecords.length === 0
+                  ? "No sessions in this date range. Try widening the range."
+                  : "Select a scenario from the sidebar."}
+              </div>
+            )}
             {records.length === 0 &&
               (Object.keys(liveBridgeStats).length > 0 || Object.keys(liveBridgeEventCounts).length > 0) && (
               <div
@@ -4858,7 +5511,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       {/* ── Leaderboards content ── */}
       {rootMode === "leaderboards" && (
         <div style={{ flex: 1, overflow: "hidden" }}>
-          <LeaderboardBrowser />
+          <LeaderboardBrowser seedQuery={leaderboardSeedQuery} />
         </div>
       )}
 
@@ -4868,6 +5521,37 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           <DebugTab />
         </div>
       )}
+
+      <ShortcutHelpModal
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="Session Stats Shortcuts"
+        note="Use `?` from anywhere in this window. Replay rows and recent-run rows open the selected replay directly when replay data exists."
+        groups={[
+          {
+            title: "Navigation",
+            items: [
+              { keys: "?", action: "Open this shortcuts panel" },
+              { keys: "/", action: "Focus scenario search" },
+              { keys: "Esc", action: "Close the shortcuts panel" },
+            ],
+          },
+          {
+            title: "History",
+            items: [
+              { keys: "30d", action: "Use the new date-range filter to focus on recent progress", detail: "Switch between All time, 30 days, 90 days, and 1 year from the sidebar." },
+              { keys: "Replay", action: "Click a replayable recent-run row to jump straight into Replay", detail: "Rows with saved replay data show an Open action." },
+            ],
+          },
+          {
+            title: "Coaching",
+            items: [
+              { keys: "Compare", action: "Compare the selected scenario against another one side-by-side" },
+              { keys: "Drills", action: "Use coaching drill search buttons to jump into related drill lookups" },
+            ],
+          },
+        ]}
+      />
     </div>
   );
 }

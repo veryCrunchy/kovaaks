@@ -603,6 +603,9 @@ export function DraggableHUD({
     anchorPosRef.current = normalized;
   }, [normalizePos, persistPos, presetNonce, presetPosition, scale, snapPosIfNeeded]);
 
+  const gridColumn = snapGridSize ? Math.round(pos.x / snapGridSize) : null;
+  const gridRow = snapGridSize ? Math.round(pos.y / snapGridSize) : null;
+
   return (
     <div
       ref={rootRef}
@@ -627,7 +630,8 @@ export function DraggableHUD({
         outline: layoutMode ? `2px dashed ${C.accent}99` : "none",
         outlineOffset: 6,
         borderRadius: layoutMode ? 8 : 0,
-        transition: "outline 0.15s",
+        boxShadow: layoutMode && isDragging.current ? `0 0 0 1px ${C.accentBorder}, 0 0 28px rgba(0,245,160,0.18)` : "none",
+        transition: "outline 0.15s, box-shadow 0.15s",
       }}
     >
       {layoutMode && (
@@ -654,6 +658,47 @@ export function DraggableHUD({
             </span>
             <ScaleBtn label="+" onClick={(e) => { e.stopPropagation(); applyScale(scale + SCALE_STEP); }} />
           </div>
+        </div>
+      )}
+      {layoutMode && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            bottom: -24,
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            pointerEvents: "none",
+            fontFamily: "'JetBrains Mono', monospace",
+          }}
+        >
+          <span
+            style={{
+              fontSize: 9,
+              color: C.textSub,
+              background: "rgba(8,12,20,0.86)",
+              border: `1px solid ${C.border}`,
+              borderRadius: 999,
+              padding: "3px 7px",
+            }}
+          >
+            {Math.round(pos.x)}, {Math.round(pos.y)}
+          </span>
+          {snapGridSize && (
+            <span
+              style={{
+                fontSize: 9,
+                color: C.accent,
+                background: `${C.accent}14`,
+                border: `1px solid ${C.accentBorder}`,
+                borderRadius: 999,
+                padding: "3px 7px",
+              }}
+            >
+              snap {snapGridSize}px · {gridColumn},{gridRow}
+            </span>
+          )}
         </div>
       )}
       {children}

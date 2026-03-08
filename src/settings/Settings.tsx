@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, MonitorInfo } from "../types/settings";
 import type { FriendProfile } from "../types/friends";
@@ -36,17 +36,28 @@ const LOADING_PLACEHOLDER = (
 
 export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [loadedSettings, setLoadedSettings] = useState<AppSettings | null>(null);
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [saving, setSaving]       = useState(false);
   const [saved, setSaved]         = useState(false);
   const [error, setError]         = useState<string | null>(null);
+  const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
   const { status: updateStatus, checkForUpdate, installUpdate } = useUpdater();
 
   useEffect(() => {
     invoke<AppSettings>("get_settings")
-      .then(setSettings)
+      .then((loaded) => {
+        setSettings(loaded);
+        setLoadedSettings(loaded);
+      })
       .catch((e) => setError(String(e)));
   }, []);
+
+  const dirty = useMemo(() => {
+    if (!settings || !loadedSettings) return false;
+    return JSON.stringify(settings) !== JSON.stringify(loadedSettings);
+  }, [loadedSettings, settings]);
 
   const handleSave = useCallback(async () => {
     if (!settings) return;
@@ -54,7 +65,9 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
     setError(null);
     try {
       await invoke("save_settings", { newSettings: settings });
+      setLoadedSettings(settings);
       setSaved(true);
+      setLastSavedAt(new Date());
       setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(String(e));
@@ -62,6 +75,35 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
       setSaving(false);
     }
   }, [settings]);
+
+  const handleReset = useCallback(async () => {
+    if (!confirmReset) {
+      setConfirmReset(true);
+      window.setTimeout(() => setConfirmReset(false), 3000);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const defaults = await invoke<AppSettings>("reset_settings");
+      setSettings(defaults);
+      setLoadedSettings(defaults);
+      setConfirmReset(false);
+      setSaved(true);
+      setLastSavedAt(new Date());
+      setTimeout(() => setSaved(false), 2000);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }, [confirmReset]);
+
+  const handleRevert = useCallback(() => {
+    if (!loadedSettings) return;
+    setSettings(loadedSettings);
+    setError(null);
+  }, [loadedSettings]);
 
   if (!settings) {
     return (
@@ -219,9 +261,14 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
             settings={settings}
             onChange={setSettings}
             onSave={handleSave}
+            onReset={handleReset}
+            onRevert={handleRevert}
             saving={saving}
             saved={saved}
             error={error}
+            dirty={dirty}
+            lastSavedAt={lastSavedAt}
+            confirmReset={confirmReset}
           />
         )}
         {activeTab === "friends" && <FriendManager settings={settings} onChange={setSettings} />}
@@ -248,12 +295,29 @@ interface GeneralSettingsProps {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onSave: () => void;
+  onReset: () => void;
+  onRevert: () => void;
   saving: boolean;
   saved: boolean;
   error: string | null;
+  dirty: boolean;
+  lastSavedAt: Date | null;
+  confirmReset: boolean;
 }
 
-function GeneralSettings({ settings, onChange, onSave, saving, saved, error }: GeneralSettingsProps) {
+function GeneralSettings({
+  settings,
+  onChange,
+  onSave,
+  onReset,
+  onRevert,
+  saving,
+  saved,
+  error,
+  dirty,
+  lastSavedAt,
+  confirmReset,
+}: GeneralSettingsProps) {
   const [monitors,      setMonitors]      = useState<MonitorInfo[]>([]);
   const [detectingUser, setDetectingUser] = useState(false);
   const [detectError,   setDetectError]   = useState<string | null>(null);
@@ -290,6 +354,30 @@ function GeneralSettings({ settings, onChange, onSave, saving, saved, error }: G
 
   return (
     <div style={{ padding: "28px 32px", maxWidth: 640 }}>
+      <div
+        style={{
+          marginBottom: 18,
+          padding: "12px 14px",
+          borderRadius: 12,
+          background: dirty ? `${C.warn}10` : `${C.accent}10`,
+          border: `1px solid ${dirty ? `${C.warn}40` : C.accentBorder}`,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: dirty ? C.warn : C.accent }}>
+              {dirty ? "Unsaved changes" : "Ready"}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              Changes apply when you save. Settings in this panel do not require an app restart.
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: C.textFaint, whiteSpace: "nowrap" }}>
+            {lastSavedAt ? `Last saved ${lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Not saved in this session"}
+          </div>
+        </div>
+      </div>
+
       <h1
         style={{
           fontSize:      16,
@@ -383,6 +471,9 @@ function GeneralSettings({ settings, onChange, onSave, saving, saved, error }: G
             onChange={(e) => update("stats_dir", e.target.value)}
             className="am-input w-full font-mono"
           />
+          <p className="text-xs mt-2" style={{ color: C.textFaint }}>
+            Saving restarts the CSV watcher immediately so new sessions import from the updated folder.
+          </p>
         </FieldGroup>
 
         {/* ── Mouse DPI ─────────────────────────────────────────────── */}
@@ -491,6 +582,31 @@ function GeneralSettings({ settings, onChange, onSave, saving, saved, error }: G
         {/* ── HUD visibility ────────────────────────────────────────── */}
         <FieldGroup label="Visible HUDs" description="Show or hide individual overlay elements">
           <GlassCard style={{ padding: "12px 14px" }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+              {(
+                [
+                  ["VS Mode", settings.hud_vsmode_visible],
+                  ["Smoothness", settings.hud_smoothness_visible],
+                  ["Stats", settings.hud_stats_visible],
+                  ["Coaching", settings.hud_feedback_visible],
+                  ["Post-session", settings.hud_post_session_visible],
+                ] as const
+              ).map(([label, enabled]) => (
+                <span
+                  key={label}
+                  style={{
+                    fontSize: 10,
+                    padding: "4px 8px",
+                    borderRadius: 999,
+                    background: enabled ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                    border: `1px solid ${enabled ? C.accentBorder : C.borderSub}`,
+                    color: enabled ? C.accent : C.textFaint,
+                  }}
+                >
+                  {label} {enabled ? "on" : "off"}
+                </span>
+              ))}
+            </div>
             <div className="flex flex-col gap-3">
               {(
                 [
@@ -520,12 +636,28 @@ function GeneralSettings({ settings, onChange, onSave, saving, saved, error }: G
         style={{ borderTop: `1px solid ${C.borderSub}` }}
       >
         <Btn
+          variant="ghost"
+          size="md"
+          onClick={onRevert}
+          disabled={!dirty || saving}
+        >
+          Revert
+        </Btn>
+        <Btn
           variant={saved ? "accent" : "primary"}
           size="md"
           onClick={onSave}
+          disabled={saving || !dirty}
+        >
+          {saving ? "Saving…" : saved ? "✓ Saved" : dirty ? "Save Settings" : "Saved"}
+        </Btn>
+        <Btn
+          variant={confirmReset ? "danger" : "ghost"}
+          size="md"
+          onClick={onReset}
           disabled={saving}
         >
-          {saving ? "Saving…" : saved ? "✓ Saved" : "Save Settings"}
+          {confirmReset ? "Confirm reset" : "Reset defaults"}
         </Btn>
         {error && <span className="text-sm" style={{ color: C.danger }}>{error}</span>}
       </div>

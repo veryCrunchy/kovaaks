@@ -117,7 +117,7 @@ async function resolveScenarioByName(name: string): Promise<ScenarioSearchResult
 
 // ─── Main component ────────────────────────────────────────────────────────────
 
-export function LeaderboardBrowser() {
+export function LeaderboardBrowser({ seedQuery }: { seedQuery?: string | null } = {}) {
   const [query, setQuery] = useState("");
   const [scenarioPage, setScenarioPage] = useState<ScenarioPage | null>(null);
   const [scenarioPageNum, setScenarioPageNum] = useState(0);
@@ -165,6 +165,13 @@ export function LeaderboardBrowser() {
   useEffect(() => {
     if (query) runSearch(query, 0);
   }, [])  // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const trimmed = seedQuery?.trim();
+    if (!trimmed) return;
+    setQuery(trimmed);
+    runSearch(trimmed, 0);
+  }, [runSearch, seedQuery]);
 
   function handleSearch(value: string) {
     setQuery(value);

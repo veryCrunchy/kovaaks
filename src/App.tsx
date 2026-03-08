@@ -11,6 +11,7 @@ import { PostSessionOverview } from "./overlay/PostSessionOverview";
 import { BridgeStateDebugHUD } from "./overlay/BridgeStateDebugHUD";
 import type { StatsPanelReading } from "./types/overlay";
 import type { AppSettings } from "./types/settings";
+import { ShortcutHelpModal } from "./components/ShortcutHelpModal";
 import "./index.css";
 
 // Heavy components — only loaded on demand
@@ -278,6 +279,7 @@ export default function App() {
   const [gridSize, setGridSize] = useState<number>(HUD_GRID_DEFAULT);
   const [presetNonce, setPresetNonce] = useState<number>(0);
   const [presetTargets, setPresetTargets] = useState<HudPresetTargets | null>(null);
+  const [helpOpen, setHelpOpen] = useState(false);
   const [debugHudVisible, setDebugHudVisible] = useState<boolean>(() => {
     try {
       return localStorage.getItem("hud-debug-state-visible") === "1";
@@ -337,6 +339,26 @@ export default function App() {
       });
     });
     return () => { unlisten.then(fn => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const tagName = (event.target as HTMLElement)?.tagName ?? "";
+      const inField = ["INPUT", "TEXTAREA", "SELECT"].includes(tagName);
+      if (!inField && event.shiftKey && event.key === "?") {
+        event.preventDefault();
+        setHelpOpen(true);
+        return;
+      }
+      if (event.key === "Escape") {
+        setHelpOpen(false);
+      }
+    };
+
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
   useEffect(() => {
@@ -481,7 +503,7 @@ export default function App() {
   return (
     <div
       className="fixed inset-0 select-none"
-      style={{ background: "transparent", pointerEvents: mode === "overlay" ? "none" : "auto" }}
+      style={{ background: "transparent", pointerEvents: mode === "overlay" && !helpOpen ? "none" : "auto" }}
     >
       {/* DEV: corner dot to confirm overlay is active */}
       {import.meta.env.DEV && (
@@ -670,6 +692,24 @@ export default function App() {
           </div>
           <div style={{ width: 1, height: 16, background: C.border }} />
           <button
+            type="button"
+            onClick={() => setHelpOpen(true)}
+            style={{
+              background: "rgba(255,255,255,0.07)",
+              border: `1px solid ${C.border}`,
+              borderRadius: 5,
+              color: C.textSub,
+              cursor: "pointer",
+              fontSize: 10,
+              padding: "3px 9px",
+              fontFamily: "'JetBrains Mono', monospace",
+              fontWeight: 500,
+            }}
+          >
+            Help
+          </button>
+          <div style={{ width: 1, height: 16, background: C.border }} />
+          <button
             onClick={() => setMode(returnMode)}
             style={{
               background: C.accent,
@@ -717,6 +757,37 @@ export default function App() {
           </div>
         </Suspense>
       )}
+
+      <ShortcutHelpModal
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        title="AimMod Overlay Shortcuts"
+        note="Layout mode can already be toggled with `F10`; this panel makes the shortcut discoverable inside the app."
+        groups={[
+          {
+            title: "Overlay",
+            items: [
+              { keys: "F8", action: "Open or close Settings" },
+              { keys: "F10", action: "Toggle HUD layout mode", detail: "Use this even when the tray is closed." },
+              { keys: "?", action: "Open this shortcuts panel" },
+            ],
+          },
+          {
+            title: "Layout Mode",
+            items: [
+              { keys: "Drag", action: "Move a HUD" },
+              { keys: "Wheel", action: "Resize the hovered HUD" },
+              { keys: "Grid", action: "Turn on snap grid and preset layouts from the floating toolbar" },
+            ],
+          },
+          {
+            title: "General",
+            items: [
+              { keys: "Esc", action: "Close the shortcuts panel" },
+            ],
+          },
+        ]}
+      />
     </div>
   );
 }

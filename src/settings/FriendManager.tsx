@@ -110,6 +110,8 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
+  const [pendingRemoval, setPendingRemoval] = useState<{ friend: FriendProfile; wasSelected: boolean } | null>(null);
+  const pendingRemovalTimerRef = useRef<number | null>(null);
 
   // Detect the active Steam user on mount so we can show the import button.
   useEffect(() => {
@@ -130,6 +132,30 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     setSuccess(msg);
     setTimeout(() => setSuccess(null), 3000);
   };
+
+  const clearPendingRemovalTimer = useCallback(() => {
+    if (pendingRemovalTimerRef.current != null) {
+      window.clearTimeout(pendingRemovalTimerRef.current);
+      pendingRemovalTimerRef.current = null;
+    }
+  }, []);
+
+  const commitPendingRemoval = useCallback(async (entry: { friend: FriendProfile; wasSelected: boolean }) => {
+    clearPendingRemovalTimer();
+    setPendingRemoval(null);
+    try {
+      const friend = entry.friend;
+      await invoke("remove_friend", { username: friend.username });
+      if (entry.wasSelected || selectedOpponent === friend.username) {
+        await invoke("set_selected_friend", { username: null });
+        setSelectedOpponent(null);
+        onChange({ ...settings, selected_friend: null, friends: friends.filter((f) => f.username !== friend.username) });
+      }
+      showSuccess(`Removed ${friend.steam_account_name || friend.username}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [clearPendingRemovalTimer, friends, onChange, selectedOpponent, settings]);
 
   const handleAdd = useCallback(async () => {
     const trimmed = input.trim();
@@ -154,16 +180,28 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
 
   const handleRemove = useCallback(
     async (username: string) => {
-      try {
-        await invoke("remove_friend", { username });
-        updateFriends(friends.filter((f) => f.username !== username));
-        showSuccess(`Removed ${username}`);
-        if (expanded === username) setExpanded(null);
-      } catch (e) {
-        setError(String(e));
+      const friend = friends.find((entry) => entry.username === username);
+      if (!friend) return;
+
+      if (pendingRemoval && pendingRemoval.friend.username !== username) {
+        await commitPendingRemoval(pendingRemoval);
       }
+
+      clearPendingRemovalTimer();
+      setPendingRemoval({ friend, wasSelected: selectedOpponent === username });
+      updateFriends(friends.filter((f) => f.username !== username));
+      if (selectedOpponent === username) {
+        setSelectedOpponent(null);
+        onChange({ ...settings, selected_friend: null, friends: friends.filter((f) => f.username !== username) });
+      }
+      if (expanded === username) setExpanded(null);
+      setError(null);
+      setSuccess(null);
+      pendingRemovalTimerRef.current = window.setTimeout(() => {
+        void commitPendingRemoval({ friend, wasSelected: selectedOpponent === username });
+      }, 5000);
     },
-    [friends, updateFriends, expanded]
+    [clearPendingRemovalTimer, commitPendingRemoval, expanded, friends, onChange, pendingRemoval, selectedOpponent, settings, updateFriends]
   );
 
   const handleSetOpponent = useCallback(
@@ -215,6 +253,22 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
   const toggleExpand = (username: string) => {
     setExpanded((prev) => (prev === username ? null : username));
   };
+
+  const handleUndoRemove = useCallback(() => {
+    if (!pendingRemoval) return;
+    clearPendingRemovalTimer();
+    const nextFriends = [...friends, pendingRemoval.friend]
+      .sort((a, b) => (a.steam_account_name || a.username).localeCompare(b.steam_account_name || b.username));
+    updateFriends(nextFriends);
+    setPendingRemoval(null);
+    if (pendingRemoval.wasSelected) {
+      setSelectedOpponent(pendingRemoval.friend.username);
+      onChange({ ...settings, selected_friend: pendingRemoval.friend.username, friends: nextFriends });
+    }
+    showSuccess(`Kept ${pendingRemoval.friend.steam_account_name || pendingRemoval.friend.username}`);
+  }, [clearPendingRemovalTimer, friends, onChange, pendingRemoval, settings, updateFriends]);
+
+  useEffect(() => () => clearPendingRemovalTimer(), [clearPendingRemovalTimer]);
 
   return (
     <div className="p-8 max-w-2xl" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -350,6 +404,34 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           }}
         >
           {success}
+        </div>
+      )}
+      {pendingRemoval && (
+        <div
+          className="mb-4 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-3"
+          style={{
+            background: `${C.warn}14`,
+            border: `1px solid ${C.warn}40`,
+            color: C.textSub,
+          }}
+        >
+          <span>
+            {pendingRemoval.friend.steam_account_name || pendingRemoval.friend.username} will be removed in a few seconds.
+          </span>
+          <button
+            type="button"
+            onClick={handleUndoRemove}
+            className="px-3 py-1 rounded-lg text-xs font-semibold"
+            style={{
+              background: `${C.warn}24`,
+              border: `1px solid ${C.warn}55`,
+              color: C.warn,
+              cursor: "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            Undo
+          </button>
         </div>
       )}
 
@@ -490,4 +572,3 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     </div>
   );
 }
-

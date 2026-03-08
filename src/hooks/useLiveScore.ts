@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import type { StatsPanelReading } from "../types/overlay";
 import type { SessionResult } from "../types/overlay";
 
-const BRIDGE_METRIC_EVENT = "bridge-metric";
 const SESSION_COMPLETE_EVENT = "session-complete";
 const SESSION_START_EVENT = "session-start";
 const SESSION_END_EVENT = "session-end";
+const STATS_PANEL_EVENT = "stats-panel-update";
 const SCORE_TOTAL_STALE_MS = 1500;
 const DERIVED_SCORE_FRESH_MS = 3000;
 const SESSION_ACTIVITY_STALE_MS = 12_000;
@@ -20,14 +21,6 @@ function hasAuthoritativeActiveContext(
   gameStateCode: number | null | undefined,
 ): boolean {
   return isInScenario || isInChallenge || gameStateImpliesActive(gameStateCode);
-}
-
-interface BridgeMetricPayload {
-  ev: string;
-  value?: number | null;
-  field?: string | null;
-  ts_ms?: number | null;
-  seq?: number | null;
 }
 
 export interface UseLiveScoreReturn {
@@ -54,9 +47,6 @@ export function useLiveScore(): UseLiveScoreReturn {
   const isInScenario = useRef(false);
   const isInChallenge = useRef(false);
   const activeGameStateCode = useRef<number | null>(null);
-  const lastStateSeq = useRef<number>(0);
-  const lastStateTsMs = useRef<number>(0);
-
   const sessionStartTime = useRef<number>(0); // ms timestamp; 0 = no active session
 
   const clearSessionState = () => {
@@ -77,30 +67,6 @@ export function useLiveScore(): UseLiveScoreReturn {
       inactivityTimer.current = null;
     }
     stopElapsedTicker();
-  };
-
-  const shouldIgnoreStaleStateEvent = (payload: BridgeMetricPayload) => {
-    const seq = payload.seq;
-    if (seq != null && Number.isFinite(seq)) {
-      if (seq <= lastStateSeq.current) {
-        return true;
-      }
-      lastStateSeq.current = seq;
-      if (payload.ts_ms != null && Number.isFinite(payload.ts_ms)) {
-        lastStateTsMs.current = Math.max(lastStateTsMs.current, payload.ts_ms);
-      }
-      return false;
-    }
-
-    const tsMs = payload.ts_ms;
-    if (tsMs != null && Number.isFinite(tsMs)) {
-      if (tsMs < lastStateTsMs.current) {
-        return true;
-      }
-      lastStateTsMs.current = tsMs;
-    }
-
-    return false;
   };
 
   const armSessionHeartbeat = () => {
@@ -186,128 +152,60 @@ export function useLiveScore(): UseLiveScoreReturn {
       handleExplicitSessionEnd();
     });
 
-    const unlistenBridgeMetric = listen<BridgeMetricPayload>(BRIDGE_METRIC_EVENT, (event) => {
+    const unlistenStats = listen<StatsPanelReading>(STATS_PANEL_EVENT, (event) => {
       const now = Date.now();
       const payload = event.payload;
+      isInChallenge.current = payload.is_in_challenge === true;
+      isInScenario.current = payload.is_in_scenario === true;
+      activeGameStateCode.current =
+        payload.game_state_code != null && Number.isFinite(payload.game_state_code)
+          ? Math.round(payload.game_state_code)
+          : activeGameStateCode.current;
 
-      if (
-        payload.ev === "challenge_start"
-        || payload.ev === "scenario_start"
-        || payload.ev === "challenge_restart"
-        || payload.ev === "scenario_restart"
-        || payload.ev === "scenario_restarted"
-      ) {
-        if (shouldIgnoreStaleStateEvent(payload)) {
-          return;
-        }
-        isInChallenge.current = true;
-        isInScenario.current = true;
-        handleExplicitSessionStart(now);
-        return;
+      const sessionSeconds = payload.session_time_secs;
+      const challengeSeconds = payload.challenge_seconds_total;
+      const scoreTotal = payload.score_total;
+      const scoreTotalDerived = payload.score_total_derived;
+      const hasLiveProgress =
+        (sessionSeconds != null && Number.isFinite(sessionSeconds) && sessionSeconds >= 0)
+        || (challengeSeconds != null && Number.isFinite(challengeSeconds) && challengeSeconds >= 0)
+        || (scoreTotal != null && Number.isFinite(scoreTotal) && scoreTotal >= 0)
+        || (scoreTotalDerived != null && Number.isFinite(scoreTotalDerived) && scoreTotalDerived >= 0)
+        || hasAuthoritativeActiveContext(
+          isInScenario.current,
+          isInChallenge.current,
+          activeGameStateCode.current,
+        );
+
+      if (hasLiveProgress) {
+        touchSessionActive(now);
+      } else {
+        armSessionHeartbeat();
       }
 
-      if (
-        payload.ev === "challenge_end"
-        || payload.ev === "scenario_end"
-        || payload.ev === "challenge_complete"
-        || payload.ev === "challenge_completed"
-        || payload.ev === "post_challenge_complete"
-        || payload.ev === "challenge_canceled"
-        || payload.ev === "challenge_quit"
-      ) {
-        if (shouldIgnoreStaleStateEvent(payload)) {
-          return;
-        }
-        handleExplicitSessionEnd();
-        return;
-      }
-
-      if (payload.ev === "pull_is_in_challenge") {
-        if (shouldIgnoreStaleStateEvent(payload)) {
-          return;
-        }
-        const next = (payload.value ?? 0) > 0.5;
-        isInChallenge.current = next;
-        if (next) {
-          touchSessionActive(now);
-        } else if (!isInScenario.current) {
-          armSessionHeartbeat();
-        }
-        return;
-      }
-
-      if (payload.ev === "pull_is_in_scenario") {
-        if (shouldIgnoreStaleStateEvent(payload)) {
-          return;
-        }
-        const next = (payload.value ?? 0) > 0.5;
-        isInScenario.current = next;
-        if (next) {
-          touchSessionActive(now);
-        } else if (!isInChallenge.current) {
-          armSessionHeartbeat();
-        }
-        return;
-      }
-
-      if (payload.ev === "pull_game_state_code" || payload.ev === "pull_game_state") {
-        if (shouldIgnoreStaleStateEvent(payload)) {
-          return;
-        }
-
-        const numericCode = payload.value != null && Number.isFinite(payload.value)
-          ? Math.round(payload.value)
-          : null;
-        const nextCode = numericCode ?? activeGameStateCode.current;
-        activeGameStateCode.current = nextCode;
-
-        if (gameStateImpliesActive(nextCode)) {
-          touchSessionActive(now);
-        } else if (!isInScenario.current && !isInChallenge.current) {
-          armSessionHeartbeat();
-        }
-        return;
-      }
-
-      if (payload.ev === "pull_seconds_total" || payload.ev === "pull_challenge_seconds_total") {
-        const value = payload.value;
-        if (value != null && Number.isFinite(value) && value >= 0) {
-          touchSessionActive(now);
-        }
-        return;
-      }
-
-      if (payload.ev !== "pull_score_total" && payload.ev !== "pull_score_total_derived") {
-        return;
-      }
-
-      const value = payload.value;
-      if (value == null || !Number.isFinite(value) || value < 0) {
-        return;
-      }
-
-      if (payload.ev === "pull_score_total") {
+      if (scoreTotal != null && Number.isFinite(scoreTotal) && scoreTotal >= 0) {
         const hasRecentPositiveDerived =
           (lastScoreTotalDerived.current ?? 0) > 0
           && (now - lastScoreTotalDerivedAtMs.current) <= DERIVED_SCORE_FRESH_MS;
-        const isLowConfidenceZeroTotal = value <= 0.000001 && hasRecentPositiveDerived;
+        const isLowConfidenceZeroTotal = scoreTotal <= 0.000001 && hasRecentPositiveDerived;
 
         if (!isLowConfidenceZeroTotal) {
-          lastScoreTotal.current = value;
+          lastScoreTotal.current = scoreTotal;
           lastScoreTotalAtMs.current = now;
-          setLiveScore(Math.round(value));
+          setLiveScore(Math.round(scoreTotal));
         }
-      } else {
-        lastScoreTotalDerived.current = value;
+      }
+
+      if (scoreTotalDerived != null && Number.isFinite(scoreTotalDerived) && scoreTotalDerived >= 0) {
+        lastScoreTotalDerived.current = scoreTotalDerived;
         lastScoreTotalDerivedAtMs.current = now;
 
         const hasFreshPositiveTotal = (lastScoreTotal.current ?? 0) > 0
           && (now - lastScoreTotalAtMs.current) <= SCORE_TOTAL_STALE_MS;
         if (!hasFreshPositiveTotal) {
-          setLiveScore(Math.round(value));
+          setLiveScore(Math.round(scoreTotalDerived));
         }
       }
-      touchSessionActive(now);
     });
 
     const unlistenSession = listen<SessionResult>(SESSION_COMPLETE_EVENT, (event) => {
@@ -321,7 +219,7 @@ export function useLiveScore(): UseLiveScoreReturn {
     return () => {
       unlistenStart.then((fn) => fn());
       unlistenEnd.then((fn) => fn());
-      unlistenBridgeMetric.then((fn) => fn());
+      unlistenStats.then((fn) => fn());
       unlistenSession.then((fn) => fn());
       if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
       stopElapsedTicker();

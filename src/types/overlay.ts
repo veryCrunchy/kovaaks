@@ -24,6 +24,8 @@ export interface SessionResult {
  */
 export interface StatsPanelReading {
   session_time_secs: number | null;
+  score_total?: number | null;
+  score_total_derived?: number | null;
   kills: number | null;
   kps: number | null;
   accuracy_hits: number | null;
