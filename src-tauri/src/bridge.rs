@@ -208,6 +208,263 @@ pub struct BridgeRunSnapshot {
     pub tick_stream_v1: Option<BridgeTickStreamV1>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PersistedScenarioClassification {
+    pub family: String,
+    pub subtype: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct PersistedShotTelemetrySummary {
+    sample_count: usize,
+    avg_bot_count: Option<f64>,
+    mode_bot_count: Option<u32>,
+    max_bot_count: Option<u32>,
+    nearest_switch_rate: Option<f64>,
+}
+
+fn summarize_persisted_shot_telemetry(
+    events: &[BridgeShotTelemetryEvent],
+) -> PersistedShotTelemetrySummary {
+    let mut bot_counts = Vec::new();
+    let mut count_freq = std::collections::HashMap::<u32, usize>::new();
+    let mut max_bot_count = 0u32;
+    let mut transitions = 0usize;
+    let mut switches = 0usize;
+    let mut previous_nearest: Option<&str> = None;
+
+    for event in events {
+        let bot_count = event.targets.iter().filter(|target| target.is_bot).count() as u32;
+        if bot_count == 0 {
+            continue;
+        }
+
+        bot_counts.push(bot_count);
+        *count_freq.entry(bot_count).or_insert(0) += 1;
+        max_bot_count = max_bot_count.max(bot_count);
+
+        let nearest = event
+            .targets
+            .iter()
+            .find(|target| target.is_bot && target.is_nearest)
+            .or_else(|| event.targets.iter().find(|target| target.is_bot))
+            .map(|target| target.entity_id.as_str());
+
+        if let Some(nearest) = nearest {
+            if let Some(previous) = previous_nearest {
+                transitions += 1;
+                if previous != nearest {
+                    switches += 1;
+                }
+            }
+            previous_nearest = Some(nearest);
+        }
+    }
+
+    if bot_counts.is_empty() {
+        return PersistedShotTelemetrySummary::default();
+    }
+
+    let avg_bot_count =
+        bot_counts.iter().map(|value| *value as f64).sum::<f64>() / bot_counts.len() as f64;
+    let mode_bot_count = count_freq
+        .into_iter()
+        .max_by_key(|(bot_count, freq)| (*freq, *bot_count))
+        .map(|(bot_count, _)| bot_count);
+
+    PersistedShotTelemetrySummary {
+        sample_count: bot_counts.len(),
+        avg_bot_count: Some(avg_bot_count),
+        mode_bot_count,
+        max_bot_count: Some(max_bot_count),
+        nearest_switch_rate: if transitions > 0 {
+            Some(switches as f64 / transitions as f64)
+        } else {
+            None
+        },
+    }
+}
+
+fn persisted_tracking_density_subtype(bot_count: Option<u32>) -> String {
+    match bot_count.unwrap_or(0) {
+        0 | 1 => "Single Bot Tracking".to_string(),
+        2..=5 => "Sparse Multi Bot Tracking".to_string(),
+        6..=10 => "Dense Multi Bot Tracking".to_string(),
+        _ => "Wide Tracking".to_string(),
+    }
+}
+
+fn persisted_one_shot_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+    match (bot_count.unwrap_or(0), is_switching) {
+        (0 | 1, _) => "Static One-Shot".to_string(),
+        (2..=5, true) => "Sparse Switching One-Shot".to_string(),
+        (6..=10, true) => "Dense Switching One-Shot".to_string(),
+        (2..=5, false) => "Cluster One-Shot".to_string(),
+        (6..=10, false) => "Crowd One-Shot".to_string(),
+        (_, true) => "Wide Switching One-Shot".to_string(),
+        _ => "Wide One-Shot".to_string(),
+    }
+}
+
+fn persisted_multi_hit_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+    match (bot_count.unwrap_or(0), is_switching) {
+        (0 | 1, _) => "Single Target Multi-Hit".to_string(),
+        (2..=5, true) => "Sparse Switching Multi-Hit".to_string(),
+        (6..=10, true) => "Dense Switching Multi-Hit".to_string(),
+        (2..=5, false) => "Cluster Multi-Hit".to_string(),
+        (6..=10, false) => "Crowd Multi-Hit".to_string(),
+        (_, true) => "Wide Switching Multi-Hit".to_string(),
+        _ => "Wide Multi-Hit".to_string(),
+    }
+}
+
+fn persisted_reactive_subtype(bot_count: Option<u32>) -> String {
+    match bot_count.unwrap_or(0) {
+        0 | 1 => "Single Target Reactive".to_string(),
+        2..=5 => "Sparse Reactive".to_string(),
+        6..=10 => "Dense Reactive".to_string(),
+        _ => "Wide Reactive".to_string(),
+    }
+}
+
+fn persisted_accuracy_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+    match (bot_count.unwrap_or(0), is_switching) {
+        (0 | 1, _) => "Single Target Precision".to_string(),
+        (_, true) => "Switching Precision".to_string(),
+        (2..=5, false) => "Multi Target Precision".to_string(),
+        _ => "Wide Precision".to_string(),
+    }
+}
+
+pub fn classify_persisted_session(
+    stats_panel: &crate::session_store::StatsPanelSnapshot,
+    run_summary: Option<&BridgeRunSnapshot>,
+    shot_telemetry: &[BridgeShotTelemetryEvent],
+) -> PersistedScenarioClassification {
+    let shot_summary = summarize_persisted_shot_telemetry(shot_telemetry);
+    let kills = stats_panel
+        .kills
+        .or_else(|| {
+            run_summary.and_then(|summary| {
+                summary
+                    .kills
+                    .filter(|value| value.is_finite() && *value >= 0.0)
+                    .map(|value| value.round() as u32)
+            })
+        })
+        .unwrap_or(0);
+    let hits = run_summary
+        .and_then(|summary| summary.shots_hit)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u32)
+        .unwrap_or(0);
+    let shots = run_summary
+        .and_then(|summary| summary.shots_fired)
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .map(|value| value.round() as u32)
+        .unwrap_or(0);
+    let damage_dealt = run_summary
+        .and_then(|summary| summary.damage_done)
+        .or_else(|| stats_panel.total_damage.map(f64::from))
+        .unwrap_or(0.0);
+    let damage_total = run_summary
+        .and_then(|summary| summary.damage_possible)
+        .or_else(|| stats_panel.total_damage.map(f64::from))
+        .unwrap_or(0.0);
+    let damage_present = damage_total > 0.0001 || damage_dealt > 0.0001;
+    let bot_count = shot_summary
+        .mode_bot_count
+        .or(shot_summary.max_bot_count)
+        .or_else(|| {
+            shot_summary
+                .avg_bot_count
+                .map(|value| value.round().max(0.0) as u32)
+        });
+    let switch_rate = shot_summary.nearest_switch_rate.unwrap_or(0.0);
+    let live_ttk_secs = stats_panel.avg_ttk_ms.map(|value| value as f64 / 1000.0);
+    let ttk_std_secs = stats_panel.ttk_std_ms.map(|value| value as f64 / 1000.0);
+    let ttk_sample_count = kills as usize;
+    let low_or_zero_ttk = live_ttk_secs.is_some_and(|value| value <= 0.05);
+    let stable_ttk = match (live_ttk_secs, ttk_std_secs) {
+        (Some(mean_secs), Some(stddev_secs)) if ttk_sample_count >= 4 && mean_secs > 0.0 => {
+            stddev_secs <= 0.08 || (stddev_secs / mean_secs.max(0.05)) <= 0.18
+        }
+        _ => false,
+    };
+    let kills_per_second = stats_panel
+        .avg_kps
+        .map(f64::from)
+        .or_else(|| run_summary.and_then(|summary| summary.kills_per_second));
+    let sustained_damage_tracking_candidate = kills == 0
+        && hits >= 30
+        && shots >= 120
+        && damage_present
+        && kills_per_second.map_or(true, |value| value <= 0.01)
+        && (shot_summary.sample_count == 0
+            || shot_summary.sample_count >= 6
+            || bot_count.is_none());
+    let tracking_candidate = sustained_damage_tracking_candidate
+        || (kills == 0
+            && damage_total <= 0.0001
+            && damage_dealt <= 0.0001
+            && shot_summary.sample_count >= 6
+            && (low_or_zero_ttk
+                || stable_ttk
+                || bot_count
+                    .is_some_and(|value| (1..=5).contains(&value) || (8..=10).contains(&value))))
+        || (low_or_zero_ttk
+            && bot_count
+                .is_some_and(|value| (1..=5).contains(&value) || (8..=10).contains(&value)));
+
+    if tracking_candidate {
+        return PersistedScenarioClassification {
+            family: "Tracking".to_string(),
+            subtype: Some(persisted_tracking_density_subtype(bot_count)),
+        };
+    }
+
+    if kills > 0 && damage_present {
+        return PersistedScenarioClassification {
+            family: "MultiHitClicking".to_string(),
+            subtype: Some(persisted_multi_hit_subtype(bot_count, switch_rate)),
+        };
+    }
+
+    if kills > 0 {
+        let reactive_candidate = live_ttk_secs.is_some_and(|value| value >= 0.45)
+            || ttk_std_secs.is_some_and(|value| value >= 0.16)
+            || kills_per_second.is_some_and(|value| {
+                value > 0.0 && value <= 2.25 && (shots as f64) > (kills + 5) as f64
+            });
+        if reactive_candidate {
+            return PersistedScenarioClassification {
+                family: "ReactiveClicking".to_string(),
+                subtype: Some(persisted_reactive_subtype(bot_count)),
+            };
+        }
+
+        return PersistedScenarioClassification {
+            family: "OneShotClicking".to_string(),
+            subtype: Some(persisted_one_shot_subtype(bot_count, switch_rate)),
+        };
+    }
+
+    if shots > 0 {
+        return PersistedScenarioClassification {
+            family: "AccuracyDrill".to_string(),
+            subtype: Some(persisted_accuracy_subtype(bot_count, switch_rate)),
+        };
+    }
+
+    PersistedScenarioClassification {
+        family: "Unknown".to_string(),
+        subtype: None,
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn parse_bridge_payload(raw: &str) -> Option<BridgeParsedEvent> {
     let parsed: serde_json::Value = serde_json::from_str(raw).ok()?;
@@ -263,10 +520,7 @@ fn parse_payload_number(
 }
 
 #[cfg(target_os = "windows")]
-fn parse_payload_u64(
-    obj: &serde_json::Map<String, serde_json::Value>,
-    key: &str,
-) -> Option<u64> {
+fn parse_payload_u64(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<u64> {
     match obj.get(key) {
         Some(serde_json::Value::Number(n)) => n.as_u64(),
         Some(serde_json::Value::String(s)) => s.parse::<u64>().ok(),
@@ -431,7 +685,7 @@ mod imp {
         SESSION_ID.get_or_init(|| Mutex::new(None))
     }
 
-    fn bridge_dll_connected_flag() -> &'static AtomicBool {
+    pub(super) fn bridge_dll_connected_flag() -> &'static AtomicBool {
         static CONNECTED: AtomicBool = AtomicBool::new(false);
         &CONNECTED
     }
@@ -573,7 +827,10 @@ mod imp {
             log::info!("bridge: queued mod state sync request ({})", reason);
             true
         } else {
-            log::warn!("bridge: failed to queue mod state sync request ({})", reason);
+            log::warn!(
+                "bridge: failed to queue mod state sync request ({})",
+                reason
+            );
             false
         }
     }
@@ -862,7 +1119,7 @@ mod imp {
             || state.metrics.damage_possible.is_some()
             || state.metrics.damage_efficiency.is_some()
             || state.metrics.accuracy_pct.is_some()
-                || !state.shot_telemetry.is_empty()
+            || !state.shot_telemetry.is_empty()
             || state.tick_stream_v1.context.is_some()
             || !state.tick_stream_v1.keyframes.is_empty()
             || !state.tick_stream_v1.deltas.is_empty()
@@ -1274,8 +1531,9 @@ mod imp {
         })
     }
 
-    fn parse_shot_telemetry_event(raw: &str) -> Option<super::BridgeShotTelemetryEvent> {
-        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+    fn parse_shot_telemetry_event_value(
+        payload: &serde_json::Value,
+    ) -> Option<super::BridgeShotTelemetryEvent> {
         let obj = payload.as_object()?;
         let raw_ev = obj.get("ev")?.as_str()?;
         let event = match raw_ev {
@@ -1309,8 +1567,39 @@ mod imp {
         })
     }
 
+    fn parse_shot_telemetry_event(raw: &str) -> Option<super::BridgeShotTelemetryEvent> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        parse_shot_telemetry_event_value(&payload)
+    }
+
+    fn parse_shot_telemetry_batch(raw: &str) -> Option<Vec<super::BridgeShotTelemetryEvent>> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+        if obj.get("ev")?.as_str()? != "shot_telemetry_batch" {
+            return None;
+        }
+
+        let entries = obj.get("events")?.as_array()?;
+        let mut events = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if let Some(event) = parse_shot_telemetry_event_value(entry) {
+                events.push(event);
+            }
+        }
+
+        if events.is_empty() {
+            None
+        } else {
+            Some(events)
+        }
+    }
+
     fn observe_shot_telemetry_raw(raw: &str) {
-        let Some(event) = parse_shot_telemetry_event(raw) else {
+        let events = if let Some(events) = parse_shot_telemetry_batch(raw) {
+            events
+        } else if let Some(event) = parse_shot_telemetry_event(raw) {
+            vec![event]
+        } else {
             return;
         };
 
@@ -1320,7 +1609,7 @@ mod imp {
 
         let duration_hint = state.metrics.duration_secs;
         ensure_run_capture_started_locked(&mut state, duration_hint);
-        state.shot_telemetry.push(event);
+        state.shot_telemetry.extend(events);
         if state.shot_telemetry.len() > MAX_SHOT_TELEMETRY_EVENTS {
             let trim = state.shot_telemetry.len() - MAX_SHOT_TELEMETRY_EVENTS;
             state.shot_telemetry.drain(0..trim);
@@ -1539,7 +1828,10 @@ mod imp {
             }
             state.last_lifecycle_seq = Some(seq);
             if let Some(ts_ms) = parsed.ts_ms {
-                if state.last_lifecycle_ts_ms.map_or(true, |prev| ts_ms >= prev) {
+                if state
+                    .last_lifecycle_ts_ms
+                    .map_or(true, |prev| ts_ms >= prev)
+                {
                     state.last_lifecycle_ts_ms = Some(ts_ms);
                 }
             }
@@ -1547,7 +1839,10 @@ mod imp {
         }
 
         if let Some(ts_ms) = parsed.ts_ms {
-            if state.last_lifecycle_ts_ms.map_or(false, |prev| ts_ms < prev) {
+            if state
+                .last_lifecycle_ts_ms
+                .map_or(false, |prev| ts_ms < prev)
+            {
                 return true;
             }
             state.last_lifecycle_ts_ms = Some(ts_ms);
@@ -1746,8 +2041,28 @@ mod imp {
 
     fn emit_current_stats_snapshot(app: &AppHandle) {
         if let Ok(state) = bridge_compat_state().lock() {
-            let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+            emit_stats_panel_update(app, &state.stats);
         }
+    }
+
+    fn emit_stats_panel_update(app: &AppHandle, stats: &BridgeStatsPanelEvent) {
+        let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, stats);
+
+        let scenario_type = if stats.scenario_type == "Unknown" {
+            None
+        } else {
+            Some(stats.scenario_type.clone())
+        };
+
+        crate::discord_rpc::update_presence_from_bridge(crate::discord_rpc::BridgePresenceState {
+            game_state_code: stats.game_state_code,
+            game_state: stats.game_state.clone(),
+            scenario_name: stats.scenario_name.clone(),
+            scenario_type,
+            scenario_subtype: stats.scenario_subtype.clone(),
+            time_remaining_secs: stats.time_remaining,
+            queue_time_remaining_secs: stats.queue_time_remaining,
+        });
     }
 
     fn map_stats_panel_snapshot(
@@ -2105,7 +2420,9 @@ mod imp {
         })
     }
 
-    fn summarize_shot_telemetry(events: &[super::BridgeShotTelemetryEvent]) -> ShotTelemetrySummary {
+    fn summarize_shot_telemetry(
+        events: &[super::BridgeShotTelemetryEvent],
+    ) -> ShotTelemetrySummary {
         let mut bot_counts = Vec::new();
         let mut count_freq = HashMap::<u32, usize>::new();
         let mut max_bot_count = 0u32;
@@ -2145,8 +2462,8 @@ mod imp {
             return ShotTelemetrySummary::default();
         }
 
-        let avg_bot_count = bot_counts.iter().map(|value| *value as f64).sum::<f64>()
-            / bot_counts.len() as f64;
+        let avg_bot_count =
+            bot_counts.iter().map(|value| *value as f64).sum::<f64>() / bot_counts.len() as f64;
         let mode_bot_count = count_freq
             .into_iter()
             .max_by_key(|(bot_count, freq)| (*freq, *bot_count))
@@ -2246,7 +2563,9 @@ mod imp {
                     .map(|value| value.round().max(0.0) as u32)
             });
         let switch_rate = shot_summary.nearest_switch_rate.unwrap_or(0.0);
-        let live_ttk_secs = stats.ttk_secs.or_else(|| ttk_summary.map(|summary| summary.mean_secs));
+        let live_ttk_secs = stats
+            .ttk_secs
+            .or_else(|| ttk_summary.map(|summary| summary.mean_secs));
         let ttk_std_secs = ttk_summary.map(|summary| summary.stddev_secs);
         let low_or_zero_ttk = live_ttk_secs.map_or(false, |value| value <= 0.05);
         let stable_ttk = ttk_summary.map_or(false, |summary| {
@@ -2263,21 +2582,20 @@ mod imp {
             && (shot_summary.sample_count == 0
                 || shot_summary.sample_count >= 6
                 || bot_count.is_none());
-        let tracking_candidate =
-            sustained_damage_tracking_candidate
-                || (kills == 0
-                    && damage_total <= 0.0001
-                    && damage_dealt <= 0.0001
-                    && shot_summary.sample_count >= 6
-                    && (low_or_zero_ttk
-                        || stable_ttk
-                        || bot_count.map_or(false, |value| {
-                            (1..=5).contains(&value) || (8..=10).contains(&value)
-                        })))
-                || (low_or_zero_ttk
-                    && bot_count.map_or(false, |value| {
+        let tracking_candidate = sustained_damage_tracking_candidate
+            || (kills == 0
+                && damage_total <= 0.0001
+                && damage_dealt <= 0.0001
+                && shot_summary.sample_count >= 6
+                && (low_or_zero_ttk
+                    || stable_ttk
+                    || bot_count.map_or(false, |value| {
                         (1..=5).contains(&value) || (8..=10).contains(&value)
-                    }));
+                    })))
+            || (low_or_zero_ttk
+                && bot_count.map_or(false, |value| {
+                    (1..=5).contains(&value) || (8..=10).contains(&value)
+                }));
 
         if tracking_candidate {
             return ScenarioClassification {
@@ -2296,9 +2614,9 @@ mod imp {
         if kills > 0 {
             let reactive_candidate = live_ttk_secs.map_or(false, |value| value >= 0.45)
                 || ttk_std_secs.map_or(false, |value| value >= 0.16)
-                || stats
-                    .kps
-                    .map_or(false, |value| value > 0.0 && value <= 2.25 && shots > kills.saturating_add(5));
+                || stats.kps.map_or(false, |value| {
+                    value > 0.0 && value <= 2.25 && shots > kills.saturating_add(5)
+                });
             if reactive_candidate {
                 return ScenarioClassification {
                     family: "ReactiveClicking",
@@ -2420,7 +2738,7 @@ mod imp {
             if state.stats.scenario_name.as_deref() != Some(name.as_str()) {
                 state.stats.scenario_name = Some(name.clone());
                 changed = true;
-                let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                emit_stats_panel_update(app, &state.stats);
             }
         }
         if changed {
@@ -2487,7 +2805,8 @@ mod imp {
             return;
         }
 
-        if let Some((fn_name, ret_u32, ret_i32, _ret_f32)) = parse_class_hook_from_raw(&parsed.raw) {
+        if let Some((fn_name, ret_u32, ret_i32, _ret_f32)) = parse_class_hook_from_raw(&parsed.raw)
+        {
             let bool_sample = ret_u32
                 .map(|v| (v & 1) == 1)
                 .or_else(|| ret_i32.map(|v| (v & 1) != 0));
@@ -2569,10 +2888,9 @@ mod imp {
                     should_emit_stats = true;
                 }
                 if should_emit_stats {
-                    let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                    emit_stats_panel_update(app, &state.stats);
                 }
             }
-
         }
 
         if parsed.ev == "scenario_metadata" {
@@ -2610,8 +2928,7 @@ mod imp {
         let is_compat_metric = parsed.ev.starts_with("pull_")
             || parsed.ev == "is_in_challenge"
             || parsed.ev == "queue_time_remaining"
-            || parsed.ev == "challenge_queue_time_remaining"
-            ;
+            || parsed.ev == "challenge_queue_time_remaining";
         if !is_compat_metric {
             return;
         }
@@ -2996,7 +3313,8 @@ mod imp {
 
             let shot_summary = current_shot_telemetry_summary();
             let ttk_summary = summarize_ttk_samples(&state.recent_ttk_secs);
-            let inferred = infer_scenario_classification(&state.stats, &shot_summary, ttk_summary.as_ref());
+            let inferred =
+                infer_scenario_classification(&state.stats, &shot_summary, ttk_summary.as_ref());
             if state.stats.scenario_type != inferred.family {
                 state.stats.scenario_type = inferred.family.to_string();
                 should_emit_stats = true;
@@ -3017,7 +3335,7 @@ mod imp {
 
             if should_emit_stats {
                 observe_run_stats_snapshot(&state.stats);
-                let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, &state.stats);
+                emit_stats_panel_update(app, &state.stats);
             }
 
             let paused = state.stats.scenario_is_paused == Some(true);
@@ -3034,7 +3352,8 @@ mod imp {
             let progress_metrics = state.stats.accuracy_shots.map_or(false, |v| v > 0)
                 || state.stats.kills.map_or(false, |v| v > 0)
                 || state.stats.damage_dealt.map_or(false, |v| v > 0.0);
-            let has_active_session_metrics = challenge_context || (!paused && !queued && progress_metrics);
+            let has_active_session_metrics =
+                challenge_context || (!paused && !queued && progress_metrics);
             let recovery_challenge_active = challenge_context;
             let authoritative_active_state = next_game_state_code == 4;
             recovery_signal = Some((
@@ -3044,7 +3363,9 @@ mod imp {
             ));
         }
 
-        if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) = recovery_signal {
+        if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) =
+            recovery_signal
+        {
             let should_start_from_recovery = {
                 let mut state = bridge_session_state().lock().unwrap();
                 if state.session_active {
@@ -3070,7 +3391,6 @@ mod imp {
                 begin_session_tracking(app, "bridge:compat_recovery", challenge_active_hint);
             }
         }
-
     }
 
     fn log_ring() -> &'static Mutex<VecDeque<String>> {
@@ -3282,6 +3602,9 @@ mod imp {
                                                 | "hook_focus_probe_typed"
                                                 | "class_hook_probe"
                                                 | "script_hook_probe"
+                                                | "shot_fired_telemetry"
+                                                | "shot_hit_telemetry"
+                                                | "shot_telemetry_batch"
                                         )
                                     };
                                     let suppress_bridge_log_event = parsed_event
@@ -5149,6 +5472,16 @@ pub fn is_ue4ss_loaded_for_pid(pid: u32) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_ue4ss_loaded_for_pid(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_bridge_dll_connected() -> bool {
+    imp::bridge_dll_connected_flag().load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_bridge_dll_connected() -> bool {
     false
 }
 
