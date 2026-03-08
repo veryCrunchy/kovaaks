@@ -3,6 +3,7 @@
 #include <array>
 #include <atomic>
 #include <string>
+#include <thread>
 
 #include <windows.h>
 
@@ -34,6 +35,8 @@ std::wstring g_last_dll_path{};
 std::atomic<DWORD> g_last_win32_error{0};
 std::atomic<DWORD> g_last_transport_error{0};
 std::atomic<ULONGLONG> g_last_reconnect_attempt_ms{0};
+std::atomic<bool> g_reconnect_worker_stop{false};
+std::thread g_reconnect_worker{};
 
 constexpr ULONGLONG k_min_reconnect_interval_ms = 250;
 
@@ -84,6 +87,41 @@ void reconnect_throttled() {
     }
     g_last_reconnect_attempt_ms.store(now, std::memory_order_relaxed);
     (void)reconnect_now();
+}
+
+void stop_reconnect_worker() {
+    g_reconnect_worker_stop.store(true, std::memory_order_release);
+    if (g_reconnect_worker.joinable()) {
+        g_reconnect_worker.join();
+    }
+}
+
+void ensure_reconnect_worker() {
+    if (g_reconnect_worker.joinable()) {
+        return;
+    }
+
+    g_reconnect_worker_stop.store(false, std::memory_order_release);
+    g_reconnect_worker = std::thread([] {
+        while (!g_reconnect_worker_stop.load(std::memory_order_acquire)) {
+            const bool api_ready =
+                g_api.module != nullptr
+                && g_api.init != nullptr
+                && g_api.is_connected != nullptr;
+            if (api_ready) {
+                bool connected = false;
+                if (module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.is_connected))) {
+                    connected = g_api.is_connected();
+                } else {
+                    invalidate_api();
+                }
+                if (!connected) {
+                    reconnect_throttled();
+                }
+            }
+            Sleep(250);
+        }
+    });
 }
 
 std::wstring module_dir() {
@@ -142,6 +180,7 @@ bool RustBridge::startup() {
     if (!load_api()) {
         return false;
     }
+    ensure_reconnect_worker();
     if (!g_api.init) {
         return false;
     }
@@ -157,10 +196,12 @@ bool RustBridge::reconnect() {
     if (!load_api()) {
         return false;
     }
+    ensure_reconnect_worker();
     return reconnect_now();
 }
 
 void RustBridge::shutdown() {
+    stop_reconnect_worker();
     if (!g_api.module) {
         return;
     }
