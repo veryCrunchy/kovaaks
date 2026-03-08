@@ -1254,6 +1254,23 @@ private:
         return std::isfinite(out_value);
     }
 
+    static auto normalize_accuracy_pct(float value) -> float {
+        if (!std::isfinite(value) || value < 0.0f) {
+            return -1.0f;
+        }
+        if (value <= 1.0f) {
+            return value * 100.0f;
+        }
+        return value;
+    }
+
+    static auto derive_accuracy_pct(int32_t shots_hit, int32_t shots_fired) -> float {
+        if (shots_fired <= 0 || shots_hit < 0) {
+            return -1.0f;
+        }
+        return (static_cast<float>(shots_hit) * 100.0f) / static_cast<float>(shots_fired);
+    }
+
     static auto safe_process_event_call(
         RC::Unreal::UObject* caller,
         RC::Unreal::UFunction* fn,
@@ -1388,7 +1405,10 @@ private:
             if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
                 return;
             }
-            if (cache_pull_f32("pull_accuracy", last_accuracy_, value, last_nonzero_accuracy_ms_, now)) {
+            value = normalize_accuracy_pct(value);
+            const bool have_authoritative_shot_counts = last_shots_fired_ > 0 && last_shots_hit_ >= 0;
+            if (!have_authoritative_shot_counts
+                && cache_pull_f32("pull_accuracy", last_accuracy_, value, last_nonzero_accuracy_ms_, now)) {
                 live_pull_snapshot_dirty_ = true;
             }
             last_runtime_progress_ms_ = now;
@@ -1691,7 +1711,7 @@ private:
                     targets_.receive_accuracy_single,
                     targets_.receive_accuracy
                 }, fv)) {
-                current_accuracy = fv;
+                current_accuracy = normalize_accuracy_pct(fv);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_score_per_minute_value_else,
@@ -2100,9 +2120,10 @@ private:
 
         {
         EmitTagScope derived_scope(*this, "derived_spm_seconds", "non_ui_probe");
-        if (current_accuracy < 0.0f && current_shots_fired > 0 && current_shots_hit >= 0) {
-            current_accuracy = (static_cast<float>(current_shots_hit) * 100.0f)
-                / static_cast<float>(current_shots_fired);
+        const float derived_accuracy = derive_accuracy_pct(current_shots_hit, current_shots_fired);
+        current_accuracy = normalize_accuracy_pct(current_accuracy);
+        if (current_accuracy < 0.0f && derived_accuracy >= 0.0f) {
+            current_accuracy = derived_accuracy;
         }
         const bool allow_score_derivation =
             current_is_in_challenge > 0
