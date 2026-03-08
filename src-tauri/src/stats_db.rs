@@ -805,6 +805,7 @@ fn query_shot_telemetry(
             current_event = Some(crate::bridge::BridgeShotTelemetryEvent {
                 event: row.get::<_, String>("event_kind")?,
                 ts_ms: row.get::<_, i64>("ts_ms")? as u64,
+                count: None,
                 total: row
                     .get::<_, Option<i64>>("total")?
                     .map(|value| value as u32),
