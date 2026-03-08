@@ -229,7 +229,8 @@ struct PersistedShotTelemetrySummary {
 fn summarize_persisted_shot_telemetry(
     events: &[BridgeShotTelemetryEvent],
 ) -> PersistedShotTelemetrySummary {
-    let mut bot_counts = Vec::new();
+    let mut weighted_sample_count = 0usize;
+    let mut weighted_bot_count_sum = 0.0f64;
     let mut count_freq = std::collections::HashMap::<u32, usize>::new();
     let mut max_bot_count = 0u32;
     let mut transitions = 0usize;
@@ -237,13 +238,15 @@ fn summarize_persisted_shot_telemetry(
     let mut previous_nearest: Option<&str> = None;
 
     for event in events {
+        let weight = event.count.unwrap_or(1).max(1) as usize;
         let bot_count = event.targets.iter().filter(|target| target.is_bot).count() as u32;
         if bot_count == 0 {
             continue;
         }
 
-        bot_counts.push(bot_count);
-        *count_freq.entry(bot_count).or_insert(0) += 1;
+        weighted_sample_count = weighted_sample_count.saturating_add(weight);
+        weighted_bot_count_sum += bot_count as f64 * weight as f64;
+        *count_freq.entry(bot_count).or_insert(0) += weight;
         max_bot_count = max_bot_count.max(bot_count);
 
         let nearest = event
@@ -264,19 +267,18 @@ fn summarize_persisted_shot_telemetry(
         }
     }
 
-    if bot_counts.is_empty() {
+    if weighted_sample_count == 0 {
         return PersistedShotTelemetrySummary::default();
     }
 
-    let avg_bot_count =
-        bot_counts.iter().map(|value| *value as f64).sum::<f64>() / bot_counts.len() as f64;
+    let avg_bot_count = weighted_bot_count_sum / weighted_sample_count as f64;
     let mode_bot_count = count_freq
         .into_iter()
         .max_by_key(|(bot_count, freq)| (*freq, *bot_count))
         .map(|(bot_count, _)| bot_count);
 
     PersistedShotTelemetrySummary {
-        sample_count: bot_counts.len(),
+        sample_count: weighted_sample_count,
         avg_bot_count: Some(avg_bot_count),
         mode_bot_count,
         max_bot_count: Some(max_bot_count),
@@ -949,6 +951,7 @@ mod imp {
         challenge_active: bool,
         session_started_at: Option<Instant>,
         recovery_start_streak: u8,
+        persistence_finalize_pending: bool,
         tracking_paused_by_idle: bool,
         last_stats_flow_at: Option<Instant>,
         last_pull_event_at: Option<Instant>,
@@ -1012,6 +1015,7 @@ mod imp {
         shots_since_last_hit: u32,
         total_shots_to_hit: u64,
         corrective_hits: u32,
+        aggregated_shot_batches_seen: bool,
         event_counts: super::BridgeRunEventCounts,
         timeline: Vec<super::BridgeRunTimelinePoint>,
         shot_telemetry: Vec<super::BridgeShotTelemetryEvent>,
@@ -1126,6 +1130,7 @@ mod imp {
         state.shots_since_last_hit = 0;
         state.total_shots_to_hit = 0;
         state.corrective_hits = 0;
+        state.aggregated_shot_batches_seen = false;
         state.event_counts = super::BridgeRunEventCounts::default();
         state.timeline.clear();
         state.shot_telemetry.clear();
@@ -1728,6 +1733,9 @@ mod imp {
         ensure_run_capture_started_locked(&mut state, duration_hint);
         for event in &events {
             let count = event.count.filter(|value| *value > 0).unwrap_or(1);
+            if count > 1 {
+                state.aggregated_shot_batches_seen = true;
+            }
             match event.event.as_str() {
                 "shot_fired" => {
                     state.event_counts.shot_fired_events =
@@ -1998,13 +2006,30 @@ mod imp {
         };
 
         if !run_capture_has_data(&state) {
+            if let Ok(mut session_state) = bridge_session_state().lock() {
+                session_state.persistence_finalize_pending = false;
+            }
             return None;
         }
 
         let duration_secs = finite_non_negative(state.metrics.duration_secs)
             .or_else(|| state.timeline.last().map(|p| p.t_sec as f64));
 
-        let avg_fire_to_hit_ms = if state.shot_to_hit_latencies_ms.is_empty() {
+        let derived_avg_shots_to_hit = match (state.metrics.shots_fired, state.metrics.shots_hit) {
+            (Some(shots_fired), Some(shots_hit))
+                if shots_fired.is_finite()
+                    && shots_hit.is_finite()
+                    && shots_fired >= 0.0
+                    && shots_hit > 0.0 =>
+            {
+                Some(shots_fired / shots_hit)
+            }
+            _ => None,
+        };
+
+        let avg_fire_to_hit_ms = if state.aggregated_shot_batches_seen
+            || state.shot_to_hit_latencies_ms.is_empty()
+        {
             None
         } else {
             Some(
@@ -2012,22 +2037,33 @@ mod imp {
                     / state.shot_to_hit_latencies_ms.len() as f64,
             )
         };
-        let p90_fire_to_hit_ms = if state.shot_to_hit_latencies_ms.is_empty() {
+        let p90_fire_to_hit_ms = if state.aggregated_shot_batches_seen
+            || state.shot_to_hit_latencies_ms.is_empty()
+        {
             None
         } else {
             let mut sorted = state.shot_to_hit_latencies_ms.clone();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             percentile_from_sorted(&sorted, 90.0)
         };
-        let avg_shots_to_hit = if state.paired_shot_hits > 0 {
+        let avg_shots_to_hit = if state.aggregated_shot_batches_seen {
+            derived_avg_shots_to_hit
+        } else if state.paired_shot_hits > 0 {
             Some(state.total_shots_to_hit as f64 / state.paired_shot_hits as f64)
         } else {
-            None
+            derived_avg_shots_to_hit
         };
-        let corrective_shot_ratio = if state.paired_shot_hits > 0 {
+        let corrective_shot_ratio = if state.aggregated_shot_batches_seen {
+            None
+        } else if state.paired_shot_hits > 0 {
             Some(state.corrective_hits as f64 / state.paired_shot_hits as f64)
         } else {
             None
+        };
+        let paired_shot_hits = if state.aggregated_shot_batches_seen {
+            0
+        } else {
+            state.paired_shot_hits
         };
 
         let snapshot = super::BridgeRunSnapshot {
@@ -2045,7 +2081,7 @@ mod imp {
             accuracy_pct: state.metrics.accuracy_pct,
             peak_score_per_minute: state.peak_score_per_minute,
             peak_kills_per_second: state.peak_kills_per_second,
-            paired_shot_hits: state.paired_shot_hits,
+            paired_shot_hits,
             avg_fire_to_hit_ms,
             p90_fire_to_hit_ms,
             avg_shots_to_hit,
@@ -2066,6 +2102,9 @@ mod imp {
         };
 
         *state = RunCaptureState::default();
+        if let Ok(mut session_state) = bridge_session_state().lock() {
+            session_state.persistence_finalize_pending = false;
+        }
         Some(snapshot)
     }
 
@@ -2257,7 +2296,10 @@ mod imp {
     pub fn finalize_session_tracking_from_csv_completion(app: &AppHandle) {
         let challenge_active = bridge_session_state()
             .lock()
-            .map(|state| state.challenge_active)
+            .map(|mut state| {
+                state.persistence_finalize_pending = true;
+                state.challenge_active
+            })
             .unwrap_or(false);
         end_session_tracking(app, "file_watcher:session_complete", challenge_active);
     }
@@ -2302,6 +2344,7 @@ mod imp {
                 state.session_active = true;
                 state.session_started_at = Some(now);
                 state.recovery_start_streak = 0;
+                state.persistence_finalize_pending = false;
                 emit_session = true;
             }
             (emit_session, emit_challenge)
@@ -3718,7 +3761,10 @@ mod imp {
         {
             let should_start_from_recovery = {
                 let mut state = bridge_session_state().lock().unwrap();
-                if state.session_active {
+                if state.persistence_finalize_pending {
+                    state.recovery_start_streak = 0;
+                    false
+                } else if state.session_active {
                     state.recovery_start_streak = 0;
                     false
                 } else if authoritative_active_state {
@@ -5781,6 +5827,16 @@ pub fn finalize_session_tracking_from_csv_completion(app: &tauri::AppHandle) {
 pub fn finalize_session_tracking_from_csv_completion(_app: &tauri::AppHandle) {
     crate::mouse_hook::stop_session_tracking();
     crate::screen_recorder::stop();
+}
+
+#[cfg(target_os = "windows")]
+pub fn sync_run_capture_for_persistence(timeout_ms: u64) -> bool {
+    imp::sync_run_capture_for_persistence(std::time::Duration::from_millis(timeout_ms))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn sync_run_capture_for_persistence(_timeout_ms: u64) -> bool {
+    false
 }
 
 #[cfg(target_os = "windows")]

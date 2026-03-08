@@ -235,6 +235,14 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             // Seal the run through the bridge lifecycle so session-active
                             // state, mouse metrics, and screen capture stay in sync.
                             crate::bridge::finalize_session_tracking_from_csv_completion(app);
+                            let persistence_sync_ok =
+                                crate::bridge::sync_run_capture_for_persistence(4000);
+                            if !persistence_sync_ok {
+                                log::warn!(
+                                    "file_watcher: bridge state sync did not complete before persistence for {}",
+                                    result.scenario
+                                );
+                            }
                             // Drain path + metric + video buffers for replay persistence
                             let raw_positions = crate::mouse_hook::drain_raw_positions();
                             let metric_points = crate::mouse_hook::drain_session_buffer();
@@ -312,12 +320,37 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                     true,
                                 );
                             }
-                            if let Some(snapshot) = run_snapshot.as_ref() {
-                                if let Err(error) =
-                                    crate::stats_db::upsert_run_capture(app, &session_id, snapshot)
-                                {
+                            match crate::stats_db::audit_session_sql(app, &session_id) {
+                                Ok(audit) if audit.has_issues() => {
                                     log::warn!(
-                                        "file_watcher: could not persist run capture for {}: {error}",
+                                        "file_watcher: sql audit failed for {} issues={} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={}",
+                                        session_id,
+                                        audit.issues.join(" | "),
+                                        audit.replay_positions_rows,
+                                        audit.replay_metrics_rows,
+                                        audit.replay_frames_rows,
+                                        audit.run_summary_rows,
+                                        audit.run_timeline_rows,
+                                        audit.shot_event_rows,
+                                        audit.shot_target_rows,
+                                    );
+                                }
+                                Ok(audit) => {
+                                    log::info!(
+                                        "file_watcher: sql audit ok for {} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={}",
+                                        session_id,
+                                        audit.replay_positions_rows,
+                                        audit.replay_metrics_rows,
+                                        audit.replay_frames_rows,
+                                        audit.run_summary_rows,
+                                        audit.run_timeline_rows,
+                                        audit.shot_event_rows,
+                                        audit.shot_target_rows,
+                                    );
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "file_watcher: could not audit persisted session {}: {error}",
                                         session_id
                                     );
                                 }

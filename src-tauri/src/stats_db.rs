@@ -1308,6 +1308,107 @@ pub fn get_shot_telemetry(
     query_shot_telemetry(&conn, session_id)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSqlAudit {
+    pub session_id: String,
+    pub session_exists: bool,
+    pub replay_asset_exists: bool,
+    pub replay_asset_has_run_snapshot: bool,
+    pub replay_positions_rows: usize,
+    pub replay_metrics_rows: usize,
+    pub replay_frames_rows: usize,
+    pub run_summary_rows: usize,
+    pub run_timeline_rows: usize,
+    pub shot_event_rows: usize,
+    pub shot_target_rows: usize,
+    pub summary_shots_fired: Option<f64>,
+    pub summary_shots_hit: Option<f64>,
+    pub issues: Vec<String>,
+}
+
+impl SessionSqlAudit {
+    pub fn has_issues(&self) -> bool {
+        !self.issues.is_empty()
+    }
+}
+
+pub fn audit_session_sql(app: &AppHandle, session_id: &str) -> Result<SessionSqlAudit> {
+    let conn = connect(app)?;
+    let mut audit = conn.query_row(
+        "
+        SELECT
+            EXISTS(SELECT 1 FROM sessions WHERE id = ?1) AS session_exists,
+            EXISTS(SELECT 1 FROM replay_assets WHERE session_id = ?1) AS replay_asset_exists,
+            COALESCE((SELECT has_run_snapshot FROM replay_assets WHERE session_id = ?1), 0) AS replay_asset_has_run_snapshot,
+            (SELECT COUNT(*) FROM session_replay_positions WHERE session_id = ?1) AS replay_positions_rows,
+            (SELECT COUNT(*) FROM session_replay_metrics WHERE session_id = ?1) AS replay_metrics_rows,
+            (SELECT COUNT(*) FROM session_replay_frames WHERE session_id = ?1) AS replay_frames_rows,
+            (SELECT COUNT(*) FROM session_run_summaries WHERE session_id = ?1) AS run_summary_rows,
+            (SELECT COUNT(*) FROM session_run_timelines WHERE session_id = ?1) AS run_timeline_rows,
+            (SELECT COUNT(*) FROM session_shot_events WHERE session_id = ?1) AS shot_event_rows,
+            (SELECT COUNT(*) FROM session_shot_targets WHERE session_id = ?1) AS shot_target_rows,
+            (SELECT shots_fired FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_fired,
+            (SELECT shots_hit FROM session_run_summaries WHERE session_id = ?1) AS summary_shots_hit
+        ",
+        params![session_id],
+        |row| {
+            Ok(SessionSqlAudit {
+                session_id: session_id.to_string(),
+                session_exists: row.get::<_, i64>(0)? != 0,
+                replay_asset_exists: row.get::<_, i64>(1)? != 0,
+                replay_asset_has_run_snapshot: row.get::<_, i64>(2)? != 0,
+                replay_positions_rows: row.get::<_, i64>(3)? as usize,
+                replay_metrics_rows: row.get::<_, i64>(4)? as usize,
+                replay_frames_rows: row.get::<_, i64>(5)? as usize,
+                run_summary_rows: row.get::<_, i64>(6)? as usize,
+                run_timeline_rows: row.get::<_, i64>(7)? as usize,
+                shot_event_rows: row.get::<_, i64>(8)? as usize,
+                shot_target_rows: row.get::<_, i64>(9)? as usize,
+                summary_shots_fired: row.get(10)?,
+                summary_shots_hit: row.get(11)?,
+                issues: Vec::new(),
+            })
+        },
+    )?;
+
+    if !audit.session_exists {
+        audit.issues.push("missing sessions row".to_string());
+    }
+    if audit.replay_asset_exists
+        && audit.replay_positions_rows == 0
+        && audit.replay_metrics_rows == 0
+        && audit.replay_frames_rows == 0
+    {
+        audit
+            .issues
+            .push("replay asset exists but replay payload tables are empty".to_string());
+    }
+    if audit.replay_asset_has_run_snapshot && audit.run_summary_rows == 0 {
+        audit
+            .issues
+            .push("replay asset expects run snapshot but session_run_summaries is empty".to_string());
+    }
+    if audit.run_summary_rows > 0 && audit.run_timeline_rows == 0 {
+        audit
+            .issues
+            .push("run summary exists but session_run_timelines is empty".to_string());
+    }
+    let expects_shot_rows = audit.summary_shots_fired.unwrap_or(0.0) > 0.0
+        || audit.summary_shots_hit.unwrap_or(0.0) > 0.0;
+    if expects_shot_rows && audit.shot_event_rows == 0 {
+        audit
+            .issues
+            .push("run summary has shots but session_shot_events is empty".to_string());
+    }
+    if audit.shot_event_rows > 0 && audit.shot_target_rows == 0 {
+        audit
+            .issues
+            .push("session_shot_events exists but session_shot_targets is empty".to_string());
+    }
+
+    Ok(audit)
+}
+
 pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
     #[derive(Clone)]
     struct ClassificationRow {
