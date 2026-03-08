@@ -72,6 +72,10 @@ fn wait_named_pipe_now(name: *const u8) -> Result<(), u32> {
     Err(unsafe { GetLastError() })
 }
 
+fn pipe_instance_available(name: *const u8) -> bool {
+    wait_named_pipe_now(name).is_ok()
+}
+
 fn close_event_pipe() {
     CONNECTED.store(false, Ordering::Release);
     let raw = PIPE_HANDLE.swap(0, Ordering::AcqRel) as Handle;
@@ -263,6 +267,12 @@ pub fn poll_command_line(out: &mut [u8]) -> i32 {
         return -1;
     }
 
+    if COMMAND_CONNECTED.load(Ordering::Acquire)
+        && pipe_instance_available(COMMAND_PIPE_NAME.as_ptr())
+    {
+        close_command_pipe();
+    }
+
     if !COMMAND_CONNECTED.load(Ordering::Acquire) && connect_command().is_err() {
         return 0;
     }
@@ -307,7 +317,25 @@ pub fn poll_command_line(out: &mut [u8]) -> i32 {
 }
 
 pub fn is_connected() -> bool {
-    CONNECTED.load(Ordering::Acquire)
+    if !CONNECTED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let handle = PIPE_HANDLE.load(Ordering::Acquire) as Handle;
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        close_event_pipe();
+        return false;
+    }
+
+    // If a fresh server instance is waiting while we still think we're connected,
+    // our client handle belongs to a dead AimMod instance. Drop it so the mod
+    // reconnect loop can bind to the new server immediately.
+    if pipe_instance_available(EVENT_PIPE_NAME.as_ptr()) {
+        close_event_pipe();
+        return false;
+    }
+
+    true
 }
 
 pub fn close() {
