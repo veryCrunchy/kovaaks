@@ -388,6 +388,43 @@ function mean(arr: number[]) {
   return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
 
+type ShotTelemetryDisplayMode = "context" | "samples";
+
+function formatShotTelemetryEntitySuffix(entityId: string): string {
+  const compact = entityId.replace(/[^a-zA-Z0-9]/g, "");
+  if (!compact) return entityId;
+  return compact.slice(-6).toUpperCase();
+}
+
+function formatShotTelemetryTargetLabel(
+  profile: string | null | undefined,
+  entityId: string,
+  duplicateProfile: boolean,
+): string {
+  const baseLabel = profile?.trim() || entityId;
+  if (!duplicateProfile) return baseLabel;
+  return `${baseLabel} · ${formatShotTelemetryEntitySuffix(entityId)}`;
+}
+
+function selectShotTelemetryWindowMs(durationSecs: number | null, sampleCount: number): number {
+  if (durationSecs != null) {
+    if (durationSecs <= 45) return 5_000;
+    if (durationSecs <= 120) return 10_000;
+    if (durationSecs <= 300) return 15_000;
+    return 30_000;
+  }
+  if (sampleCount <= 24) return 5_000;
+  if (sampleCount <= 72) return 10_000;
+  return 15_000;
+}
+
+function formatTelemetryWindowLabel(startMs: number, endMs: number): string {
+  const start = formatTelemetryOffset(startMs);
+  const end = formatTelemetryOffset(endMs);
+  if (start === end) return start;
+  return `${start}-${end}`;
+}
+
 function scenarioTypeSortRank(type: string | null | undefined) {
   if (!type || type === "Unknown") return "zzzz-unknown";
   return type.toLowerCase();
@@ -2429,6 +2466,7 @@ function ReplayTab({
   const [runSummary, setRunSummary] = useState<BridgeRunSnapshot | null>(null);
   const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
   const [shotTelemetry, setShotTelemetry] = useState<BridgeShotTelemetryEvent[]>([]);
+  const [shotTelemetryDisplayMode, setShotTelemetryDisplayMode] = useState<ShotTelemetryDisplayMode>("context");
   const [loading, setLoading] = useState(false);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
   // const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
@@ -2557,22 +2595,42 @@ function ReplayTab({
       ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
       : null
     );
+  const nearestTargetProfileEntityCounts = useMemo(() => {
+    const counts = new Map<string, Set<string>>();
+    for (const event of shotTelemetry) {
+      const botTargets = event.targets.filter((target) => target.is_bot);
+      const nearest =
+        botTargets.find((target) => target.is_nearest)
+        ?? botTargets[0]
+        ?? event.targets.find((target) => target.is_nearest)
+        ?? event.targets[0];
+      if (!nearest) continue;
+      const profile = nearest.profile?.trim() || nearest.entity_id;
+      const entityIds = counts.get(profile) ?? new Set<string>();
+      entityIds.add(nearest.entity_id);
+      counts.set(profile, entityIds);
+    }
+    return counts;
+  }, [shotTelemetry]);
   const shotTelemetrySummary = useMemo(() => {
     if (shotTelemetry.length === 0) return null;
     const nearestDistances: number[] = [];
     const nearestYawErrors: number[] = [];
     const nearestPitchErrors: number[] = [];
-    const profileCounts = new Map<string, number>();
+    const profileCounts = new Map<string, { label: string; count: number }>();
     let firedEvents = 0;
     let hitEvents = 0;
-    let botTargetTotal = 0;
+    let totalEvents = 0;
+    let weightedBotTargetTotal = 0;
 
     for (const event of shotTelemetry) {
-      if (event.event === "shot_fired") firedEvents += 1;
-      if (event.event === "shot_hit") hitEvents += 1;
+      const weight = Math.max(1, event.count ?? 1);
+      totalEvents += weight;
+      if (event.event === "shot_fired") firedEvents += weight;
+      if (event.event === "shot_hit") hitEvents += weight;
 
       const botTargets = event.targets.filter((target) => target.is_bot);
-      botTargetTotal += botTargets.length;
+      weightedBotTargetTotal += botTargets.length * weight;
 
       const nearest =
         botTargets.find((target) => target.is_nearest)
@@ -2581,30 +2639,162 @@ function ReplayTab({
         ?? event.targets[0];
       if (!nearest) continue;
 
-      const label = nearest.profile?.trim() || nearest.entity_id;
-      profileCounts.set(label, (profileCounts.get(label) ?? 0) + 1);
+      const baseProfile = nearest.profile?.trim() || nearest.entity_id;
+      const duplicateProfile = (nearestTargetProfileEntityCounts.get(baseProfile)?.size ?? 0) > 1;
+      const identityKey = `${baseProfile}::${nearest.entity_id}`;
+      const current = profileCounts.get(identityKey);
+      profileCounts.set(identityKey, {
+        label: formatShotTelemetryTargetLabel(nearest.profile, nearest.entity_id, duplicateProfile),
+        count: (current?.count ?? 0) + weight,
+      });
 
       const distance = nearest.distance_3d ?? nearest.distance_2d;
-      if (distance != null) nearestDistances.push(distance);
-      if (nearest.yaw_error_deg != null) nearestYawErrors.push(Math.abs(nearest.yaw_error_deg));
-      if (nearest.pitch_error_deg != null) nearestPitchErrors.push(Math.abs(nearest.pitch_error_deg));
+      if (distance != null) {
+        for (let i = 0; i < weight; i += 1) nearestDistances.push(distance);
+      }
+      if (nearest.yaw_error_deg != null) {
+        for (let i = 0; i < weight; i += 1) nearestYawErrors.push(Math.abs(nearest.yaw_error_deg));
+      }
+      if (nearest.pitch_error_deg != null) {
+        for (let i = 0; i < weight; i += 1) nearestPitchErrors.push(Math.abs(nearest.pitch_error_deg));
+      }
     }
 
     return {
-      totalEvents: shotTelemetry.length,
+      totalEvents,
       firedEvents,
       hitEvents,
-      avgBotCount: botTargetTotal > 0 ? botTargetTotal / shotTelemetry.length : null,
+      avgBotCount: weightedBotTargetTotal > 0 && totalEvents > 0
+        ? weightedBotTargetTotal / totalEvents
+        : null,
       avgNearestDistance: nearestDistances.length > 0 ? mean(nearestDistances) : null,
       avgNearestYawError: nearestYawErrors.length > 0 ? mean(nearestYawErrors) : null,
       avgNearestPitchError: nearestPitchErrors.length > 0 ? mean(nearestPitchErrors) : null,
-      topProfiles: [...profileCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4),
+      topProfiles: [...profileCounts.values()]
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 4)
+        .map((entry) => [entry.label, entry.count] as const),
     };
-  }, [shotTelemetry]);
-  const recentShotTelemetryRows = useMemo(() => {
+  }, [nearestTargetProfileEntityCounts, shotTelemetry]);
+  const shotTelemetryContext = useMemo(() => {
+    if (shotTelemetry.length === 0) return { windowMs: 10_000, rows: [] as Array<{
+      key: string;
+      startMs: number;
+      endMs: number;
+      firedCount: number;
+      hitCount: number;
+      accuracyPct: number | null;
+      avgBotCount: number | null;
+      nearestLabel: string;
+      nearestDistance: number | null;
+      yawError: number | null;
+      pitchError: number | null;
+    }> };
+    const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
+    const windowMs = selectShotTelemetryWindowMs(runDurationSecs, shotTelemetry.length);
+    const windows = new Map<number, {
+      startMs: number;
+      endMs: number;
+      firedCount: number;
+      hitCount: number;
+      weightedBotCount: number;
+      weightedEventCount: number;
+      weightedDistanceSum: number;
+      weightedDistanceCount: number;
+      weightedYawSum: number;
+      weightedYawCount: number;
+      weightedPitchSum: number;
+      weightedPitchCount: number;
+      nearestCounts: Map<string, number>;
+    }>();
+
+    for (const event of shotTelemetry) {
+      const offsetMs = Math.max(0, event.ts_ms - firstTs);
+      const bucketIndex = Math.floor(offsetMs / windowMs);
+      const bucketStartMs = bucketIndex * windowMs;
+      const bucketEndMs = Math.min(bucketStartMs + windowMs - 1, Math.max(bucketStartMs, offsetMs));
+      const current = windows.get(bucketIndex) ?? {
+        startMs: bucketStartMs,
+        endMs: bucketEndMs,
+        firedCount: 0,
+        hitCount: 0,
+        weightedBotCount: 0,
+        weightedEventCount: 0,
+        weightedDistanceSum: 0,
+        weightedDistanceCount: 0,
+        weightedYawSum: 0,
+        weightedYawCount: 0,
+        weightedPitchSum: 0,
+        weightedPitchCount: 0,
+        nearestCounts: new Map<string, number>(),
+      };
+
+      current.endMs = Math.max(current.endMs, offsetMs);
+      const weight = Math.max(1, event.count ?? 1);
+      if (event.event === "shot_fired") current.firedCount += weight;
+      if (event.event === "shot_hit") current.hitCount += weight;
+
+      const botTargets = event.targets.filter((target) => target.is_bot);
+      current.weightedBotCount += botTargets.length * weight;
+      current.weightedEventCount += weight;
+
+      const nearest =
+        botTargets.find((target) => target.is_nearest)
+        ?? botTargets[0]
+        ?? event.targets.find((target) => target.is_nearest)
+        ?? event.targets[0]
+        ?? null;
+      if (nearest) {
+        const profileKey = nearest.profile?.trim() || nearest.entity_id;
+        const duplicateProfile = (nearestTargetProfileEntityCounts.get(profileKey)?.size ?? 0) > 1;
+        const label = formatShotTelemetryTargetLabel(nearest.profile, nearest.entity_id, duplicateProfile);
+        current.nearestCounts.set(label, (current.nearestCounts.get(label) ?? 0) + weight);
+
+        const distance = nearest.distance_3d ?? nearest.distance_2d;
+        if (distance != null) {
+          current.weightedDistanceSum += distance * weight;
+          current.weightedDistanceCount += weight;
+        }
+        if (nearest.yaw_error_deg != null) {
+          current.weightedYawSum += Math.abs(nearest.yaw_error_deg) * weight;
+          current.weightedYawCount += weight;
+        }
+        if (nearest.pitch_error_deg != null) {
+          current.weightedPitchSum += Math.abs(nearest.pitch_error_deg) * weight;
+          current.weightedPitchCount += weight;
+        }
+      }
+
+      windows.set(bucketIndex, current);
+    }
+
+    return {
+      windowMs,
+      rows: [...windows.entries()]
+        .sort((a, b) => b[0] - a[0])
+        .map(([bucketIndex, bucket]) => {
+          const nearestLabel =
+            [...bucket.nearestCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
+          return {
+            key: `window-${bucketIndex}`,
+            startMs: bucket.startMs,
+            endMs: bucket.endMs,
+            firedCount: bucket.firedCount,
+            hitCount: bucket.hitCount,
+            accuracyPct: bucket.firedCount > 0 ? (bucket.hitCount / bucket.firedCount) * 100 : null,
+            avgBotCount: bucket.weightedEventCount > 0 ? bucket.weightedBotCount / bucket.weightedEventCount : null,
+            nearestLabel,
+            nearestDistance: bucket.weightedDistanceCount > 0 ? bucket.weightedDistanceSum / bucket.weightedDistanceCount : null,
+            yawError: bucket.weightedYawCount > 0 ? bucket.weightedYawSum / bucket.weightedYawCount : null,
+            pitchError: bucket.weightedPitchCount > 0 ? bucket.weightedPitchSum / bucket.weightedPitchCount : null,
+          };
+        }),
+    };
+  }, [nearestTargetProfileEntityCounts, runDurationSecs, shotTelemetry]);
+  const shotTelemetrySampleRows = useMemo(() => {
     if (shotTelemetry.length === 0) return [];
     const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
-    return shotTelemetry.slice(-12).reverse().map((event, index) => {
+    return [...shotTelemetry].reverse().map((event, index) => {
       const botTargets = event.targets.filter((target) => target.is_bot);
       const nearest =
         botTargets.find((target) => target.is_nearest)
@@ -2617,15 +2807,22 @@ function ReplayTab({
         key: `${event.ts_ms}-${event.sample_seq ?? index}-${event.event}`,
         offsetMs: Math.max(0, event.ts_ms - firstTs),
         eventLabel: event.event === "shot_hit" ? "Hit" : "Fired",
+        count: Math.max(1, event.count ?? 1),
         total: event.total,
         botCount: botTargets.length,
-        nearestLabel: nearest ? (nearest.profile?.trim() || nearest.entity_id) : "—",
+        nearestLabel: nearest
+          ? formatShotTelemetryTargetLabel(
+              nearest.profile,
+              nearest.entity_id,
+              (nearestTargetProfileEntityCounts.get(nearest.profile?.trim() || nearest.entity_id)?.size ?? 0) > 1,
+            )
+          : "—",
         nearestDistance: nearest?.distance_3d ?? nearest?.distance_2d ?? null,
         yawError: nearest?.yaw_error_deg != null ? Math.abs(nearest.yaw_error_deg) : null,
         pitchError: nearest?.pitch_error_deg != null ? Math.abs(nearest.pitch_error_deg) : null,
       };
     });
-  }, [shotTelemetry]);
+  }, [nearestTargetProfileEntityCounts, shotTelemetry]);
 
   // In-game replay logic disabled for development. Logic is preserved but not executed.
   // const handlePlayInGameReplay = async () => {
@@ -2928,56 +3125,148 @@ function ReplayTab({
                     ))}
                   </div>
                 )}
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
+                    {shotTelemetryDisplayMode === "context"
+                      ? `Showing ${shotTelemetryContext.rows.length.toLocaleString()} full-run context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`
+                      : `Showing all ${shotTelemetry.length.toLocaleString()} raw persisted telemetry samples for this run.`}
+                  </div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    {([
+                      { key: "context", label: "Context" },
+                      { key: "samples", label: "Samples" },
+                    ] as const).map((option) => {
+                      const active = shotTelemetryDisplayMode === option.key;
+                      return (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => setShotTelemetryDisplayMode(option.key)}
+                          style={{
+                            background: active ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            borderRadius: 999,
+                            color: active ? C.accent : C.textMuted,
+                            cursor: "pointer",
+                            fontSize: 10,
+                            padding: "5px 8px",
+                            fontFamily: "inherit",
+                            textTransform: "uppercase",
+                            letterSpacing: "0.06em",
+                            fontWeight: 700,
+                          }}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
                 <div style={{ overflowX: "auto" }}>
-                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                    <thead>
-                      <tr style={{ color: "rgba(255,255,255,0.35)" }}>
-                        {["T", "Event", "Total", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
-                          <th
-                            key={heading}
-                            style={{
-                              padding: "0 0 6px",
-                              textAlign: "left",
-                              fontWeight: 500,
-                              borderBottom: "1px solid rgba(255,255,255,0.07)",
-                            }}
-                          >
-                            {heading}
-                          </th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {recentShotTelemetryRows.map((row) => (
-                        <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                            {formatTelemetryOffset(row.offsetMs)}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: row.eventLabel === "Hit" ? "#00f5a0" : "#ffd166" }}>
-                            {row.eventLabel}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                            {row.total ?? "—"}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                            {row.botCount || "—"}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                            {row.nearestLabel}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                            {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                            {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
-                          </td>
-                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                            {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
-                          </td>
+                  {shotTelemetryDisplayMode === "context" ? (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                          {["Window", "Fired", "Hit", "Acc", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                            <th
+                              key={heading}
+                              style={{
+                                padding: "0 0 6px",
+                                textAlign: "left",
+                                fontWeight: 500,
+                                borderBottom: "1px solid rgba(255,255,255,0.07)",
+                              }}
+                            >
+                              {heading}
+                            </th>
+                          ))}
                         </tr>
-                      ))}
-                    </tbody>
-                  </table>
+                      </thead>
+                      <tbody>
+                        {shotTelemetryContext.rows.map((row) => (
+                          <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {formatTelemetryWindowLabel(row.startMs, row.endMs)}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>
+                              {row.firedCount.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "#00f5a0" }}>
+                              {row.hitCount.toLocaleString()}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.accuracyPct != null ? `${row.accuracyPct.toFixed(1)}%` : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.avgBotCount != null ? row.avgBotCount.toFixed(1) : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.nearestLabel}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  ) : (
+                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                      <thead>
+                        <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                          {["T", "Event", "Total", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                            <th
+                              key={heading}
+                              style={{
+                                padding: "0 0 6px",
+                                textAlign: "left",
+                                fontWeight: 500,
+                                borderBottom: "1px solid rgba(255,255,255,0.07)",
+                              }}
+                            >
+                              {heading}
+                            </th>
+                          ))}
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {shotTelemetrySampleRows.map((row) => (
+                          <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {formatTelemetryOffset(row.offsetMs)}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: row.eventLabel === "Hit" ? "#00f5a0" : "#ffd166" }}>
+                              {row.count > 1 ? `${row.eventLabel} ×${row.count}` : row.eventLabel}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.total ?? "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.botCount || "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                              {row.nearestLabel}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
+                            </td>
+                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                              {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
               </div>
             ) : (
