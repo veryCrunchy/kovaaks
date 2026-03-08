@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 6;
+const SCHEMA_VERSION: i32 = 7;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -524,6 +524,7 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 shot_seq_idx INTEGER NOT NULL,
                 event_kind TEXT NOT NULL,
                 ts_ms INTEGER NOT NULL,
+                count INTEGER,
                 total INTEGER,
                 run_id INTEGER,
                 sample_seq INTEGER,
@@ -593,6 +594,26 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             COMMIT;
             ",
         )?;
+    }
+
+    if user_version < 7 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            ALTER TABLE session_shot_events ADD COLUMN count INTEGER;
+            PRAGMA user_version = 7;
+            COMMIT;
+            ",
+        )
+        .or_else(|_| {
+            conn.execute_batch(
+                "
+                BEGIN;
+                PRAGMA user_version = 7;
+                COMMIT;
+                ",
+            )
+        })?;
     }
 
     Ok(())
@@ -710,6 +731,7 @@ fn query_shot_telemetry(
             e.shot_seq_idx AS shot_seq_idx,
             e.event_kind AS event_kind,
             e.ts_ms AS ts_ms,
+            e.count AS count,
             e.total AS total,
             e.run_id AS run_id,
             e.sample_seq AS sample_seq,
@@ -805,7 +827,9 @@ fn query_shot_telemetry(
             current_event = Some(crate::bridge::BridgeShotTelemetryEvent {
                 event: row.get::<_, String>("event_kind")?,
                 ts_ms: row.get::<_, i64>("ts_ms")? as u64,
-                count: None,
+                count: row
+                    .get::<_, Option<i64>>("count")?
+                    .map(|value| value as u32),
                 total: row
                     .get::<_, Option<i64>>("total")?
                     .map(|value| value as u32),
@@ -973,15 +997,6 @@ pub fn upsert_run_capture(
         "DELETE FROM session_run_timelines WHERE session_id = ?1",
         params![session_id],
     )?;
-    tx.execute(
-        "DELETE FROM session_shot_targets WHERE session_id = ?1",
-        params![session_id],
-    )?;
-    tx.execute(
-        "DELETE FROM session_shot_events WHERE session_id = ?1",
-        params![session_id],
-    )?;
-
     {
         let mut insert = tx.prepare(
             "
@@ -1019,6 +1034,19 @@ pub fn upsert_run_capture(
         }
     }
 
+    tx.commit()?;
+
+    let mut conn = connect(app)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM session_shot_targets WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_shot_events WHERE session_id = ?1",
+        params![session_id],
+    )?;
+
     {
         let mut insert_event = tx.prepare(
             "
@@ -1027,6 +1055,7 @@ pub fn upsert_run_capture(
                 shot_seq_idx,
                 event_kind,
                 ts_ms,
+                count,
                 total,
                 run_id,
                 sample_seq,
@@ -1048,7 +1077,7 @@ pub fn upsert_run_capture(
                 player_vy,
                 player_vz
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)
             ",
         )?;
         let mut insert_target = tx.prepare(
@@ -1087,6 +1116,7 @@ pub fn upsert_run_capture(
                 event_index as i64,
                 &event.event,
                 event.ts_ms as i64,
+                event.count.map(|value| value as i64),
                 event.total.map(|value| value as i64),
                 event.run_id.map(|value| value as i64),
                 event.sample_seq.map(|value| value as i64),

@@ -608,7 +608,7 @@ mod imp {
     use std::os::windows::ffi::OsStrExt;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex, OnceLock};
+    use std::sync::{Arc, Condvar, Mutex, OnceLock};
     use std::time::{Duration, Instant};
 
     use tauri::{AppHandle, Emitter};
@@ -677,6 +677,38 @@ mod imp {
             "unknown".to_string()
         } else {
             out
+        }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct StateSnapshotAckState {
+        last_reason: Option<String>,
+        last_seen_at: Option<Instant>,
+    }
+
+    fn state_snapshot_ack() -> &'static (Mutex<StateSnapshotAckState>, Condvar) {
+        static ACK: OnceLock<(Mutex<StateSnapshotAckState>, Condvar)> = OnceLock::new();
+        ACK.get_or_init(|| (Mutex::new(StateSnapshotAckState::default()), Condvar::new()))
+    }
+
+    fn parse_state_snapshot_reason(raw: &str) -> Option<String> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+        let reason = obj.get("reason")?.as_str()?.trim();
+        if reason.is_empty() {
+            None
+        } else {
+            Some(reason.to_string())
+        }
+    }
+
+    fn note_state_snapshot_ack(raw: &str) {
+        let reason = parse_state_snapshot_reason(raw);
+        let (lock, cv) = state_snapshot_ack();
+        if let Ok(mut state) = lock.lock() {
+            state.last_reason = reason;
+            state.last_seen_at = Some(Instant::now());
+            cv.notify_all();
         }
     }
 
@@ -847,6 +879,45 @@ mod imp {
                 reason
             );
             false
+        }
+    }
+
+    fn request_mod_state_sync_and_wait(reason: &str, timeout: Duration) -> bool {
+        let reason = sanitize_state_request_reason(reason);
+        let request_started_at = Instant::now();
+        let (lock, cv) = state_snapshot_ack();
+        if let Ok(mut state) = lock.lock() {
+            if state.last_reason.as_deref() == Some(reason.as_str()) {
+                state.last_seen_at = None;
+            }
+        }
+        if !request_mod_state_sync(&reason) {
+            return false;
+        }
+
+        let deadline = request_started_at + timeout;
+        let mut state = match lock.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        loop {
+            let matched = state.last_reason.as_deref() == Some(reason.as_str())
+                && state
+                    .last_seen_at
+                    .is_some_and(|seen_at| seen_at >= request_started_at);
+            if matched {
+                return true;
+            }
+
+            let now = Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline.saturating_duration_since(now);
+            let Ok((next_state, _)) = cv.wait_timeout(state, remaining) else {
+                return false;
+            };
+            state = next_state;
         }
     }
 
@@ -1214,7 +1285,15 @@ mod imp {
         state.metrics.accuracy_pct = finite_non_negative(stats.accuracy_pct);
         state.metrics.damage_done = finite_non_negative(stats.damage_dealt);
         state.metrics.damage_possible = finite_non_negative(stats.damage_total);
+        state.metrics.damage_efficiency = match (state.metrics.damage_done, state.metrics.damage_possible) {
+            (Some(done), Some(possible)) if possible > 0.0 => Some((done / possible) * 100.0),
+            _ => finite_non_negative(stats.damage_dealt)
+                .zip(finite_non_negative(stats.damage_total))
+                .and_then(|(done, possible)| (possible > 0.0).then_some((done / possible) * 100.0)),
+        };
         state.metrics.score_per_minute = finite_non_negative(stats.spm);
+        state.metrics.score_total = finite_non_negative(stats.score_total);
+        state.metrics.score_total_derived = finite_non_negative(stats.score_total_derived);
 
         if let Some(spm) = state.metrics.score_per_minute {
             state.peak_score_per_minute = Some(
@@ -1647,12 +1726,35 @@ mod imp {
 
         let duration_hint = state.metrics.duration_secs;
         ensure_run_capture_started_locked(&mut state, duration_hint);
+        for event in &events {
+            let count = event.count.filter(|value| *value > 0).unwrap_or(1);
+            match event.event.as_str() {
+                "shot_fired" => {
+                    state.event_counts.shot_fired_events =
+                        state.event_counts.shot_fired_events.saturating_add(count);
+                    observe_shot_fired_for_recovery(&mut state, count);
+                    if let Some(total) = event.total {
+                        state.metrics.shots_fired = Some(total as f64);
+                    }
+                }
+                "shot_hit" => {
+                    state.event_counts.shot_hit_events =
+                        state.event_counts.shot_hit_events.saturating_add(count);
+                    observe_shot_hit_for_recovery(&mut state, count);
+                    if let Some(total) = event.total {
+                        state.metrics.shots_hit = Some(total as f64);
+                    }
+                }
+                _ => {}
+            }
+        }
         state.shot_telemetry.extend(events);
         if state.shot_telemetry.len() > MAX_SHOT_TELEMETRY_EVENTS {
             let trim = state.shot_telemetry.len() - MAX_SHOT_TELEMETRY_EVENTS;
             state.shot_telemetry.drain(0..trim);
         }
         state.shot_telemetry_summary = summarize_shot_telemetry(&state.shot_telemetry);
+        record_run_timeline_point_locked(&mut state, duration_hint);
     }
 
     fn observe_replay_stream_raw(raw: &str) {
@@ -2158,6 +2260,13 @@ mod imp {
             .map(|state| state.challenge_active)
             .unwrap_or(false);
         end_session_tracking(app, "file_watcher:session_complete", challenge_active);
+    }
+
+    pub fn sync_run_capture_for_persistence(timeout: Duration) -> bool {
+        if !bridge_dll_connected_flag().load(Ordering::SeqCst) {
+            return false;
+        }
+        request_mod_state_sync_and_wait("session_complete_persist", timeout)
     }
 
     fn authoritative_run_time_hint_from_stats(stats: &BridgeStatsPanelEvent) -> Option<f64> {
@@ -2876,24 +2985,14 @@ mod imp {
 
             if fn_name.ends_with(":IsInChallenge") {
                 if let Some(in_challenge) = bool_sample {
-                    match update_challenge_transition(in_challenge) {
-                        ChallengeTransition::Entered => {
-                            begin_session_tracking(app, "class_hook:IsInChallenge", true);
-                        }
-                        // Avoid ending sessions directly from class-hook samples:
-                        // explicit lifecycle events are less jitter-prone for terminal transitions.
-                        ChallengeTransition::Exited => {}
-                        ChallengeTransition::None => {}
-                    }
+                    let _ = update_challenge_transition(in_challenge);
                 }
             }
         }
 
         let mut challenge_transition_active: Option<bool> = None;
         match parsed.ev.as_str() {
-            "session_start" => {
-                begin_session_tracking(app, "bridge:session_start", false);
-            }
+            "session_start" => {}
             "session_end" => {
                 handle_session_end_signal(app, "bridge:session_end");
             }
@@ -2966,6 +3065,7 @@ mod imp {
         }
 
         if parsed.ev == "state_snapshot" {
+            note_state_snapshot_ack(&parsed.raw);
             if let Ok(mut state) = bridge_session_state().lock() {
                 state.state_resync_pending = false;
                 state.last_state_resync_request_at = None;
@@ -3830,7 +3930,7 @@ mod imp {
 
     fn read_events(pipe: HANDLE, app: &AppHandle) {
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut tmp = [0u8; 512];
+        let mut tmp = [0u8; 4096];
         loop {
             let mut nread: u32 = 0;
             match unsafe { ReadFile(pipe, Some(&mut tmp), Some(&mut nread), None) } {
@@ -3855,11 +3955,12 @@ mod imp {
                                                 | "hook_focus_probe_typed"
                                                 | "class_hook_probe"
                                                 | "script_hook_probe"
+                                                | "pull_source"
                                                 | "pull_snapshot"
                                                 | "shot_fired_telemetry"
                                                 | "shot_hit_telemetry"
                                                 | "shot_telemetry_batch"
-                                        )
+                                        ) || ev.starts_with("pull_")
                                     };
                                     let suppress_bridge_log_event = parsed_event
                                         .as_ref()

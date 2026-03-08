@@ -31,6 +31,14 @@ pub struct SessionResult {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SessionCompletePayload {
+    #[serde(flatten)]
+    pub result: SessionResult,
+    pub stats_panel: Option<crate::session_store::StatsPanelSnapshot>,
+    pub run_snapshot: Option<crate::bridge::BridgeRunSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct CsvImportSummary {
     pub stats_dir: String,
     pub scanned: usize,
@@ -223,7 +231,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             );
                             // Capture smoothness summary BEFORE draining buffers
                             let smoothness = crate::mouse_hook::session_summary();
-                            let stats_panel = crate::bridge::take_stats_panel_snapshot();
+                            let mut stats_panel = crate::bridge::take_stats_panel_snapshot();
                             // Seal the run through the bridge lifecycle so session-active
                             // state, mouse metrics, and screen capture stay in sync.
                             crate::bridge::finalize_session_tracking_from_csv_completion(app);
@@ -243,6 +251,25 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                         .map(|v| v as f32),
                                 }
                             });
+                            if let Some(base_stats_panel) = stats_panel.clone() {
+                                let classification = crate::bridge::classify_persisted_session(
+                                    &base_stats_panel,
+                                    run_snapshot.as_ref(),
+                                    run_snapshot
+                                        .as_ref()
+                                        .map(|snap| snap.shot_telemetry.as_slice())
+                                        .unwrap_or(&[]),
+                                );
+                                if classification.family != "Unknown"
+                                    && (base_stats_panel.scenario_type == "Unknown"
+                                        || base_stats_panel.scenario_subtype.is_none())
+                                {
+                                    let mut next = base_stats_panel;
+                                    next.scenario_type = classification.family;
+                                    next.scenario_subtype = classification.subtype;
+                                    stats_panel = Some(next);
+                                }
+                            }
                             // Build session id and persist the session row before
                             // child replay/run tables, which are foreign-keyed to sessions.
                             let session_id = format!(
@@ -262,7 +289,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 damage_done: result.damage_done,
                                 timestamp: result.timestamp.clone(),
                                 smoothness,
-                                stats_panel,
+                                stats_panel: stats_panel.clone(),
                                 shot_timing,
                                 has_replay: false,
                             };
@@ -295,7 +322,14 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                     );
                                 }
                             }
-                            let _ = app.emit(EVENT_SESSION_COMPLETE, &result);
+                            let _ = app.emit(
+                                EVENT_SESSION_COMPLETE,
+                                SessionCompletePayload {
+                                    result: result.clone(),
+                                    stats_panel: stats_panel.clone(),
+                                    run_snapshot: run_snapshot.clone(),
+                                },
+                            );
                             // Bring the stats window to the foreground so the
                             // user sees results immediately without manual action.
                             if let Some(win) = app.get_webview_window("stats") {
