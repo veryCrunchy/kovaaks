@@ -2232,9 +2232,11 @@ mod imp {
         ttk_summary: Option<&TtkSampleSummary>,
     ) -> ScenarioClassification {
         let kills = stats.kills.unwrap_or(0);
+        let hits = stats.accuracy_hits.unwrap_or(0);
         let shots = stats.accuracy_shots.unwrap_or(0);
         let damage_total = stats.damage_total.unwrap_or(0.0);
         let damage_dealt = stats.damage_dealt.unwrap_or(0.0);
+        let damage_present = damage_total > 0.0001 || damage_dealt > 0.0001;
         let bot_count = shot_summary
             .mode_bot_count
             .or(shot_summary.max_bot_count)
@@ -2253,16 +2255,29 @@ mod imp {
                 && (summary.stddev_secs <= 0.08
                     || (summary.stddev_secs / summary.mean_secs.max(0.05)) <= 0.18)
         });
+        let sustained_damage_tracking_candidate = kills == 0
+            && hits >= 30
+            && shots >= 120
+            && damage_present
+            && stats.kps.map_or(true, |value| value <= 0.01)
+            && (shot_summary.sample_count == 0
+                || shot_summary.sample_count >= 6
+                || bot_count.is_none());
         let tracking_candidate =
-            (kills == 0
-                && damage_total <= 0.0001
-                && damage_dealt <= 0.0001
-                && shot_summary.sample_count >= 6
-                && (low_or_zero_ttk
-                    || stable_ttk
-                    || bot_count.map_or(false, |value| (1..=5).contains(&value) || (8..=10).contains(&value))))
+            sustained_damage_tracking_candidate
+                || (kills == 0
+                    && damage_total <= 0.0001
+                    && damage_dealt <= 0.0001
+                    && shot_summary.sample_count >= 6
+                    && (low_or_zero_ttk
+                        || stable_ttk
+                        || bot_count.map_or(false, |value| {
+                            (1..=5).contains(&value) || (8..=10).contains(&value)
+                        })))
                 || (low_or_zero_ttk
-                    && bot_count.map_or(false, |value| (1..=5).contains(&value) || (8..=10).contains(&value)));
+                    && bot_count.map_or(false, |value| {
+                        (1..=5).contains(&value) || (8..=10).contains(&value)
+                    }));
 
         if tracking_candidate {
             return ScenarioClassification {
