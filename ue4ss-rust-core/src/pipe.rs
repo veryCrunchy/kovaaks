@@ -17,7 +17,6 @@ const GENERIC_READ: u32 = 0x8000_0000;
 const FILE_SHARE_NONE: u32 = 0x0000_0000;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
-const PIPE_NOWAIT: u32 = 0x0000_0001;
 
 type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
@@ -55,12 +54,6 @@ extern "system" {
         lp_total_bytes_avail: *mut u32,
         lp_bytes_left_this_message: *mut u32,
     ) -> i32;
-    fn SetNamedPipeHandleState(
-        h_named_pipe: Handle,
-        lp_mode: *mut u32,
-        lp_max_collection_count: *mut u32,
-        lp_collect_data_timeout: *mut u32,
-    ) -> i32;
     fn WaitNamedPipeA(lp_named_pipe_name: *const u8, n_time_out: u32) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
     fn GetLastError() -> u32;
@@ -73,22 +66,6 @@ fn command_buffer() -> &'static Mutex<Vec<u8>> {
 
 fn wait_named_pipe_now(name: *const u8) -> Result<(), u32> {
     let ok = unsafe { WaitNamedPipeA(name, 0) };
-    if ok != 0 {
-        return Ok(());
-    }
-    Err(unsafe { GetLastError() })
-}
-
-fn set_pipe_nowait(handle: Handle) -> Result<(), u32> {
-    let mut mode = PIPE_NOWAIT;
-    let ok = unsafe {
-        SetNamedPipeHandleState(
-            handle,
-            &mut mode,
-            ptr::null_mut(),
-            ptr::null_mut(),
-        )
-    };
     if ok != 0 {
         return Ok(());
     }
@@ -130,16 +107,6 @@ pub fn connect() -> Result<(), String> {
         )
     };
     if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
-        if let Err(err) = set_pipe_nowait(handle) {
-            LAST_ERROR.store(err, Ordering::Release);
-            unsafe {
-                let _ = CloseHandle(handle);
-            }
-            return Err(format!(
-                "SetNamedPipeHandleState(\\\\.\\pipe\\kovaaks-bridge) failed with {}",
-                err
-            ));
-        }
         PIPE_HANDLE.store(handle as usize, Ordering::Release);
         CONNECTED.store(true, Ordering::Release);
         LAST_ERROR.store(0, Ordering::Release);
