@@ -121,13 +121,34 @@ pub struct SessionRecord {
     pub has_replay: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize)]
+pub struct SessionMergeResult {
+    pub imported: usize,
+    pub skipped_existing: usize,
+    pub total_after: usize,
+}
+
+fn sort_and_prune_sessions(sessions: &mut Vec<SessionRecord>) {
+    sessions.sort_by(|a, b| a.timestamp.cmp(&b.timestamp).then(a.id.cmp(&b.id)));
+    if sessions.len() > MAX_SESSIONS {
+        sessions.drain(0..sessions.len() - MAX_SESSIONS);
+    }
+}
+
 // ─── Public API ────────────────────────────────────────────────────────────────
 
 pub fn add_session(app: &AppHandle, record: SessionRecord) {
+    let _ = merge_sessions(app, vec![record]);
+}
+
+pub fn merge_sessions<I>(app: &AppHandle, records: I) -> SessionMergeResult
+where
+    I: IntoIterator<Item = SessionRecord>,
+{
     use tauri_plugin_store::StoreExt;
     let Ok(store) = app.store(STORE_PATH) else {
         log::warn!("session_store: could not open {STORE_PATH}");
-        return;
+        return SessionMergeResult::default();
     };
 
     let mut sessions: Vec<SessionRecord> = store
@@ -135,20 +156,35 @@ pub fn add_session(app: &AppHandle, record: SessionRecord) {
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default();
 
-    sessions.push(record);
+    let mut seen_ids = sessions
+        .iter()
+        .map(|record| record.id.clone())
+        .collect::<std::collections::HashSet<_>>();
+    let mut result = SessionMergeResult::default();
 
-    // Prune oldest entries beyond the cap
-    if sessions.len() > MAX_SESSIONS {
-        sessions.drain(0..sessions.len() - MAX_SESSIONS);
+    for record in records {
+        if !seen_ids.insert(record.id.clone()) {
+            result.skipped_existing += 1;
+            continue;
+        }
+        sessions.push(record);
+        result.imported += 1;
     }
 
-    store.set(
-        STORE_KEY.to_string(),
-        serde_json::to_value(&sessions).unwrap_or_default(),
-    );
-    if let Err(e) = store.save() {
-        log::warn!("session_store: save error: {e}");
+    if result.imported > 0 {
+        sort_and_prune_sessions(&mut sessions);
+
+        store.set(
+            STORE_KEY.to_string(),
+            serde_json::to_value(&sessions).unwrap_or_default(),
+        );
+        if let Err(e) = store.save() {
+            log::warn!("session_store: save error: {e}");
+        }
     }
+
+    result.total_after = sessions.len();
+    result
 }
 
 pub fn get_all_sessions(app: &AppHandle) -> Vec<SessionRecord> {

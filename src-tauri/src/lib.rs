@@ -961,6 +961,18 @@ fn clear_session_history(app: AppHandle) {
 }
 
 #[tauri::command]
+fn import_session_csv_history(
+    app: AppHandle,
+    state: tauri::State<AppState>,
+) -> Result<file_watcher::CsvImportSummary, String> {
+    let stats_dir = {
+        let settings = state.settings.lock().map_err(|e| e.to_string())?;
+        settings.stats_dir.clone()
+    };
+    file_watcher::import_csv_history(&app, &stats_dir)
+}
+
+#[tauri::command]
 fn get_log_buffer() -> Vec<logger::LogEntry> {
     logger::get_buffer()
 }
@@ -1147,6 +1159,7 @@ pub fn run() {
             open_stats_window,
             get_session_history,
             clear_session_history,
+            import_session_csv_history,
             get_overlay_origin,
             get_log_buffer,
             clear_log_buffer,

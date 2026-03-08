@@ -30,6 +30,17 @@ pub struct SessionResult {
     pub csv_path: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CsvImportSummary {
+    pub stats_dir: String,
+    pub scanned: usize,
+    pub parsed: usize,
+    pub imported: usize,
+    pub skipped_existing: usize,
+    pub failed: usize,
+    pub total_after: usize,
+}
+
 // ─── Watcher state ─────────────────────────────────────────────────────────────
 
 static WATCHER: Lazy<Mutex<Option<RecommendedWatcher>>> = Lazy::new(|| Mutex::new(None));
@@ -72,6 +83,71 @@ pub fn restart(app: &AppHandle, stats_dir: &str) {
         *guard = None;
     }
     start(app.clone(), stats_dir);
+}
+
+pub fn import_csv_history(app: &AppHandle, stats_dir: &str) -> Result<CsvImportSummary, String> {
+    let stats_path = PathBuf::from(stats_dir);
+    if !stats_path.exists() {
+        return Err(format!("Stats directory does not exist: {stats_dir}"));
+    }
+    if !stats_path.is_dir() {
+        return Err(format!("Stats path is not a directory: {stats_dir}"));
+    }
+
+    let mut csv_paths = std::fs::read_dir(&stats_path)
+        .map_err(|e| format!("Failed to read stats directory: {e}"))?
+        .filter_map(|entry| entry.ok().map(|item| item.path()))
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("csv"))
+        .collect::<Vec<_>>();
+    csv_paths.sort();
+
+    let mut scanned = 0usize;
+    let mut failed = 0usize;
+    let mut records = Vec::new();
+
+    for path in csv_paths {
+        scanned += 1;
+        match parse_csv(&path) {
+            Ok(result) => {
+                let session_id = format!(
+                    "{}-{}",
+                    result.scenario.to_lowercase().replace(' ', "_"),
+                    result.timestamp
+                );
+                records.push(crate::session_store::SessionRecord {
+                    id: session_id,
+                    scenario: result.scenario,
+                    score: result.score,
+                    accuracy: result.accuracy,
+                    kills: result.kills,
+                    deaths: result.deaths,
+                    duration_secs: result.duration_secs,
+                    avg_ttk: result.avg_ttk,
+                    damage_done: result.damage_done,
+                    timestamp: result.timestamp,
+                    smoothness: None,
+                    stats_panel: None,
+                    shot_timing: None,
+                    has_replay: false,
+                });
+            }
+            Err(error) => {
+                failed += 1;
+                log::warn!("historical csv import: failed to parse {}: {error}", path.display());
+            }
+        }
+    }
+
+    let merge = crate::session_store::merge_sessions(app, records);
+    Ok(CsvImportSummary {
+        stats_dir: stats_dir.to_string(),
+        scanned,
+        parsed: scanned.saturating_sub(failed),
+        imported: merge.imported,
+        skipped_existing: merge.skipped_existing,
+        failed,
+        total_after: merge.total_after,
+    })
 }
 
 // ─── Watcher setup ─────────────────────────────────────────────────────────────
