@@ -20,7 +20,7 @@ mod imp {
     use std::fs::OpenOptions;
     use std::io::{self, Write};
     use std::sync::{Mutex, OnceLock};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
     const DISCORD_CLIENT_ID: &str = "1162428887066742904";
     const DISCORD_PIPE_PREFIX: &str = r"\\.\pipe\discord-ipc-";
@@ -29,6 +29,8 @@ mod imp {
     const DISCORD_SMALL_IMAGE_KEY: &str = "https://cdn.discordapp.com/app-icons/1162428887066742904/798981b85db0ce80a8168c1184ef92a2.png?size=1280";
     const AIMMOD_URL: &str = "https://github.com/veryCrunchy/kovaaks";
     const AIMMOD_DISCORD_URL: &str = "https://discord.gg/snwC66wShD";
+    const BRIDGE_PRESENCE_STALE_AFTER: Duration = Duration::from_secs(8);
+    const PRESENCE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 
     struct DiscordIpcClient {
         pipe: std::fs::File,
@@ -72,6 +74,7 @@ mod imp {
         client: Option<DiscordIpcClient>,
         last_signature: Option<String>,
         last_presence: Option<BridgePresenceState>,
+        last_bridge_presence_at: Option<Instant>,
         nonce: u64,
     }
 
@@ -161,6 +164,65 @@ mod imp {
             elapsed_bucket.unwrap_or_default(),
             timer_bucket.unwrap_or_default(),
         )
+    }
+
+    fn fallback_presence_for_runtime() -> BridgePresenceState {
+        let game_pid = crate::bridge::current_game_pid();
+        let bridge_connected = crate::bridge::is_bridge_dll_connected();
+        let runtime_loaded = game_pid
+            .map(crate::bridge::is_ue4ss_loaded_for_pid)
+            .unwrap_or(false);
+
+        if game_pid.is_some() {
+            let game_state = if bridge_connected {
+                "KovaaK Running".to_string()
+            } else if runtime_loaded {
+                "Bridge Reconnecting".to_string()
+            } else {
+                "KovaaK Running".to_string()
+            };
+
+            BridgePresenceState {
+                game_state_code: 0,
+                game_state,
+                scenario_name: Some("KovaaK's Aim Trainer".to_string()),
+                scenario_type: None,
+                scenario_subtype: None,
+                score_per_minute: None,
+                accuracy_pct: None,
+                kills: None,
+                elapsed_secs: None,
+                time_remaining_secs: None,
+                queue_time_remaining_secs: None,
+            }
+        } else {
+            BridgePresenceState {
+                game_state_code: 0,
+                game_state: "AimMod Running".to_string(),
+                scenario_name: None,
+                scenario_type: None,
+                scenario_subtype: None,
+                score_per_minute: None,
+                accuracy_pct: None,
+                kills: None,
+                elapsed_secs: None,
+                time_remaining_secs: None,
+                queue_time_remaining_secs: None,
+            }
+        }
+    }
+
+    fn current_target_presence(state: &RpcState) -> BridgePresenceState {
+        let bridge_is_fresh = state
+            .last_bridge_presence_at
+            .map(|at| at.elapsed() <= BRIDGE_PRESENCE_STALE_AFTER)
+            .unwrap_or(false);
+        if bridge_is_fresh {
+            if let Some(presence) = state.last_presence.clone() {
+                return presence;
+            }
+        }
+        fallback_presence_for_runtime()
     }
 
     fn build_activity(state: &BridgePresenceState) -> serde_json::Value {
@@ -298,9 +360,7 @@ mod imp {
     }
 
     fn try_send_cached_presence(state: &mut RpcState) {
-        let Some(presence) = state.last_presence.clone() else {
-            return;
-        };
+        let presence = current_target_presence(state);
         let activity = build_activity(&presence);
         let signature = semantic_signature(&presence);
         let sent_ok = if send_activity(state, &activity).is_ok() {
@@ -324,11 +384,13 @@ mod imp {
             .name("discord-rpc-heartbeat".into())
             .spawn(|| {
                 loop {
-                    std::thread::sleep(Duration::from_secs(15));
+                    std::thread::sleep(PRESENCE_HEARTBEAT_INTERVAL);
                     let Ok(mut guard) = rpc_state().lock() else {
                         continue;
                     };
-                    if guard.client.is_some() && guard.last_signature.is_some() {
+                    let target_presence = current_target_presence(&guard);
+                    let target_signature = semantic_signature(&target_presence);
+                    if guard.client.is_some() && guard.last_signature.as_ref() == Some(&target_signature) {
                         continue;
                     }
                     try_send_cached_presence(&mut guard);
@@ -345,6 +407,7 @@ mod imp {
         };
 
         guard.last_presence = Some(state);
+        guard.last_bridge_presence_at = Some(Instant::now());
 
         if guard.last_signature.as_ref() == Some(&signature) {
             return;
