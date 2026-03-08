@@ -1239,8 +1239,9 @@ mod imp {
             t_sec,
             score_per_minute: state.metrics.score_per_minute,
             kills_per_second: state.metrics.kills_per_second,
-            accuracy_pct: state.metrics.accuracy_pct.or(computed_accuracy),
-            damage_efficiency: state.metrics.damage_efficiency.or(computed_damage_eff),
+            // Timeline points should prefer values derived from authoritative totals.
+            accuracy_pct: computed_accuracy.or(state.metrics.accuracy_pct),
+            damage_efficiency: computed_damage_eff.or(state.metrics.damage_efficiency),
             score_total: state.metrics.score_total,
             score_total_derived: state.metrics.score_total_derived,
             kills: state.metrics.kills,
