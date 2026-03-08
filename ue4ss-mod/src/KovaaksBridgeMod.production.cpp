@@ -1254,21 +1254,31 @@ private:
         return std::isfinite(out_value);
     }
 
-    static auto normalize_accuracy_pct(float value) -> float {
-        if (!std::isfinite(value) || value < 0.0f) {
-            return -1.0f;
-        }
-        if (value <= 1.0f) {
-            return value * 100.0f;
-        }
-        return value;
-    }
-
     static auto derive_accuracy_pct(int32_t shots_hit, int32_t shots_fired) -> float {
         if (shots_fired <= 0 || shots_hit < 0) {
             return -1.0f;
         }
         return (static_cast<float>(shots_hit) * 100.0f) / static_cast<float>(shots_fired);
+    }
+
+    static auto normalize_accuracy_pct(float value, int32_t shots_hit, int32_t shots_fired) -> float {
+        if (!std::isfinite(value) || value < 0.0f) {
+            return -1.0f;
+        }
+
+        if (shots_fired > 0 && shots_hit >= 0) {
+            const float derived = derive_accuracy_pct(shots_hit, shots_fired);
+            if (std::isfinite(derived) && derived >= 0.0f && value <= 1.0f) {
+                const float direct_delta = std::fabs(value - derived);
+                const float ratio_delta = std::fabs((value * 100.0f) - derived);
+                const float tolerance = std::max(0.35f, derived * 0.08f);
+                if (ratio_delta + 0.0001f < direct_delta && ratio_delta <= tolerance) {
+                    return value * 100.0f;
+                }
+            }
+        }
+
+        return value;
     }
 
     static auto safe_process_event_call(
@@ -1405,7 +1415,7 @@ private:
             if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
                 return;
             }
-            value = normalize_accuracy_pct(value);
+            value = normalize_accuracy_pct(value, last_shots_hit_, last_shots_fired_);
             const bool have_authoritative_shot_counts = last_shots_fired_ > 0 && last_shots_hit_ >= 0;
             if (!have_authoritative_shot_counts
                 && cache_pull_f32("pull_accuracy", last_accuracy_, value, last_nonzero_accuracy_ms_, now)) {
@@ -1711,7 +1721,7 @@ private:
                     targets_.receive_accuracy_single,
                     targets_.receive_accuracy
                 }, fv)) {
-                current_accuracy = normalize_accuracy_pct(fv);
+                current_accuracy = normalize_accuracy_pct(fv, current_shots_hit, current_shots_fired);
             }
             if (try_read_float(active_receiver, {
                     targets_.get_score_per_minute_value_else,
@@ -2121,7 +2131,7 @@ private:
         {
         EmitTagScope derived_scope(*this, "derived_spm_seconds", "non_ui_probe");
         const float derived_accuracy = derive_accuracy_pct(current_shots_hit, current_shots_fired);
-        current_accuracy = normalize_accuracy_pct(current_accuracy);
+        current_accuracy = normalize_accuracy_pct(current_accuracy, current_shots_hit, current_shots_fired);
         if (current_accuracy < 0.0f && derived_accuracy >= 0.0f) {
             current_accuracy = derived_accuracy;
         }

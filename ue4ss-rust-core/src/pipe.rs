@@ -117,8 +117,8 @@ fn close_event_pipe() {
     }
 }
 
-pub fn connect() -> Result<(), String> {
-    if is_connected() {
+pub fn connect_event() -> Result<(), String> {
+    if is_event_connected() {
         return Ok(());
     }
 
@@ -154,7 +154,7 @@ pub fn connect() -> Result<(), String> {
 }
 
 fn connect_command() -> Result<(), String> {
-    if COMMAND_CONNECTED.load(Ordering::Acquire) {
+    if is_command_connected() {
         return Ok(());
     }
 
@@ -190,6 +190,12 @@ fn connect_command() -> Result<(), String> {
         "CreateFile(\\\\.\\pipe\\kovaaks-bridge-cmd) failed with {}",
         err
     ))
+}
+
+pub fn connect() -> Result<(), String> {
+    connect_event()?;
+    connect_command()?;
+    Ok(())
 }
 
 pub fn write_event(json: &str) -> bool {
@@ -351,7 +357,7 @@ pub fn poll_command_line(out: &mut [u8]) -> i32 {
     copy_len as i32
 }
 
-pub fn is_connected() -> bool {
+pub fn is_event_connected() -> bool {
     if !CONNECTED.load(Ordering::Acquire) {
         return false;
     }
@@ -368,13 +374,40 @@ pub fn is_connected() -> bool {
     true
 }
 
+pub fn is_command_connected() -> bool {
+    if !COMMAND_CONNECTED.load(Ordering::Acquire) {
+        return false;
+    }
+
+    let handle = COMMAND_HANDLE.load(Ordering::Acquire) as Handle;
+    if let Err(err) = named_pipe_handle_alive(handle) {
+        if !is_nonfatal_pipe_probe_error(err) {
+            COMMAND_LAST_ERROR.store(err, Ordering::Release);
+            close_command_pipe();
+            return false;
+        }
+    }
+
+    true
+}
+
+pub fn is_connected() -> bool {
+    is_event_connected() && is_command_connected()
+}
+
 pub fn close() {
     close_event_pipe();
     close_command_pipe();
 }
 
 pub fn last_error() -> u32 {
-    LAST_ERROR.load(Ordering::Acquire)
+    let event_error = LAST_ERROR.load(Ordering::Acquire);
+    let command_error = COMMAND_LAST_ERROR.load(Ordering::Acquire);
+    if !COMMAND_CONNECTED.load(Ordering::Acquire) && command_error != 0 {
+        command_error
+    } else {
+        event_error
+    }
 }
 
 #[allow(dead_code)]
