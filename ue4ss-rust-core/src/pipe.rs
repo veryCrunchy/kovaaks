@@ -14,6 +14,7 @@ const EVENT_PIPE_NAME: &[u8] = b"\\\\.\\pipe\\kovaaks-bridge\0";
 const COMMAND_PIPE_NAME: &[u8] = b"\\\\.\\pipe\\kovaaks-bridge-cmd\0";
 const GENERIC_WRITE: u32 = 0x4000_0000;
 const GENERIC_READ: u32 = 0x8000_0000;
+const FILE_READ_ATTRIBUTES: u32 = 0x0000_0080;
 const FILE_SHARE_NONE: u32 = 0x0000_0000;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
@@ -54,6 +55,13 @@ extern "system" {
         lp_total_bytes_avail: *mut u32,
         lp_bytes_left_this_message: *mut u32,
     ) -> i32;
+    fn GetNamedPipeInfo(
+        h_named_pipe: Handle,
+        lp_flags: *mut u32,
+        lp_out_buffer_size: *mut u32,
+        lp_in_buffer_size: *mut u32,
+        lp_max_instances: *mut u32,
+    ) -> i32;
     fn WaitNamedPipeA(lp_named_pipe_name: *const u8, n_time_out: u32) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
     fn GetLastError() -> u32;
@@ -72,8 +80,25 @@ fn wait_named_pipe_now(name: *const u8) -> Result<(), u32> {
     Err(unsafe { GetLastError() })
 }
 
-fn pipe_instance_available(name: *const u8) -> bool {
-    wait_named_pipe_now(name).is_ok()
+fn named_pipe_handle_alive(handle: Handle) -> Result<(), u32> {
+    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
+        return Err(6); // ERROR_INVALID_HANDLE
+    }
+
+    let ok = unsafe {
+        GetNamedPipeInfo(
+            handle,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if ok != 0 {
+        return Ok(());
+    }
+
+    Err(unsafe { GetLastError() })
 }
 
 fn close_event_pipe() {
@@ -102,7 +127,7 @@ pub fn connect() -> Result<(), String> {
     let handle = unsafe {
         CreateFileA(
             EVENT_PIPE_NAME.as_ptr(),
-            GENERIC_WRITE,
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES,
             FILE_SHARE_NONE,
             ptr::null_mut(),
             OPEN_EXISTING,
@@ -267,10 +292,12 @@ pub fn poll_command_line(out: &mut [u8]) -> i32 {
         return -1;
     }
 
-    if COMMAND_CONNECTED.load(Ordering::Acquire)
-        && pipe_instance_available(COMMAND_PIPE_NAME.as_ptr())
-    {
-        close_command_pipe();
+    if COMMAND_CONNECTED.load(Ordering::Acquire) {
+        let handle = COMMAND_HANDLE.load(Ordering::Acquire) as Handle;
+        if let Err(err) = named_pipe_handle_alive(handle) {
+            COMMAND_LAST_ERROR.store(err, Ordering::Release);
+            close_command_pipe();
+        }
     }
 
     if !COMMAND_CONNECTED.load(Ordering::Acquire) && connect_command().is_err() {
@@ -322,15 +349,8 @@ pub fn is_connected() -> bool {
     }
 
     let handle = PIPE_HANDLE.load(Ordering::Acquire) as Handle;
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        close_event_pipe();
-        return false;
-    }
-
-    // If a fresh server instance is waiting while we still think we're connected,
-    // our client handle belongs to a dead AimMod instance. Drop it so the mod
-    // reconnect loop can bind to the new server immediately.
-    if pipe_instance_available(EVENT_PIPE_NAME.as_ptr()) {
+    if let Err(err) = named_pipe_handle_alive(handle) {
+        LAST_ERROR.store(err, Ordering::Release);
         close_event_pipe();
         return false;
     }
