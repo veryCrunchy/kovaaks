@@ -52,6 +52,8 @@ pub struct BridgeParsedEvent {
 #[derive(Clone, Debug, serde::Serialize, PartialEq)]
 struct BridgeStatsPanelEvent {
     session_time_secs: Option<f64>,
+    score_total: Option<f64>,
+    score_total_derived: Option<f64>,
     kills: Option<u32>,
     kps: Option<f64>,
     accuracy_hits: Option<u32>,
@@ -551,6 +553,18 @@ fn is_metric_event_name(ev: &str) -> bool {
         || ev == "score_source"
         || ev == "qrem"
         || ev == "ch"
+}
+
+#[cfg(target_os = "windows")]
+fn is_frontend_metric_event_name(ev: &str) -> bool {
+    if ev.starts_with("pull_")
+        || ev == "is_in_challenge"
+        || ev == "queue_time_remaining"
+        || ev == "challenge_queue_time_remaining"
+    {
+        return false;
+    }
+    is_metric_event_name(ev)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1959,6 +1973,8 @@ mod imp {
             Mutex::new(BridgeCompatState {
                 stats: BridgeStatsPanelEvent {
                     session_time_secs: None,
+                    score_total: None,
+                    score_total_derived: None,
                     kills: None,
                     kps: None,
                     accuracy_hits: None,
@@ -2019,6 +2035,8 @@ mod imp {
         if let Ok(mut state) = bridge_compat_state().lock() {
             state.stats = BridgeStatsPanelEvent {
                 session_time_secs: None,
+                score_total: None,
+                score_total_derived: None,
                 kills: None,
                 kps: None,
                 accuracy_hits: None,
@@ -2970,6 +2988,169 @@ mod imp {
             return;
         }
 
+        if parsed.ev == "pull_snapshot" {
+            let Ok(payload) = serde_json::from_str::<serde_json::Value>(&parsed.raw) else {
+                return;
+            };
+            let Some(obj) = payload.as_object() else {
+                return;
+            };
+
+            let mut should_emit_stats = false;
+            let mut classification_inputs_changed = false;
+            if let Ok(mut state) = bridge_compat_state().lock() {
+                let now = Instant::now();
+                let update_bool = |slot: &mut Option<bool>, key: &str| -> bool {
+                    let next = super::parse_payload_number(obj, key).map(|value| value >= 0.5);
+                    if next.is_some() && *slot != next {
+                        *slot = next;
+                        return true;
+                    }
+                    false
+                };
+                let update_u32 =
+                    |slot: &mut Option<u32>, key: &str| -> bool {
+                        let next = super::parse_payload_number(obj, key)
+                            .filter(|value| value.is_finite() && *value >= 0.0)
+                            .map(|value| value.round() as u32);
+                        if next.is_some() && *slot != next {
+                            *slot = next;
+                            return true;
+                        }
+                        false
+                    };
+                let update_f64 =
+                    |slot: &mut Option<f64>, key: &str| -> bool {
+                        let next = super::parse_payload_number(obj, key)
+                            .filter(|value| value.is_finite() && *value >= 0.0);
+                        if next.is_some()
+                            && !slot.map_or(false, |prev| {
+                                next.map_or(false, |value| (prev - value).abs() <= 0.0001)
+                            })
+                        {
+                            *slot = next;
+                            return true;
+                        }
+                        false
+                    };
+
+                if update_bool(&mut state.stats.is_in_challenge, "is_in_challenge") {
+                    should_emit_stats = true;
+                    state.challenge_lifecycle_active = state.stats.is_in_challenge == Some(true);
+                    state.challenge_lifecycle_at = Some(now);
+                }
+                should_emit_stats |= update_bool(&mut state.stats.is_in_scenario, "is_in_scenario");
+                should_emit_stats |=
+                    update_bool(&mut state.stats.is_in_scenario_editor, "is_in_scenario_editor");
+                should_emit_stats |= update_bool(&mut state.stats.is_in_trainer, "is_in_trainer");
+                should_emit_stats |=
+                    update_bool(&mut state.stats.scenario_is_paused, "scenario_is_paused");
+
+                classification_inputs_changed |= update_u32(&mut state.stats.kills, "kills");
+                classification_inputs_changed |=
+                    update_u32(&mut state.stats.accuracy_shots, "shots_fired");
+                classification_inputs_changed |=
+                    update_u32(&mut state.stats.accuracy_hits, "shots_hit");
+                should_emit_stats |= classification_inputs_changed;
+
+                should_emit_stats |=
+                    update_u32(&mut state.stats.challenge_tick_count_total, "challenge_tick_count_total");
+                should_emit_stats |= update_f64(&mut state.stats.session_time_secs, "session_time_secs");
+                should_emit_stats |=
+                    update_f64(&mut state.stats.challenge_seconds_total, "challenge_seconds_total");
+                should_emit_stats |= update_f64(&mut state.stats.score_total, "score_total");
+                should_emit_stats |=
+                    update_f64(&mut state.stats.score_total_derived, "score_total_derived");
+                should_emit_stats |= update_f64(&mut state.stats.spm, "spm");
+                classification_inputs_changed |= update_f64(&mut state.stats.kps, "kps");
+                classification_inputs_changed |=
+                    update_f64(&mut state.stats.accuracy_pct, "accuracy_pct");
+                should_emit_stats |= classification_inputs_changed;
+                should_emit_stats |=
+                    update_f64(&mut state.stats.challenge_average_fps, "challenge_average_fps");
+                classification_inputs_changed |=
+                    update_f64(&mut state.stats.damage_dealt, "damage_done");
+                classification_inputs_changed |=
+                    update_f64(&mut state.stats.damage_total, "damage_possible");
+                should_emit_stats |= classification_inputs_changed;
+                should_emit_stats |= update_f64(&mut state.stats.time_remaining, "time_remaining");
+                should_emit_stats |=
+                    update_f64(&mut state.stats.queue_time_remaining, "queue_time_remaining");
+                if let Some(value) = state.stats.queue_time_remaining {
+                    if value > 0.0001 {
+                        if let Some(prev) = state.queue_last_value {
+                            if (prev - value) > 0.0001 {
+                                state.queue_last_progress_at = Some(now);
+                            }
+                        } else {
+                            state.queue_last_progress_at = Some(now);
+                        }
+                        state.queue_last_seen_at = Some(now);
+                        state.queue_last_value = Some(value);
+                    } else {
+                        state.queue_last_seen_at = None;
+                        state.queue_last_progress_at = None;
+                        state.queue_last_value = None;
+                    }
+                }
+
+                state.score_metric_total = state.stats.score_total;
+                state.score_total_derived = state.stats.score_total_derived;
+
+                if let (Some(hits), Some(shots)) =
+                    (state.stats.accuracy_hits, state.stats.accuracy_shots)
+                {
+                    let next_pct = if shots > 0 {
+                        Some((hits as f64 / shots as f64) * 100.0)
+                    } else {
+                        Some(0.0)
+                    };
+                    if state.stats.accuracy_pct.map_or(true, |prev| {
+                        next_pct.map_or(true, |value| (prev - value).abs() > 0.0001)
+                    }) {
+                        state.stats.accuracy_pct = next_pct;
+                        should_emit_stats = true;
+                    }
+                }
+
+                if classification_inputs_changed
+                    || state.stats.scenario_type == "Unknown"
+                    || state.stats.scenario_subtype.is_none()
+                {
+                    let shot_summary = current_shot_telemetry_summary();
+                    let ttk_summary = summarize_ttk_samples(&state.recent_ttk_secs);
+                    let inferred = infer_scenario_classification(
+                        &state.stats,
+                        &shot_summary,
+                        ttk_summary.as_ref(),
+                    );
+                    if state.stats.scenario_type != inferred.family {
+                        state.stats.scenario_type = inferred.family.to_string();
+                        should_emit_stats = true;
+                    }
+                    if state.stats.scenario_subtype != inferred.subtype {
+                        state.stats.scenario_subtype = inferred.subtype;
+                        should_emit_stats = true;
+                    }
+                }
+
+                let (next_game_state_code, next_game_state) = derive_game_state(&state, now);
+                if state.stats.game_state != next_game_state
+                    || state.stats.game_state_code != next_game_state_code
+                {
+                    state.stats.game_state_code = next_game_state_code;
+                    state.stats.game_state = next_game_state.to_string();
+                    should_emit_stats = true;
+                }
+
+                if should_emit_stats {
+                    observe_run_stats_snapshot(&state.stats);
+                    emit_stats_panel_update(app, &state.stats);
+                }
+            }
+            return;
+        }
+
         let is_compat_metric = parsed.ev.starts_with("pull_")
             || parsed.ev == "is_in_challenge"
             || parsed.ev == "queue_time_remaining"
@@ -3330,6 +3511,10 @@ mod imp {
                     ) {
                         state.last_nonzero_score_total = next_last_nonzero;
                         state.score_metric_total = Some(value);
+                        if state.stats.score_total != Some(value) {
+                            state.stats.score_total = Some(value);
+                            should_emit_stats = true;
+                        }
                     }
                 }
                 "pull_score_total_derived" => {
@@ -3343,6 +3528,10 @@ mod imp {
                     if value.is_finite() && value >= 0.0 && (value <= 0.000001 || challenge_context)
                     {
                         state.score_total_derived = Some(value);
+                        if state.stats.score_total_derived != Some(value) {
+                            state.stats.score_total_derived = Some(value);
+                            should_emit_stats = true;
+                        }
                     }
                 }
                 _ => {}
@@ -3666,6 +3855,7 @@ mod imp {
                                                 | "hook_focus_probe_typed"
                                                 | "class_hook_probe"
                                                 | "script_hook_probe"
+                                                | "pull_snapshot"
                                                 | "shot_fired_telemetry"
                                                 | "shot_hit_telemetry"
                                                 | "shot_telemetry_batch"
@@ -3695,7 +3885,7 @@ mod imp {
                                             return;
                                         }
                                         let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
-                                        if super::is_metric_event_name(&parsed.ev) {
+                                        if super::is_frontend_metric_event_name(&parsed.ev) {
                                             let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
                                         }
                                     }
