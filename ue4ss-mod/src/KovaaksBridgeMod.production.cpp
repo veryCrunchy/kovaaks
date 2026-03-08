@@ -548,6 +548,14 @@ public:
         ShotsFired = 3,
         ShotsHit = 4,
         ChallengeTickCount = 5,
+        Kills = 6,
+        Accuracy = 7,
+        ScorePerMinute = 8,
+        KillsPerSecond = 9,
+        DamageDone = 10,
+        DamagePossible = 11,
+        DamageEfficiency = 12,
+        ChallengeAverageFps = 13,
     };
 
     KovaaksBridgeModProduction(const KovaaksBridgeModProduction&) = delete;
@@ -1315,6 +1323,7 @@ private:
                 return;
             }
             emit_pull_f32("pull_score_total", last_score_total_, value, last_nonzero_score_total_ms_, now);
+            last_runtime_progress_ms_ = now;
             break;
         }
         case LiveMetricHookKind::ShotsFired: {
@@ -1323,6 +1332,7 @@ private:
                 return;
             }
             emit_pull_i32("pull_shots_fired_total", last_shots_fired_, value, last_nonzero_shots_fired_ms_, now);
+            last_runtime_progress_ms_ = now;
             break;
         }
         case LiveMetricHookKind::ShotsHit: {
@@ -1331,6 +1341,7 @@ private:
                 return;
             }
             emit_pull_i32("pull_shots_hit_total", last_shots_hit_, value, last_nonzero_shots_hit_ms_, now);
+            last_runtime_progress_ms_ = now;
             break;
         }
         case LiveMetricHookKind::ChallengeTickCount: {
@@ -1347,6 +1358,102 @@ private:
             );
             last_runtime_progress_ms_ = now;
             last_observed_challenge_tick_count_ = value;
+            break;
+        }
+        case LiveMetricHookKind::Kills: {
+            int32_t value = -1;
+            if (!try_read_hook_param_i32(params, 0x20, value) || value < 0) {
+                return;
+            }
+            emit_pull_i32("pull_kills_total", last_kills_total_, value, last_nonzero_kills_total_ms_, now);
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::Accuracy: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32("pull_accuracy", last_accuracy_, value, last_nonzero_accuracy_ms_, now);
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::ScorePerMinute: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32("pull_score_per_minute", last_score_per_minute_, value, last_nonzero_spm_ms_, now);
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::KillsPerSecond: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32(
+                "pull_kills_per_second",
+                last_kills_per_second_,
+                value,
+                last_nonzero_kills_per_second_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::DamageDone: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32("pull_damage_done", last_damage_done_, value, last_nonzero_damage_done_ms_, now);
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::DamagePossible: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32(
+                "pull_damage_possible",
+                last_damage_possible_,
+                value,
+                last_nonzero_damage_possible_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::DamageEfficiency: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32(
+                "pull_damage_efficiency",
+                last_damage_efficiency_,
+                value,
+                last_nonzero_damage_efficiency_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
+            break;
+        }
+        case LiveMetricHookKind::ChallengeAverageFps: {
+            float value = -1.0f;
+            if (!try_read_hook_param_f32(params, 0x20, value) || value < 0.0f) {
+                return;
+            }
+            emit_pull_f32(
+                "pull_challenge_average_fps",
+                last_challenge_average_fps_,
+                value,
+                last_nonzero_challenge_average_fps_ms_,
+                now
+            );
+            last_runtime_progress_ms_ = now;
             break;
         }
         default:
@@ -1382,10 +1489,18 @@ private:
         bind(targets_.receive_seconds_single, LiveMetricHookKind::Seconds);
         bind(targets_.receive_seconds_value_else, LiveMetricHookKind::Seconds);
         bind(targets_.receive_seconds_value_or, LiveMetricHookKind::Seconds);
+        bind(targets_.receive_kills, LiveMetricHookKind::Kills);
+        bind(targets_.receive_kills_single, LiveMetricHookKind::Kills);
+        bind(targets_.receive_kills_value_else, LiveMetricHookKind::Kills);
+        bind(targets_.receive_kills_value_or, LiveMetricHookKind::Kills);
         bind(targets_.receive_score, LiveMetricHookKind::Score);
         bind(targets_.receive_score_single, LiveMetricHookKind::Score);
         bind(targets_.receive_score_value_else, LiveMetricHookKind::Score);
         bind(targets_.receive_score_value_or, LiveMetricHookKind::Score);
+        bind(targets_.receive_accuracy, LiveMetricHookKind::Accuracy);
+        bind(targets_.receive_accuracy_single, LiveMetricHookKind::Accuracy);
+        bind(targets_.receive_accuracy_value_else, LiveMetricHookKind::Accuracy);
+        bind(targets_.receive_accuracy_value_or, LiveMetricHookKind::Accuracy);
         bind(targets_.receive_shots_fired, LiveMetricHookKind::ShotsFired);
         bind(targets_.receive_shots_fired_single, LiveMetricHookKind::ShotsFired);
         bind(targets_.receive_shots_fired_value_else, LiveMetricHookKind::ShotsFired);
@@ -1394,6 +1509,22 @@ private:
         bind(targets_.receive_shots_hit_single, LiveMetricHookKind::ShotsHit);
         bind(targets_.receive_shots_hit_value_else, LiveMetricHookKind::ShotsHit);
         bind(targets_.receive_shots_hit_value_or, LiveMetricHookKind::ShotsHit);
+        bind(targets_.receive_score_per_minute, LiveMetricHookKind::ScorePerMinute);
+        bind(targets_.receive_score_per_minute_value_else, LiveMetricHookKind::ScorePerMinute);
+        bind(targets_.receive_score_per_minute_value_or, LiveMetricHookKind::ScorePerMinute);
+        bind(targets_.receive_kills_per_second, LiveMetricHookKind::KillsPerSecond);
+        bind(targets_.receive_kills_per_second_value_else, LiveMetricHookKind::KillsPerSecond);
+        bind(targets_.receive_kills_per_second_value_or, LiveMetricHookKind::KillsPerSecond);
+        bind(targets_.receive_damage_done, LiveMetricHookKind::DamageDone);
+        bind(targets_.receive_damage_done_value_else, LiveMetricHookKind::DamageDone);
+        bind(targets_.receive_damage_possible, LiveMetricHookKind::DamagePossible);
+        bind(targets_.receive_damage_possible_value_else, LiveMetricHookKind::DamagePossible);
+        bind(targets_.receive_damage_efficiency, LiveMetricHookKind::DamageEfficiency);
+        bind(targets_.receive_damage_efficiency_value_else, LiveMetricHookKind::DamageEfficiency);
+        bind(targets_.receive_challenge_average_fps, LiveMetricHookKind::ChallengeAverageFps);
+        bind(targets_.receive_challenge_average_fps_single, LiveMetricHookKind::ChallengeAverageFps);
+        bind(targets_.receive_challenge_average_fps_value_else, LiveMetricHookKind::ChallengeAverageFps);
+        bind(targets_.receive_challenge_average_fps_value_or, LiveMetricHookKind::ChallengeAverageFps);
         bind(targets_.receive_challenge_tick_count, LiveMetricHookKind::ChallengeTickCount);
         bind(targets_.receive_challenge_tick_count_single, LiveMetricHookKind::ChallengeTickCount);
         bind(targets_.receive_challenge_tick_count_value_else, LiveMetricHookKind::ChallengeTickCount);
@@ -2378,6 +2509,7 @@ private:
         if (bridge_connected && !last_bridge_connected_) {
             flush_pending_shot_telemetry(now, true);
             (void)emit_requested_state_snapshot_safe(now, "bridge_connected");
+            next_bridge_keepalive_snapshot_ms_ = now + 2000;
             std::array<char, 256> sbuf{};
             std::snprintf(
                 sbuf.data(),
@@ -2397,8 +2529,18 @@ private:
                 challenge_state_edge ? "state_edge:challenge" : "state_edge:scenario"
             );
         }
+        if (!bridge_connected) {
+            next_bridge_keepalive_snapshot_ms_ = 0;
+        } else if (!kmod_replay::replay_ingame_playback_is_active()) {
+            const bool quiet_bridge_window =
+                (last_state_change_emit_ms_ == 0 || safe_elapsed_ms(now, last_state_change_emit_ms_) > 1800)
+                && (last_runtime_progress_ms_ == 0 || safe_elapsed_ms(now, last_runtime_progress_ms_) > 1800);
+            if (quiet_bridge_window && now >= next_bridge_keepalive_snapshot_ms_) {
+                next_bridge_keepalive_snapshot_ms_ = now + 2000;
+                (void)emit_requested_state_snapshot_safe(now, "bridge_keepalive");
+            }
+        }
         if (bridge_connected) {
-            flush_pending_shot_telemetry(now, false);
             kmod_replay::BridgeCommand command{};
             while (kmod_replay::poll_bridge_command(command)) {
                 if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
@@ -2831,6 +2973,7 @@ private:
     uint64_t last_lifecycle_start_ms_{0};
     uint64_t pending_lifecycle_end_ms_{0};
     uint64_t last_state_change_emit_ms_{0};
+    uint64_t next_bridge_keepalive_snapshot_ms_{0};
     uint64_t last_state_transition_refresh_ms_{0};
     uint64_t last_runtime_progress_ms_{0};
     uint64_t next_live_stream_refresh_ms_{0};
@@ -4255,29 +4398,29 @@ private:
 
     static auto append_shot_target_snapshot_json(
         std::string& out,
-        const kmod_replay::ReplayEntityActorRef& target_ref,
-        const kmod_replay::ReplayEntityActorRef* player_ref,
+        const kmod_replay::ReplayEntity& target_entity,
+        const kmod_replay::ReplayEntity* player_entity,
         bool is_nearest
     ) -> void {
-        kmod_replay::replay_append_entity_json(out, target_ref.entity);
+        kmod_replay::replay_append_entity_json(out, target_entity);
 
-        if (player_ref) {
+        if (player_entity) {
             constexpr double kPi = 3.14159265358979323846;
-            const double dx = static_cast<double>(target_ref.entity.location.x)
-                - static_cast<double>(player_ref->entity.location.x);
-            const double dy = static_cast<double>(target_ref.entity.location.y)
-                - static_cast<double>(player_ref->entity.location.y);
-            const double dz = static_cast<double>(target_ref.entity.location.z)
-                - static_cast<double>(player_ref->entity.location.z);
+            const double dx = static_cast<double>(target_entity.location.x)
+                - static_cast<double>(player_entity->location.x);
+            const double dy = static_cast<double>(target_entity.location.y)
+                - static_cast<double>(player_entity->location.y);
+            const double dz = static_cast<double>(target_entity.location.z)
+                - static_cast<double>(player_entity->location.z);
             const double distance_2d = std::sqrt((dx * dx) + (dy * dy));
             const double distance_3d = std::sqrt((distance_2d * distance_2d) + (dz * dz));
             const double target_yaw_deg = std::atan2(dy, dx) * (180.0 / kPi);
             const double target_pitch_deg = std::atan2(dz, std::max(distance_2d, 0.0001)) * (180.0 / kPi);
             const double yaw_error_deg = normalize_angle_degrees(
-                target_yaw_deg - static_cast<double>(player_ref->entity.rotation.yaw)
+                target_yaw_deg - static_cast<double>(player_entity->rotation.yaw)
             );
             const double pitch_error_deg = normalize_angle_degrees(
-                target_pitch_deg - static_cast<double>(player_ref->entity.rotation.pitch)
+                target_pitch_deg - static_cast<double>(player_entity->rotation.pitch)
             );
 
             out += ",\"distance_2d\":";
@@ -4300,45 +4443,46 @@ private:
             return;
         }
 
-        std::vector<kmod_replay::ReplayEntityActorRef> refs{};
-        kmod_replay::replay_collect_entity_actor_refs(refs);
+        const auto& replay_runtime = kmod_replay::replay_runtime_state();
+        const kmod_replay::ReplayEntity* player_entity = nullptr;
+        std::vector<const kmod_replay::ReplayEntity*> target_entities{};
+        target_entities.reserve(replay_runtime.last_entities.size());
 
-        const kmod_replay::ReplayEntityActorRef* player_ref = nullptr;
-        std::vector<const kmod_replay::ReplayEntityActorRef*> target_refs{};
-        target_refs.reserve(refs.size());
-
-        for (const auto& ref : refs) {
-            if (ref.entity.is_player) {
-                player_ref = &ref;
+        for (const auto& kv : replay_runtime.last_entities) {
+            const auto& entity = kv.second;
+            if (entity.is_player) {
+                player_entity = &entity;
                 break;
             }
         }
-        if (!player_ref) {
-            for (const auto& ref : refs) {
-                if (!ref.entity.is_bot) {
-                    player_ref = &ref;
+        if (!player_entity) {
+            for (const auto& kv : replay_runtime.last_entities) {
+                const auto& entity = kv.second;
+                if (!entity.is_bot) {
+                    player_entity = &entity;
                     break;
                 }
             }
         }
 
-        for (const auto& ref : refs) {
-            if (ref.entity.is_bot) {
-                target_refs.emplace_back(&ref);
+        for (const auto& kv : replay_runtime.last_entities) {
+            const auto& entity = kv.second;
+            if (entity.is_bot) {
+                target_entities.emplace_back(&entity);
             }
         }
 
         size_t nearest_target_index = std::numeric_limits<size_t>::max();
-        if (player_ref && !target_refs.empty()) {
+        if (player_entity && !target_entities.empty()) {
             double nearest_distance_sq = std::numeric_limits<double>::max();
-            for (size_t index = 0; index < target_refs.size(); ++index) {
-                const auto* target = target_refs[index];
-                const double dx = static_cast<double>(target->entity.location.x)
-                    - static_cast<double>(player_ref->entity.location.x);
-                const double dy = static_cast<double>(target->entity.location.y)
-                    - static_cast<double>(player_ref->entity.location.y);
-                const double dz = static_cast<double>(target->entity.location.z)
-                    - static_cast<double>(player_ref->entity.location.z);
+            for (size_t index = 0; index < target_entities.size(); ++index) {
+                const auto* target = target_entities[index];
+                const double dx = static_cast<double>(target->location.x)
+                    - static_cast<double>(player_entity->location.x);
+                const double dy = static_cast<double>(target->location.y)
+                    - static_cast<double>(player_entity->location.y);
+                const double dz = static_cast<double>(target->location.z)
+                    - static_cast<double>(player_entity->location.z);
                 const double distance_sq = (dx * dx) + (dy * dy) + (dz * dz);
                 if (distance_sq < nearest_distance_sq) {
                     nearest_distance_sq = distance_sq;
@@ -4347,53 +4491,52 @@ private:
             }
         }
 
-        const auto& replay_runtime = kmod_replay::replay_runtime_state();
         const char* telemetry_ev = std::strcmp(shot_event, "shot_hit") == 0
             ? "shot_hit_telemetry"
             : "shot_fired_telemetry";
 
-        for (int32_t emit_index = 0; emit_index < delta; ++emit_index) {
-            std::string msg;
-            msg.reserve(512 + (target_refs.size() * 256));
-            msg += "{\"ev\":\"";
-            msg += telemetry_ev;
-            msg += "\",\"ts_ms\":";
-            kmod_replay::replay_append_u64(msg, now);
-            msg += ",\"total\":";
-            kmod_replay::replay_append_i32(msg, total);
-            msg += ",\"run_id\":";
-            kmod_replay::replay_append_u64(msg, replay_runtime.current_run_id);
-            msg += ",\"sample_seq\":";
-            kmod_replay::replay_append_u64(msg, replay_runtime.seq);
-            msg += ",\"sample_count\":";
-            kmod_replay::replay_append_u64(msg, replay_runtime.samples_emitted);
-            msg += ",\"source\":\"pull_telemetry\",\"method\":\"";
-            msg += kmod_replay::replay_escape_json(emit_method_ ? emit_method_ : "unknown");
-            msg += "\",\"origin_flag\":\"";
-            msg += kmod_replay::replay_escape_json(emit_origin_flag_ ? emit_origin_flag_ : "unknown");
-            msg += "\"";
+        std::string msg;
+        msg.reserve(192 + (target_entities.size() * 224));
+        msg += "{\"ev\":\"";
+        msg += telemetry_ev;
+        msg += "\",\"ts_ms\":";
+        kmod_replay::replay_append_u64(msg, now);
+        msg += ",\"count\":";
+        kmod_replay::replay_append_i32(msg, delta);
+        msg += ",\"total\":";
+        kmod_replay::replay_append_i32(msg, total);
+        msg += ",\"run_id\":";
+        kmod_replay::replay_append_u64(msg, replay_runtime.current_run_id);
+        msg += ",\"sample_seq\":";
+        kmod_replay::replay_append_u64(msg, replay_runtime.seq);
+        msg += ",\"sample_count\":";
+        kmod_replay::replay_append_u64(msg, replay_runtime.samples_emitted);
+        msg += ",\"source\":\"pull_telemetry\",\"method\":\"";
+        msg += kmod_replay::replay_escape_json(emit_method_ ? emit_method_ : "unknown");
+        msg += "\",\"origin_flag\":\"";
+        msg += kmod_replay::replay_escape_json(emit_origin_flag_ ? emit_origin_flag_ : "unknown");
+        msg += "\"";
 
-            if (player_ref) {
-                msg += ",\"player\":";
-                kmod_replay::replay_append_entity_json(msg, player_ref->entity);
-            }
-
-            msg += ",\"targets\":[";
-            for (size_t target_index = 0; target_index < target_refs.size(); ++target_index) {
-                if (target_index > 0) {
-                    msg += ",";
-                }
-                append_shot_target_snapshot_json(
-                    msg,
-                    *target_refs[target_index],
-                    player_ref,
-                    target_index == nearest_target_index
-                );
-            }
-            msg += "]}";
-
-            queue_shot_telemetry_event(std::move(msg), now);
+        if (player_entity) {
+            msg += ",\"player\":";
+            kmod_replay::replay_append_entity_json(msg, *player_entity);
         }
+
+        msg += ",\"targets\":[";
+        for (size_t target_index = 0; target_index < target_entities.size(); ++target_index) {
+            if (target_index > 0) {
+                msg += ",";
+            }
+            append_shot_target_snapshot_json(
+                msg,
+                *target_entities[target_index],
+                player_entity,
+                target_index == nearest_target_index
+            );
+        }
+        msg += "]}";
+
+        queue_shot_telemetry_event(std::move(msg), now);
     }
 
     void queue_shot_telemetry_event(std::string&& json, uint64_t now) {
@@ -4401,29 +4544,21 @@ private:
             return;
         }
 
-        constexpr size_t k_shot_telemetry_flush_count = 24;
-        constexpr size_t k_shot_telemetry_max_buffered = 512;
+        constexpr size_t k_shot_telemetry_max_buffered = 4096;
 
         if (pending_shot_telemetry_events_.empty()) {
             pending_shot_telemetry_started_ms_ = now;
         }
         pending_shot_telemetry_events_.emplace_back(std::move(json));
 
-        if (pending_shot_telemetry_events_.size() >= k_shot_telemetry_flush_count) {
-            flush_pending_shot_telemetry(now, false);
-        }
-
         if (pending_shot_telemetry_events_.size() > k_shot_telemetry_max_buffered) {
-            flush_pending_shot_telemetry(now, true);
-            if (pending_shot_telemetry_events_.size() > k_shot_telemetry_max_buffered) {
-                const size_t trim = pending_shot_telemetry_events_.size() - k_shot_telemetry_max_buffered;
-                pending_shot_telemetry_events_.erase(
-                    pending_shot_telemetry_events_.begin(),
-                    pending_shot_telemetry_events_.begin() + trim
-                );
-                if (pending_shot_telemetry_events_.empty()) {
-                    pending_shot_telemetry_started_ms_ = 0;
-                }
+            const size_t trim = pending_shot_telemetry_events_.size() - k_shot_telemetry_max_buffered;
+            pending_shot_telemetry_events_.erase(
+                pending_shot_telemetry_events_.begin(),
+                pending_shot_telemetry_events_.begin() + trim
+            );
+            if (pending_shot_telemetry_events_.empty()) {
+                pending_shot_telemetry_started_ms_ = 0;
             }
         }
     }
@@ -4548,26 +4683,10 @@ private:
 
         if (prev >= 0 && value > prev) {
             const int32_t delta = value - prev;
-            const char* alias_ev = nullptr;
             if (std::strcmp(ev, "pull_shots_fired_total") == 0) {
-                alias_ev = "shot_fired";
+                emit_shot_target_telemetry("shot_fired", delta, value, now);
             } else if (std::strcmp(ev, "pull_shots_hit_total") == 0) {
-                alias_ev = "shot_hit";
-            } else if (std::strcmp(ev, "pull_kills_total") == 0) {
-                alias_ev = "kill";
-            }
-            if (alias_ev) {
-                emit_shot_target_telemetry(alias_ev, delta, value, now);
-                std::array<char, 192> alias_json{};
-                std::snprintf(
-                    alias_json.data(),
-                    alias_json.size(),
-                    "{\"ev\":\"%s\",\"delta\":%d,\"total\":%d,\"source\":\"pull\"}",
-                    alias_ev,
-                    delta,
-                    value
-                );
-                kovaaks::RustBridge::emit_json(alias_json.data());
+                emit_shot_target_telemetry("shot_hit", delta, value, now);
             }
         }
     }
