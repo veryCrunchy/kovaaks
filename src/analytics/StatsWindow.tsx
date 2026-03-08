@@ -176,6 +176,7 @@ const STATS_WINDOW_STORAGE_KEYS = {
   rootMode: "stats-window:root-mode",
   scenarioTab: "stats-window:scenario-tab",
   sessionFilter: "stats-window:session-filter",
+  scenarioSort: "stats-window:scenario-sort",
 } as const;
 
 function readStoredValue(key: string): string | null {
@@ -251,6 +252,11 @@ function fmtDuration(secs: number) {
 
 function mean(arr: number[]) {
   return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+}
+
+function scenarioTypeSortRank(type: string | null | undefined) {
+  if (!type || type === "Unknown") return "zzzz-unknown";
+  return type.toLowerCase();
 }
 
 function stddev(arr: number[]): number {
@@ -4125,6 +4131,7 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 type RootMode = "sessions" | "leaderboards" | "debug";
+type ScenarioSortMode = "recent" | "plays" | "type";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
@@ -4140,6 +4147,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [rootMode, setRootMode] = useState<RootMode>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode);
     return stored === "leaderboards" || stored === "debug" ? stored : "sessions";
+  });
+  const [scenarioSort, setScenarioSort] = useState<ScenarioSortMode>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioSort);
+    return stored === "plays" || stored === "type" ? stored : "recent";
   });
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
@@ -4220,6 +4231,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   useEffect(() => {
     writeStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode, rootMode);
   }, [rootMode]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioSort, scenarioSort);
+  }, [scenarioSort]);
 
   useEffect(() => {
     loadHistory(false);
@@ -4336,6 +4351,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       reliableCount: number;
       flaggedCount: number;
       lastTs: string;
+      scenarioType: string | null;
+      scenarioTypeCounts: Map<string, number>;
     }>();
     for (const r of analyticsRecords) {
       const name = r.normalizedScenario;
@@ -4345,6 +4362,16 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       const isNewer =
         (parseTimestamp(r.timestamp)?.getTime() ?? 0) >
         (parseTimestamp(curTs)?.getTime() ?? 0);
+      const rawScenarioType = r.stats_panel?.scenario_type?.trim() || null;
+      const scenarioType = rawScenarioType && rawScenarioType !== "Unknown" ? rawScenarioType : null;
+      const scenarioTypeCounts = new Map(cur?.scenarioTypeCounts ?? []);
+      if (scenarioType) {
+        scenarioTypeCounts.set(scenarioType, (scenarioTypeCounts.get(scenarioType) ?? 0) + 1);
+      }
+      const dominantScenarioType =
+        [...scenarioTypeCounts.entries()]
+          .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
+        ?? null;
       map.set(name, {
         bestReliable: r.isReliableForAnalysis
           ? Math.max(cur?.bestReliable ?? 0, r.score)
@@ -4354,16 +4381,42 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         reliableCount: (cur?.reliableCount ?? 0) + (r.isReliableForAnalysis ? 1 : 0),
         flaggedCount: (cur?.flaggedCount ?? 0) + (r.isReliableForAnalysis ? 0 : 1),
         lastTs: isNewer ? r.timestamp : curTs,
+        scenarioType: (isNewer && scenarioType) ? scenarioType : (cur?.scenarioType ?? dominantScenarioType),
+        scenarioTypeCounts,
       });
     }
     return [...map.entries()]
-      .map(([name, s]) => ({ name, ...s }))
-      .sort(
-        (a, b) =>
-          (parseTimestamp(b.lastTs)?.getTime() ?? 0) -
-          (parseTimestamp(a.lastTs)?.getTime() ?? 0),
-      );
-  }, [analyticsRecords, search]);
+      .map(([name, s]) => ({
+        name,
+        bestReliable: s.bestReliable,
+        bestAny: s.bestAny,
+        count: s.count,
+        reliableCount: s.reliableCount,
+        flaggedCount: s.flaggedCount,
+        lastTs: s.lastTs,
+        scenarioType:
+          [...s.scenarioTypeCounts.entries()]
+            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
+          ?? s.scenarioType
+          ?? "Unknown",
+      }))
+      .sort((a, b) => {
+        if (scenarioSort === "plays") {
+          return b.count - a.count
+            || (parseTimestamp(b.lastTs)?.getTime() ?? 0) - (parseTimestamp(a.lastTs)?.getTime() ?? 0)
+            || a.name.localeCompare(b.name);
+        }
+        if (scenarioSort === "type") {
+          return scenarioTypeSortRank(a.scenarioType).localeCompare(scenarioTypeSortRank(b.scenarioType))
+            || b.count - a.count
+            || a.name.localeCompare(b.name);
+        }
+        return (parseTimestamp(b.lastTs)?.getTime() ?? 0) -
+          (parseTimestamp(a.lastTs)?.getTime() ?? 0)
+          || b.count - a.count
+          || a.name.localeCompare(b.name);
+      });
+  }, [analyticsRecords, search, scenarioSort]);
 
   const selectedRecords = useMemo(
     () => analyticsRecords.filter((r) => r.normalizedScenario === selectedScenario),
@@ -4452,6 +4505,38 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               outline: "none",
             }}
           />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
+            <span
+              style={{
+                fontSize: 10,
+                color: "rgba(255,255,255,0.32)",
+                textTransform: "uppercase",
+                letterSpacing: 0.8,
+              }}
+            >
+              Sort
+            </span>
+            <select
+              value={scenarioSort}
+              onChange={(e) => setScenarioSort(e.target.value as ScenarioSortMode)}
+              style={{
+                flex: 1,
+                boxSizing: "border-box",
+                background: "rgba(255,255,255,0.06)",
+                border: "1px solid rgba(255,255,255,0.1)",
+                borderRadius: 7,
+                padding: "6px 10px",
+                color: "#fff",
+                fontSize: 12,
+                fontFamily: "inherit",
+                outline: "none",
+              }}
+            >
+              <option value="recent">Recent</option>
+              <option value="plays">Most Played</option>
+              <option value="type">Scenario Type</option>
+            </select>
+          </div>
         </div>
 
         <div style={{ flex: 1, overflowY: "auto" }}>
@@ -4519,6 +4604,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                   >
                     <span>
                       {g.count} run{g.count !== 1 ? "s" : ""}
+                    </span>
+                    <span>
+                      {g.scenarioType}
                     </span>
                     {g.flaggedCount > 0 && (
                       <span style={{ color: "#ffb400" }}>
