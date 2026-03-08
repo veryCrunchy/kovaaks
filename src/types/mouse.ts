@@ -92,6 +92,44 @@ export interface BridgeRunTimelinePoint {
   shots_hit: number | null;
 }
 
+export interface BridgeShotTelemetryEntity {
+  entity_id: string;
+  profile: string;
+  is_player: boolean;
+  is_bot: boolean;
+  x: number;
+  y: number;
+  z: number;
+  pitch: number;
+  yaw: number;
+  roll: number;
+  vx: number;
+  vy: number;
+  vz: number;
+}
+
+export interface BridgeShotTelemetryTarget extends BridgeShotTelemetryEntity {
+  distance_2d: number | null;
+  distance_3d: number | null;
+  yaw_error_deg: number | null;
+  pitch_error_deg: number | null;
+  is_nearest: boolean;
+}
+
+export interface BridgeShotTelemetryEvent {
+  event: string;
+  ts_ms: number;
+  total: number | null;
+  run_id: number | null;
+  sample_seq: number | null;
+  sample_count: number | null;
+  source: string | null;
+  method: string | null;
+  origin_flag: string | null;
+  player: BridgeShotTelemetryEntity | null;
+  targets: BridgeShotTelemetryTarget[];
+}
+
 export interface BridgeRunSnapshot {
   duration_secs: number | null;
   score_total: number | null;
@@ -116,6 +154,7 @@ export interface BridgeRunSnapshot {
   ended_at_unix_ms: number | null;
   event_counts: BridgeRunEventCounts;
   timeline: BridgeRunTimelinePoint[];
+  shot_telemetry?: BridgeShotTelemetryEvent[];
   tick_stream_v1?: BridgeTickStreamV1 | null;
 }
 
