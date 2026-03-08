@@ -91,6 +91,61 @@ pub struct BridgeTickStreamV1 {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeShotTelemetryEntity {
+    pub entity_id: String,
+    pub profile: String,
+    pub is_player: bool,
+    pub is_bot: bool,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub pitch: f64,
+    pub yaw: f64,
+    pub roll: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeShotTelemetryTarget {
+    pub entity_id: String,
+    pub profile: String,
+    pub is_player: bool,
+    pub is_bot: bool,
+    pub x: f64,
+    pub y: f64,
+    pub z: f64,
+    pub pitch: f64,
+    pub yaw: f64,
+    pub roll: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub vz: f64,
+    pub distance_2d: Option<f64>,
+    pub distance_3d: Option<f64>,
+    pub yaw_error_deg: Option<f64>,
+    pub pitch_error_deg: Option<f64>,
+    pub is_nearest: bool,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeShotTelemetryEvent {
+    pub event: String,
+    pub ts_ms: u64,
+    pub total: Option<u32>,
+    pub run_id: Option<u64>,
+    pub sample_seq: Option<u64>,
+    pub sample_count: Option<u64>,
+    pub source: Option<String>,
+    pub method: Option<String>,
+    pub origin_flag: Option<String>,
+    pub player: Option<BridgeShotTelemetryEntity>,
+    #[serde(default)]
+    pub targets: Vec<BridgeShotTelemetryTarget>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeRunEventCounts {
     pub shot_fired_events: u32,
     pub shot_hit_events: u32,
@@ -146,6 +201,8 @@ pub struct BridgeRunSnapshot {
     pub ended_at_unix_ms: Option<u64>,
     pub event_counts: BridgeRunEventCounts,
     pub timeline: Vec<BridgeRunTimelinePoint>,
+    #[serde(default)]
+    pub shot_telemetry: Vec<BridgeShotTelemetryEvent>,
     #[serde(default)]
     pub tick_stream_v1: Option<BridgeTickStreamV1>,
 }
@@ -573,6 +630,7 @@ mod imp {
     const MAX_RUN_TIMELINE_POINTS: usize = 1800;
     const MAX_PENDING_SHOT_EVENTS: usize = 4096;
     const MAX_SHOT_LATENCY_SAMPLES: usize = 8192;
+    const MAX_SHOT_TELEMETRY_EVENTS: usize = 8192;
     const MAX_TICK_STREAM_KEYFRAMES: usize = 12000;
     const MAX_TICK_STREAM_DELTAS: usize = 72000;
     const RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS: f64 = 1.25;
@@ -610,6 +668,7 @@ mod imp {
         corrective_hits: u32,
         event_counts: super::BridgeRunEventCounts,
         timeline: Vec<super::BridgeRunTimelinePoint>,
+        shot_telemetry: Vec<super::BridgeShotTelemetryEvent>,
         tick_stream_v1: super::BridgeTickStreamV1,
     }
 
@@ -722,6 +781,7 @@ mod imp {
         state.corrective_hits = 0;
         state.event_counts = super::BridgeRunEventCounts::default();
         state.timeline.clear();
+        state.shot_telemetry.clear();
         state.tick_stream_v1 = super::BridgeTickStreamV1::default();
     }
 
@@ -799,6 +859,7 @@ mod imp {
             || state.metrics.damage_possible.is_some()
             || state.metrics.damage_efficiency.is_some()
             || state.metrics.accuracy_pct.is_some()
+                || !state.shot_telemetry.is_empty()
             || state.tick_stream_v1.context.is_some()
             || !state.tick_stream_v1.keyframes.is_empty()
             || !state.tick_stream_v1.deltas.is_empty()
@@ -1132,6 +1193,137 @@ mod imp {
         state.metrics.duration_secs
     }
 
+    fn shot_telemetry_json_bool(value: &serde_json::Value) -> Option<bool> {
+        match value {
+            serde_json::Value::Bool(v) => Some(*v),
+            serde_json::Value::Number(n) => n.as_i64().map(|v| v != 0),
+            serde_json::Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" => Some(true),
+                "0" | "false" | "no" => Some(false),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn parse_shot_telemetry_entity(
+        value: &serde_json::Value,
+    ) -> Option<super::BridgeShotTelemetryEntity> {
+        let obj = value.as_object()?;
+        let location = obj.get("location")?.as_object()?;
+        let rotation = obj.get("rotation")?.as_object()?;
+        let velocity = obj.get("velocity")?.as_object()?;
+
+        Some(super::BridgeShotTelemetryEntity {
+            entity_id: obj.get("id")?.as_str()?.to_string(),
+            profile: obj
+                .get("profile")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            is_player: obj
+                .get("is_player")
+                .and_then(shot_telemetry_json_bool)
+                .unwrap_or(false),
+            is_bot: obj
+                .get("is_bot")
+                .and_then(shot_telemetry_json_bool)
+                .unwrap_or(false),
+            x: super::parse_payload_number(location, "x").unwrap_or(0.0),
+            y: super::parse_payload_number(location, "y").unwrap_or(0.0),
+            z: super::parse_payload_number(location, "z").unwrap_or(0.0),
+            pitch: super::parse_payload_number(rotation, "pitch").unwrap_or(0.0),
+            yaw: super::parse_payload_number(rotation, "yaw").unwrap_or(0.0),
+            roll: super::parse_payload_number(rotation, "roll").unwrap_or(0.0),
+            vx: super::parse_payload_number(velocity, "x").unwrap_or(0.0),
+            vy: super::parse_payload_number(velocity, "y").unwrap_or(0.0),
+            vz: super::parse_payload_number(velocity, "z").unwrap_or(0.0),
+        })
+    }
+
+    fn parse_shot_telemetry_target(
+        value: &serde_json::Value,
+    ) -> Option<super::BridgeShotTelemetryTarget> {
+        let entity = parse_shot_telemetry_entity(value)?;
+        let obj = value.as_object()?;
+        Some(super::BridgeShotTelemetryTarget {
+            entity_id: entity.entity_id,
+            profile: entity.profile,
+            is_player: entity.is_player,
+            is_bot: entity.is_bot,
+            x: entity.x,
+            y: entity.y,
+            z: entity.z,
+            pitch: entity.pitch,
+            yaw: entity.yaw,
+            roll: entity.roll,
+            vx: entity.vx,
+            vy: entity.vy,
+            vz: entity.vz,
+            distance_2d: super::parse_payload_number(obj, "distance_2d"),
+            distance_3d: super::parse_payload_number(obj, "distance_3d"),
+            yaw_error_deg: super::parse_payload_number(obj, "yaw_error_deg"),
+            pitch_error_deg: super::parse_payload_number(obj, "pitch_error_deg"),
+            is_nearest: obj
+                .get("is_nearest")
+                .and_then(shot_telemetry_json_bool)
+                .unwrap_or(false),
+        })
+    }
+
+    fn parse_shot_telemetry_event(raw: &str) -> Option<super::BridgeShotTelemetryEvent> {
+        let payload: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let obj = payload.as_object()?;
+        let raw_ev = obj.get("ev")?.as_str()?;
+        let event = match raw_ev {
+            "shot_fired_telemetry" => "shot_fired",
+            "shot_hit_telemetry" => "shot_hit",
+            _ => return None,
+        };
+
+        let mut targets = Vec::new();
+        if let Some(entries) = obj.get("targets").and_then(|v| v.as_array()) {
+            targets.reserve(entries.len());
+            for entry in entries {
+                if let Some(target) = parse_shot_telemetry_target(entry) {
+                    targets.push(target);
+                }
+            }
+        }
+
+        Some(super::BridgeShotTelemetryEvent {
+            event: event.to_string(),
+            ts_ms: super::parse_payload_u64(obj, "ts_ms").unwrap_or(0),
+            total: super::parse_payload_u64(obj, "total").map(|value| value as u32),
+            run_id: super::parse_payload_u64(obj, "run_id"),
+            sample_seq: super::parse_payload_u64(obj, "sample_seq"),
+            sample_count: super::parse_payload_u64(obj, "sample_count"),
+            source: super::parse_payload_string(obj, "source"),
+            method: super::parse_payload_string(obj, "method"),
+            origin_flag: super::parse_payload_string(obj, "origin_flag"),
+            player: obj.get("player").and_then(parse_shot_telemetry_entity),
+            targets,
+        })
+    }
+
+    fn observe_shot_telemetry_raw(raw: &str) {
+        let Some(event) = parse_shot_telemetry_event(raw) else {
+            return;
+        };
+
+        let Ok(mut state) = run_capture_state().lock() else {
+            return;
+        };
+
+        let duration_hint = state.metrics.duration_secs;
+        ensure_run_capture_started_locked(&mut state, duration_hint);
+        state.shot_telemetry.push(event);
+        if state.shot_telemetry.len() > MAX_SHOT_TELEMETRY_EVENTS {
+            let trim = state.shot_telemetry.len() - MAX_SHOT_TELEMETRY_EVENTS;
+            state.shot_telemetry.drain(0..trim);
+        }
+    }
+
     fn observe_replay_stream_raw(raw: &str) {
         let Ok(payload) = serde_json::from_str::<serde_json::Value>(raw) else {
             return;
@@ -1423,6 +1615,7 @@ mod imp {
             ended_at_unix_ms: state.ended_at_unix_ms.or(Some(unix_now_ms())),
             event_counts: state.event_counts.clone(),
             timeline: state.timeline.clone(),
+            shot_telemetry: state.shot_telemetry.clone(),
             tick_stream_v1: if state.tick_stream_v1.context.is_some()
                 || !state.tick_stream_v1.keyframes.is_empty()
                 || !state.tick_stream_v1.deltas.is_empty()
@@ -2784,6 +2977,7 @@ mod imp {
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     note_in_game_replay_event(s);
                                     observe_replay_stream_raw(s);
+                                    observe_shot_telemetry_raw(s);
                                     let parsed_event = super::parse_bridge_payload(s);
                                     let is_noisy_bridge_event = |ev: &str| {
                                         matches!(
