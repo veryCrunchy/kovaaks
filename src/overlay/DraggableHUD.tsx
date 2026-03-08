@@ -16,6 +16,14 @@ interface DraggableHUDProps {
   layoutMode?: boolean;
   /** When true, allows this HUD to receive pointer input outside layout mode. */
   interactive?: boolean;
+  /** When true, this HUD is excluded from overlap prevention (both as source and obstacle). */
+  excludeFromOverlap?: boolean;
+  /** Optional grid size in px for snap-to-grid while dragging in layout mode. */
+  snapGridSize?: number;
+  /** Optional external preset position target. Applied when presetNonce changes. */
+  presetPosition?: Pos;
+  /** Increment this value to re-apply presetPosition. */
+  presetNonce?: number;
   children: React.ReactNode;
 }
 
@@ -45,17 +53,45 @@ interface RectPadding {
   bottom: number;
 }
 
+interface NormalizeOptions {
+  movementBounds?: Bounds;
+  skipOverlap?: boolean;
+}
+
+interface HudLayoutChangedDetail {
+  source: string;
+}
+
 const SCALE_MIN = 0.5;
 const SCALE_MAX = 2.5;
 const SCALE_STEP = 0.1;
 const HUD_COLLISION_GAP = 8;
-const HUD_EDGE_PADDING = 6;
-const HUD_LAYOUT_TOP_INSET = 24;
+const HUD_EDGE_PADDING = 2;
+const HUD_LAYOUT_TOP_INSET = 12;
+const HUD_AUTO_SHIFT_LIMIT_X = 140;
+const HUD_AUTO_SHIFT_LIMIT_Y = 140;
+const HUD_RESIZE_DELTA_EPSILON = 1;
+const HUD_LAYOUT_CHANGED_EVENT = "kovaaks:hud-layout-changed";
 const HUD_ATTR = "data-hud-draggable";
 const HUD_KEY_ATTR = "data-hud-key";
+const HUD_OVERLAP_ATTR = "data-hud-overlap";
 
 function clampScale(v: number) {
   return Math.round(Math.min(SCALE_MAX, Math.max(SCALE_MIN, v)) * 10) / 10;
+}
+
+function snapToGrid(pos: Pos, gridSize?: number): Pos {
+  if (!gridSize || gridSize <= 1) return pos;
+  return {
+    x: Math.round(pos.x / gridSize) * gridSize,
+    y: Math.round(pos.y / gridSize) * gridSize,
+  };
+}
+
+function distSq(a: Pos, b: Pos) {
+  const dx = a.x - b.x;
+  const dy = a.y - b.y;
+  return dx * dx + dy * dy;
 }
 
 function samePos(a: Pos, b: Pos) {
@@ -148,11 +184,37 @@ function clampPosToBounds(pos: Pos, bounds: Bounds): Pos {
   };
 }
 
+function mergeBounds(base: Bounds, limit?: Bounds): Bounds {
+  if (!limit) return base;
+
+  const minX = Math.max(base.minX, limit.minX);
+  const maxX = Math.min(base.maxX, limit.maxX);
+  const minY = Math.max(base.minY, limit.minY);
+  const maxY = Math.min(base.maxY, limit.maxY);
+
+  return {
+    minX: minX <= maxX ? minX : base.minX,
+    maxX: minX <= maxX ? maxX : base.maxX,
+    minY: minY <= maxY ? minY : base.minY,
+    maxY: minY <= maxY ? maxY : base.maxY,
+  };
+}
+
+function createAnchorBounds(anchor: Pos): Bounds {
+  return {
+    minX: anchor.x - HUD_AUTO_SHIFT_LIMIT_X,
+    maxX: anchor.x + HUD_AUTO_SHIFT_LIMIT_X,
+    minY: anchor.y - HUD_AUTO_SHIFT_LIMIT_Y,
+    maxY: anchor.y + HUD_AUTO_SHIFT_LIMIT_Y,
+  };
+}
+
 function readOtherHudRects(storageKey: string): Rect[] {
   const nodes = document.querySelectorAll<HTMLElement>(`[${HUD_ATTR}="1"]`);
   const rects: Rect[] = [];
   for (const node of nodes) {
     if (node.getAttribute(HUD_KEY_ATTR) === storageKey) continue;
+    if (node.getAttribute(HUD_OVERLAP_ATTR) !== "1") continue;
     const rect = node.getBoundingClientRect();
     if (rect.width <= 0 || rect.height <= 0) continue;
     rects.push({
@@ -257,6 +319,10 @@ export function DraggableHUD({
   defaultScale = 1,
   layoutMode = false,
   interactive = false,
+  excludeFromOverlap = false,
+  snapGridSize,
+  presetPosition,
+  presetNonce = 0,
   children,
 }: DraggableHUDProps) {
   const [pos, setPos] = useState<Pos>(() => {
@@ -287,7 +353,15 @@ export function DraggableHUD({
   const isDragging = useRef(false);
   const startMouse = useRef<Pos>({ x: 0, y: 0 });
   const startPos = useRef<Pos>(pos);
+  const anchorPosRef = useRef<Pos>(pos);
+  const lastSizeRef = useRef<Size | null>(null);
+  const lastPresetNonceRef = useRef<number>(presetNonce);
   const rootRef = useRef<HTMLDivElement | null>(null);
+
+  const snapPosIfNeeded = useCallback((candidate: Pos): Pos => {
+    if (!layoutMode) return candidate;
+    return snapToGrid(candidate, snapGridSize);
+  }, [layoutMode, snapGridSize]);
 
   const getCurrentSize = useCallback((nextScale = scale): Size => {
     const el = rootRef.current;
@@ -302,11 +376,25 @@ export function DraggableHUD({
     try { localStorage.setItem(`hud-pos:${storageKey}`, JSON.stringify(nextPos)); } catch {}
   }, [storageKey]);
 
-  const normalizePos = useCallback((rawPos: Pos, nextScale = scale) => {
+  const emitLayoutChanged = useCallback(() => {
+    window.dispatchEvent(new CustomEvent<HudLayoutChangedDetail>(HUD_LAYOUT_CHANGED_EVENT, {
+      detail: { source: storageKey },
+    }));
+  }, [storageKey]);
+
+  const getAutoMovementBounds = useCallback((size: Size, nextScale = scale): Bounds => {
+    const topInset = layoutMode ? (HUD_LAYOUT_TOP_INSET * nextScale) : 0;
+    const viewportBounds = buildViewportBounds(size, HUD_EDGE_PADDING, topInset);
+    return mergeBounds(viewportBounds, createAnchorBounds(anchorPosRef.current));
+  }, [layoutMode, scale]);
+
+  const normalizePos = useCallback((rawPos: Pos, nextScale = scale, options?: NormalizeOptions) => {
     const size = getCurrentSize(nextScale);
     const topInset = layoutMode ? (HUD_LAYOUT_TOP_INSET * nextScale) : 0;
-    const bounds = buildViewportBounds(size, HUD_EDGE_PADDING, topInset);
+    const viewportBounds = buildViewportBounds(size, HUD_EDGE_PADDING, topInset);
+    const bounds = mergeBounds(viewportBounds, options?.movementBounds);
     const clamped = clampPosToBounds(rawPos, bounds);
+    if (excludeFromOverlap || options?.skipOverlap) return clamped;
     const basePad = HUD_COLLISION_GAP / 2;
     const collisionPadding: RectPadding = {
       left: basePad,
@@ -315,7 +403,7 @@ export function DraggableHUD({
       bottom: basePad,
     };
     return resolveCollisions(clamped, size, storageKey, bounds, collisionPadding);
-  }, [getCurrentSize, layoutMode, scale, storageKey]);
+  }, [excludeFromOverlap, getCurrentSize, layoutMode, scale, storageKey]);
 
   const onPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -330,25 +418,27 @@ export function DraggableHUD({
 
   const onPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     if (!isDragging.current) return;
-    const dragged = {
+    const dragged = snapPosIfNeeded({
       x: startPos.current.x + (e.clientX - startMouse.current.x),
       y: startPos.current.y + (e.clientY - startMouse.current.y),
-    };
+    });
     setPos(normalizePos(dragged));
-  }, [normalizePos]);
+  }, [normalizePos, snapPosIfNeeded]);
 
   const onPointerUp = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (!isDragging.current) return;
       isDragging.current = false;
-      const newPos = normalizePos({
+      const newPos = normalizePos(snapPosIfNeeded({
         x: startPos.current.x + (e.clientX - startMouse.current.x),
         y: startPos.current.y + (e.clientY - startMouse.current.y),
-      });
+      }));
       setPos(newPos);
+      anchorPosRef.current = newPos;
       persistPos(newPos);
+      emitLayoutChanged();
     },
-    [normalizePos, persistPos]
+    [emitLayoutChanged, normalizePos, persistPos, snapPosIfNeeded]
   );
 
   const onPointerCancel = useCallback(() => {
@@ -360,11 +450,26 @@ export function DraggableHUD({
     saveScale(nextScale);
     setPos((prev) => {
       const normalized = normalizePos(prev, nextScale);
+      anchorPosRef.current = normalized;
       if (samePos(prev, normalized)) return prev;
       persistPos(normalized);
+      emitLayoutChanged();
       return normalized;
     });
-  }, [normalizePos, persistPos, saveScale]);
+  }, [emitLayoutChanged, normalizePos, persistPos, saveScale]);
+
+  const tryRestoreTowardAnchor = useCallback(() => {
+    setPos((prev) => {
+      const size = getCurrentSize();
+      const movementBounds = getAutoMovementBounds(size);
+      const restored = normalizePos(anchorPosRef.current, scale, { movementBounds });
+      if (samePos(prev, restored)) return prev;
+      if (distSq(restored, anchorPosRef.current) >= distSq(prev, anchorPosRef.current)) return prev;
+      persistPos(restored);
+      emitLayoutChanged();
+      return restored;
+    });
+  }, [emitLayoutChanged, getAutoMovementBounds, getCurrentSize, normalizePos, persistPos, scale]);
 
   const onWheel = useCallback(
     (e: React.WheelEvent<HTMLDivElement>) => {
@@ -383,16 +488,19 @@ export function DraggableHUD({
     const rafId = window.requestAnimationFrame(() => {
       setPos((prev) => {
         const normalized = normalizePos(prev);
+        anchorPosRef.current = normalized;
         if (samePos(prev, normalized)) return prev;
         persistPos(normalized);
+        emitLayoutChanged();
         return normalized;
       });
+      lastSizeRef.current = getCurrentSize();
     });
 
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [normalizePos, persistPos]);
+  }, [emitLayoutChanged, getCurrentSize, normalizePos, persistPos]);
 
   useEffect(() => {
     const onResize = () => {
@@ -400,7 +508,12 @@ export function DraggableHUD({
         const normalized = normalizePos(prev);
         if (samePos(prev, normalized)) return prev;
         persistPos(normalized);
+        emitLayoutChanged();
         return normalized;
+      });
+      lastSizeRef.current = getCurrentSize();
+      window.requestAnimationFrame(() => {
+        tryRestoreTowardAnchor();
       });
     };
 
@@ -408,13 +521,93 @@ export function DraggableHUD({
     return () => {
       window.removeEventListener("resize", onResize);
     };
-  }, [normalizePos, persistPos]);
+  }, [emitLayoutChanged, getCurrentSize, normalizePos, persistPos, tryRestoreTowardAnchor]);
+
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(() => {
+      if (isDragging.current) return;
+
+      const currentSize = getCurrentSize();
+      const previousSize = lastSizeRef.current;
+      lastSizeRef.current = currentSize;
+      if (!previousSize) return;
+
+      const heightDelta = currentSize.height - previousSize.height;
+      if (Math.abs(heightDelta) < HUD_RESIZE_DELTA_EPSILON) return;
+
+      const limitedBounds = getAutoMovementBounds(currentSize, scale);
+
+      setPos((prev) => {
+        const roomAbove = prev.y - limitedBounds.minY;
+        const roomBelow = (window.innerHeight - HUD_EDGE_PADDING) - (prev.y + previousSize.height);
+        const growUp = heightDelta > 0 && roomAbove > roomBelow;
+
+        let desired = prev;
+        if (growUp) {
+          desired = { x: prev.x, y: prev.y - heightDelta };
+        } else if (heightDelta < 0 && prev.y < anchorPosRef.current.y) {
+          desired = {
+            x: prev.x,
+            y: Math.min(anchorPosRef.current.y, prev.y - heightDelta),
+          };
+        }
+
+        const normalized = normalizePos(desired, scale, { movementBounds: limitedBounds });
+        if (samePos(prev, normalized)) return prev;
+        persistPos(normalized);
+        emitLayoutChanged();
+        return normalized;
+      });
+
+      window.requestAnimationFrame(() => {
+        tryRestoreTowardAnchor();
+      });
+    });
+
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+    };
+  }, [emitLayoutChanged, getAutoMovementBounds, getCurrentSize, normalizePos, persistPos, scale, tryRestoreTowardAnchor]);
+
+  useEffect(() => {
+    const onLayoutChanged = (event: Event) => {
+      const detail = (event as CustomEvent<HudLayoutChangedDetail>).detail;
+      if (!detail || detail.source === storageKey) return;
+      if (isDragging.current) return;
+      tryRestoreTowardAnchor();
+    };
+
+    window.addEventListener(HUD_LAYOUT_CHANGED_EVENT, onLayoutChanged);
+    return () => {
+      window.removeEventListener(HUD_LAYOUT_CHANGED_EVENT, onLayoutChanged);
+    };
+  }, [storageKey, tryRestoreTowardAnchor]);
+
+  useEffect(() => {
+    if (presetNonce === lastPresetNonceRef.current) return;
+    lastPresetNonceRef.current = presetNonce;
+    if (!presetPosition) return;
+
+    const target = snapPosIfNeeded(presetPosition);
+    const normalized = normalizePos(target, scale, { skipOverlap: true });
+    setPos((prev) => {
+      if (samePos(prev, normalized)) return prev;
+      persistPos(normalized);
+      return normalized;
+    });
+    anchorPosRef.current = normalized;
+  }, [normalizePos, persistPos, presetNonce, presetPosition, scale, snapPosIfNeeded]);
 
   return (
     <div
       ref={rootRef}
       data-hud-draggable="1"
       data-hud-key={storageKey}
+      data-hud-overlap={excludeFromOverlap ? "0" : "1"}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
