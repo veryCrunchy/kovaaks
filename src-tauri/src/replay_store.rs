@@ -1,7 +1,7 @@
 /// Replay store: persists per-session mouse-path and per-second metric snapshots.
 ///
-/// Replay payloads now live in SQLite so frontend reads do not depend on sidecar
-/// JSON files. Legacy sidecars are still imported on demand for older sessions.
+/// Replay payloads now live in typed SQLite tables. Legacy SQLite blob rows and
+/// old sidecar JSON files are imported on demand for older sessions.
 /// Positions are downsampled (every Nth point) to reduce file size.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -58,7 +58,7 @@ fn replay_dir(app: &AppHandle) -> Option<PathBuf> {
 }
 
 fn sqlite_replay_path(session_id: &str) -> PathBuf {
-    PathBuf::from(format!("sqlite://session_replay_payloads/{session_id}"))
+    PathBuf::from(format!("sqlite://session_replay_tables/{session_id}"))
 }
 
 fn backfill_sqlite_replay(app: &AppHandle, session_id: &str, replay: &ReplayData) -> bool {
@@ -173,7 +173,22 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
             repair_run_capture_if_needed(app, session_id, &replay);
             Some(replay)
         }
-        Ok(None) => import_legacy_replay(app, session_id),
+        Ok(None) => match crate::stats_db::get_legacy_replay_blob(app, session_id) {
+            Ok(Some(replay)) => {
+                let _ = backfill_sqlite_replay(app, session_id, &replay);
+                let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
+                repair_run_capture_if_needed(app, session_id, &replay);
+                Some(replay)
+            }
+            Ok(None) => import_legacy_replay(app, session_id),
+            Err(error) => {
+                log::warn!(
+                    "replay_store: could not load legacy sqlite replay blob for {}: {error}",
+                    session_id
+                );
+                import_legacy_replay(app, session_id)
+            }
+        },
         Err(error) => {
             log::warn!(
                 "replay_store: could not load sqlite replay payload for {}: {error}",

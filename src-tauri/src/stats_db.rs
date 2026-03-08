@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 3;
+const SCHEMA_VERSION: i32 = 4;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -75,28 +75,162 @@ pub fn upsert_replay_payload(
     session_id: &str,
     replay: &crate::replay_store::ReplayData,
 ) -> Result<()> {
-    let conn = connect(app)?;
-    let replay_json = serde_json::to_string(replay).context("could not serialize replay payload")?;
+    let mut conn = connect(app)?;
+    let tx = conn.transaction()?;
 
-    conn.execute(
-        "
-        INSERT INTO session_replay_payloads (
-            session_id,
-            replay_json,
-            updated_at_unix_ms
-        )
-        VALUES (?1, ?2, ?3)
-        ON CONFLICT(session_id) DO UPDATE SET
-            replay_json = excluded.replay_json,
-            updated_at_unix_ms = excluded.updated_at_unix_ms
-        ",
-        params![session_id, replay_json, current_unix_ms()],
+    tx.execute(
+        "DELETE FROM session_replay_positions WHERE session_id = ?1",
+        params![session_id],
     )?;
+    tx.execute(
+        "DELETE FROM session_replay_metrics WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_replay_frames WHERE session_id = ?1",
+        params![session_id],
+    )?;
+
+    {
+        let mut insert = tx.prepare(
+            "
+            INSERT INTO session_replay_positions (
+                session_id,
+                seq_idx,
+                x,
+                y,
+                timestamp_ms,
+                is_click
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+        )?;
+        for (index, point) in replay.positions.iter().enumerate() {
+            insert.execute(params![
+                session_id,
+                index as i64,
+                point.x,
+                point.y,
+                point.timestamp_ms as i64,
+                if point.is_click { 1i64 } else { 0i64 },
+            ])?;
+        }
+    }
+
+    {
+        let mut insert = tx.prepare(
+            "
+            INSERT INTO session_replay_metrics (
+                session_id,
+                seq_idx,
+                timestamp_ms,
+                smoothness,
+                jitter,
+                overshoot_rate,
+                velocity_std,
+                avg_speed,
+                path_efficiency,
+                click_timing_cv,
+                correction_ratio,
+                directional_bias,
+                avg_hold_ms
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
+            ",
+        )?;
+        for (index, point) in replay.metrics.iter().enumerate() {
+            insert.execute(params![
+                session_id,
+                index as i64,
+                point.timestamp_ms as i64,
+                point.metrics.smoothness,
+                point.metrics.jitter,
+                point.metrics.overshoot_rate,
+                point.metrics.velocity_std,
+                point.metrics.avg_speed,
+                point.metrics.path_efficiency,
+                point.metrics.click_timing_cv,
+                point.metrics.correction_ratio,
+                point.metrics.directional_bias,
+                point.metrics.avg_hold_ms,
+            ])?;
+        }
+    }
+
+    {
+        let mut insert = tx.prepare(
+            "
+            INSERT INTO session_replay_frames (
+                session_id,
+                seq_idx,
+                timestamp_ms,
+                jpeg_b64
+            )
+            VALUES (?1, ?2, ?3, ?4)
+            ",
+        )?;
+        for (index, frame) in replay.frames.iter().enumerate() {
+            insert.execute(params![
+                session_id,
+                index as i64,
+                frame.timestamp_ms as i64,
+                frame.jpeg_b64,
+            ])?;
+        }
+    }
+
+    tx.execute(
+        "DELETE FROM session_replay_payloads WHERE session_id = ?1",
+        params![session_id],
+    )?;
+
+    tx.commit()?;
 
     Ok(())
 }
 
 pub fn get_replay_data(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<crate::replay_store::ReplayData>> {
+    let conn = connect(app)?;
+    let has_replay_asset = conn
+        .query_row(
+            "
+            SELECT 1
+            FROM replay_assets
+            WHERE session_id = ?1
+            ",
+            params![session_id],
+            |_| Ok(()),
+        )
+        .optional()
+        .context("could not load replay asset marker")?
+        .is_some();
+
+    let positions = query_replay_positions(&conn, session_id)?;
+    let metrics = query_replay_metrics(&conn, session_id)?;
+    let frames = query_replay_frames(&conn, session_id)?;
+    let run_snapshot = get_run_summary(app, session_id)?;
+
+    if !has_replay_asset
+        && positions.is_empty()
+        && metrics.is_empty()
+        && frames.is_empty()
+        && run_snapshot.is_none()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(crate::replay_store::ReplayData {
+        positions,
+        metrics,
+        frames,
+        run_snapshot,
+    }))
+}
+
+pub fn get_legacy_replay_blob(
     app: &AppHandle,
     session_id: &str,
 ) -> Result<Option<crate::replay_store::ReplayData>> {
@@ -112,14 +246,23 @@ pub fn get_replay_data(
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .context("could not load replay payload")?;
+        .context("could not load legacy replay payload")?;
 
     replay_json
         .map(|json| {
             serde_json::from_str::<crate::replay_store::ReplayData>(&json)
-                .context("could not parse replay payload")
+                .context("could not parse legacy replay payload")
         })
         .transpose()
+}
+
+pub fn delete_legacy_replay_blob(app: &AppHandle, session_id: &str) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "DELETE FROM session_replay_payloads WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    Ok(())
 }
 
 fn db_path(app: &AppHandle) -> Result<PathBuf> {
@@ -281,7 +424,198 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
         )?;
     }
 
+    if user_version < 4 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS session_smoothness (
+                session_id TEXT PRIMARY KEY,
+                composite REAL NOT NULL,
+                jitter REAL NOT NULL,
+                overshoot_rate REAL NOT NULL,
+                velocity_std REAL NOT NULL,
+                path_efficiency REAL NOT NULL,
+                avg_speed REAL NOT NULL,
+                click_timing_cv REAL NOT NULL,
+                correction_ratio REAL NOT NULL,
+                directional_bias REAL NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_stats_panels (
+                session_id TEXT PRIMARY KEY,
+                scenario_type TEXT NOT NULL,
+                kills INTEGER,
+                avg_kps REAL,
+                accuracy_pct REAL,
+                total_damage REAL,
+                avg_ttk_ms REAL,
+                best_ttk_ms REAL,
+                ttk_std_ms REAL,
+                accuracy_trend REAL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_shot_timings (
+                session_id TEXT PRIMARY KEY,
+                paired_shot_hits INTEGER NOT NULL DEFAULT 0,
+                avg_fire_to_hit_ms REAL,
+                p90_fire_to_hit_ms REAL,
+                avg_shots_to_hit REAL,
+                corrective_shot_ratio REAL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS session_replay_positions (
+                session_id TEXT NOT NULL,
+                seq_idx INTEGER NOT NULL,
+                x REAL NOT NULL,
+                y REAL NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                is_click INTEGER NOT NULL DEFAULT 0 CHECK (is_click IN (0, 1)),
+                PRIMARY KEY(session_id, seq_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_positions_session ON session_replay_positions(session_id, seq_idx);
+
+            CREATE TABLE IF NOT EXISTS session_replay_metrics (
+                session_id TEXT NOT NULL,
+                seq_idx INTEGER NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                smoothness REAL NOT NULL,
+                jitter REAL NOT NULL,
+                overshoot_rate REAL NOT NULL,
+                velocity_std REAL NOT NULL,
+                avg_speed REAL NOT NULL,
+                path_efficiency REAL NOT NULL,
+                click_timing_cv REAL NOT NULL,
+                correction_ratio REAL NOT NULL,
+                directional_bias REAL NOT NULL,
+                avg_hold_ms REAL NOT NULL,
+                PRIMARY KEY(session_id, seq_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_metrics_session ON session_replay_metrics(session_id, seq_idx);
+
+            CREATE TABLE IF NOT EXISTS session_replay_frames (
+                session_id TEXT NOT NULL,
+                seq_idx INTEGER NOT NULL,
+                timestamp_ms INTEGER NOT NULL,
+                jpeg_b64 TEXT NOT NULL,
+                PRIMARY KEY(session_id, seq_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_frames_session ON session_replay_frames(session_id, seq_idx);
+
+            PRAGMA user_version = 4;
+            COMMIT;
+            ",
+        )?;
+    }
+
     Ok(())
+}
+
+fn query_replay_positions(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<crate::mouse_hook::RawPositionPoint>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT x, y, timestamp_ms, is_click
+        FROM session_replay_positions
+        WHERE session_id = ?1
+        ORDER BY seq_idx ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(crate::mouse_hook::RawPositionPoint {
+            x: row.get(0)?,
+            y: row.get(1)?,
+            timestamp_ms: row.get::<_, i64>(2)? as u64,
+            is_click: row.get::<_, i64>(3)? != 0,
+        })
+    })?;
+
+    let mut positions = Vec::new();
+    for row in rows {
+        positions.push(row?);
+    }
+    Ok(positions)
+}
+
+fn query_replay_metrics(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<crate::mouse_hook::MetricPoint>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            timestamp_ms,
+            smoothness,
+            jitter,
+            overshoot_rate,
+            velocity_std,
+            avg_speed,
+            path_efficiency,
+            click_timing_cv,
+            correction_ratio,
+            directional_bias,
+            avg_hold_ms
+        FROM session_replay_metrics
+        WHERE session_id = ?1
+        ORDER BY seq_idx ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(crate::mouse_hook::MetricPoint {
+            timestamp_ms: row.get::<_, i64>(0)? as u64,
+            metrics: crate::mouse_hook::MouseMetrics {
+                smoothness: row.get(1)?,
+                jitter: row.get(2)?,
+                overshoot_rate: row.get(3)?,
+                velocity_std: row.get(4)?,
+                avg_speed: row.get(5)?,
+                path_efficiency: row.get(6)?,
+                click_timing_cv: row.get(7)?,
+                correction_ratio: row.get(8)?,
+                directional_bias: row.get(9)?,
+                avg_hold_ms: row.get(10)?,
+            },
+        })
+    })?;
+
+    let mut metrics = Vec::new();
+    for row in rows {
+        metrics.push(row?);
+    }
+    Ok(metrics)
+}
+
+fn query_replay_frames(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Vec<crate::screen_recorder::ScreenFrame>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT timestamp_ms, jpeg_b64
+        FROM session_replay_frames
+        WHERE session_id = ?1
+        ORDER BY seq_idx ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        Ok(crate::screen_recorder::ScreenFrame {
+            timestamp_ms: row.get::<_, i64>(0)? as u64,
+            jpeg_b64: row.get(1)?,
+        })
+    })?;
+
+    let mut frames = Vec::new();
+    for row in rows {
+        frames.push(row?);
+    }
+    Ok(frames)
 }
 
 pub fn upsert_run_capture(

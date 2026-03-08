@@ -4,7 +4,7 @@
 /// smoothness snapshot averaged across the session. Stored in the local SQLite
 /// stats database, with one-time legacy import from `sessions.json`.
 use anyhow::Context;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Row, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tauri::AppHandle;
@@ -234,6 +234,7 @@ fn try_initialize(app: &AppHandle) -> anyhow::Result<SessionStoreInitReport> {
         .map(|records| try_merge_sessions(app, records))
         .transpose()?
         .unwrap_or_default();
+    try_backfill_session_snapshots(app)?;
     try_migrate_session_names(app)?;
     log::info!("session_store: using stats db at {}", db_path.display());
     Ok(SessionStoreInitReport {
@@ -277,8 +278,8 @@ where
 
         for record in records {
             let inserted = insert.execute(params![
-                record.id,
-                record.scenario,
+                &record.id,
+                &record.scenario,
                 record.score,
                 record.accuracy,
                 record.kills as i64,
@@ -286,13 +287,14 @@ where
                 record.duration_secs,
                 record.avg_ttk,
                 record.damage_done,
-                record.timestamp,
-                serialize_optional_json(record.smoothness.as_ref())?,
-                serialize_optional_json(record.stats_panel.as_ref())?,
-                serialize_optional_json(record.shot_timing.as_ref())?,
+                &record.timestamp,
+                Option::<String>::None,
+                Option::<String>::None,
+                Option::<String>::None,
                 if record.has_replay { 1i64 } else { 0i64 },
             ])?;
             if inserted > 0 {
+                upsert_session_snapshots(&tx, &record)?;
                 result.imported += 1;
             } else {
                 result.skipped_existing += 1;
@@ -472,21 +474,47 @@ fn query_sessions(
     let mut stmt = conn.prepare(
         "
         SELECT
-            id,
-            scenario,
-            score,
-            accuracy,
-            kills,
-            deaths,
-            duration_secs,
-            avg_ttk,
-            damage_done,
-            timestamp,
-            smoothness_json,
-            stats_panel_json,
-            shot_timing_json,
-            has_replay
-        FROM sessions
+            s.id,
+            s.scenario,
+            s.score,
+            s.accuracy,
+            s.kills,
+            s.deaths,
+            s.duration_secs,
+            s.avg_ttk,
+            s.damage_done,
+            s.timestamp,
+            s.smoothness_json AS legacy_smoothness_json,
+            s.stats_panel_json AS legacy_stats_panel_json,
+            s.shot_timing_json AS legacy_shot_timing_json,
+            s.has_replay,
+            sm.composite AS smoothness_composite,
+            sm.jitter AS smoothness_jitter,
+            sm.overshoot_rate AS smoothness_overshoot_rate,
+            sm.velocity_std AS smoothness_velocity_std,
+            sm.path_efficiency AS smoothness_path_efficiency,
+            sm.avg_speed AS smoothness_avg_speed,
+            sm.click_timing_cv AS smoothness_click_timing_cv,
+            sm.correction_ratio AS smoothness_correction_ratio,
+            sm.directional_bias AS smoothness_directional_bias,
+            sp.scenario_type AS stats_panel_scenario_type,
+            sp.kills AS stats_panel_kills,
+            sp.avg_kps AS stats_panel_avg_kps,
+            sp.accuracy_pct AS stats_panel_accuracy_pct,
+            sp.total_damage AS stats_panel_total_damage,
+            sp.avg_ttk_ms AS stats_panel_avg_ttk_ms,
+            sp.best_ttk_ms AS stats_panel_best_ttk_ms,
+            sp.ttk_std_ms AS stats_panel_ttk_std_ms,
+            sp.accuracy_trend AS stats_panel_accuracy_trend,
+            st.paired_shot_hits AS shot_timing_paired_shot_hits,
+            st.avg_fire_to_hit_ms AS shot_timing_avg_fire_to_hit_ms,
+            st.p90_fire_to_hit_ms AS shot_timing_p90_fire_to_hit_ms,
+            st.avg_shots_to_hit AS shot_timing_avg_shots_to_hit,
+            st.corrective_shot_ratio AS shot_timing_corrective_shot_ratio
+        FROM sessions s
+        LEFT JOIN session_smoothness sm ON sm.session_id = s.id
+        LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
+        LEFT JOIN session_shot_timings st ON st.session_id = s.id
         ORDER BY timestamp ASC, id ASC
         LIMIT ?1 OFFSET ?2
         ",
@@ -497,6 +525,69 @@ fn query_sessions(
         sessions.push(row?);
     }
     Ok(sessions)
+}
+
+fn try_backfill_session_snapshots(app: &AppHandle) -> anyhow::Result<()> {
+    let mut conn = crate::stats_db::connect(app)?;
+    let tx = conn.transaction()?;
+    let rows = {
+        let mut stmt = tx.prepare(
+            "
+            SELECT id, smoothness_json, stats_panel_json, shot_timing_json
+            FROM sessions
+            WHERE smoothness_json IS NOT NULL
+               OR stats_panel_json IS NOT NULL
+               OR shot_timing_json IS NOT NULL
+            ",
+        )?;
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut migrated = 0usize;
+    for (id, smoothness_json, stats_panel_json, shot_timing_json) in rows {
+        let record = SessionRecord {
+            id: id.clone(),
+            scenario: String::new(),
+            score: 0.0,
+            accuracy: 0.0,
+            kills: 0,
+            deaths: 0,
+            duration_secs: 0.0,
+            avg_ttk: 0.0,
+            damage_done: 0.0,
+            timestamp: String::new(),
+            smoothness: deserialize_optional_json(&id, "smoothness_json", smoothness_json),
+            stats_panel: deserialize_optional_json(&id, "stats_panel_json", stats_panel_json),
+            shot_timing: deserialize_optional_json(&id, "shot_timing_json", shot_timing_json),
+            has_replay: false,
+        };
+        upsert_session_snapshots(&tx, &record)?;
+        tx.execute(
+            "
+            UPDATE sessions
+            SET smoothness_json = NULL,
+                stats_panel_json = NULL,
+                shot_timing_json = NULL
+            WHERE id = ?1
+            ",
+            params![id],
+        )?;
+        migrated += 1;
+    }
+
+    tx.commit()?;
+    if migrated > 0 {
+        log::info!("session_store: migrated {} session snapshot row(s) into typed SQL tables", migrated);
+    }
+    Ok(())
 }
 
 fn normalize_scenario_name(name: &str) -> String {
@@ -539,9 +630,9 @@ fn timestamp_matches_at(bytes: &[u8], start: usize) -> bool {
 
 fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRecord> {
     let id = row.get::<_, String>(0)?;
-    let smoothness_json = row.get::<_, Option<String>>(10)?;
-    let stats_panel_json = row.get::<_, Option<String>>(11)?;
-    let shot_timing_json = row.get::<_, Option<String>>(12)?;
+    let smoothness_json = row.get::<_, Option<String>>("legacy_smoothness_json")?;
+    let stats_panel_json = row.get::<_, Option<String>>("legacy_stats_panel_json")?;
+    let shot_timing_json = row.get::<_, Option<String>>("legacy_shot_timing_json")?;
     let has_replay = row.get::<_, i64>(13)? != 0;
 
     Ok(SessionRecord {
@@ -555,17 +646,173 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
         avg_ttk: row.get(7)?,
         damage_done: row.get(8)?,
         timestamp: row.get(9)?,
-        smoothness: deserialize_optional_json(&id, "smoothness_json", smoothness_json),
-        stats_panel: deserialize_optional_json(&id, "stats_panel_json", stats_panel_json),
-        shot_timing: deserialize_optional_json(&id, "shot_timing_json", shot_timing_json),
+        smoothness: smoothness_from_row(row)?
+            .or_else(|| deserialize_optional_json(&id, "smoothness_json", smoothness_json)),
+        stats_panel: stats_panel_from_row(row)?
+            .or_else(|| deserialize_optional_json(&id, "stats_panel_json", stats_panel_json)),
+        shot_timing: shot_timing_from_row(row)?
+            .or_else(|| deserialize_optional_json(&id, "shot_timing_json", shot_timing_json)),
         has_replay,
     })
 }
 
-fn serialize_optional_json<T: Serialize>(value: Option<&T>) -> anyhow::Result<Option<String>> {
-    value
-        .map(|item| serde_json::to_string(item).context("could not serialize session field"))
-        .transpose()
+fn upsert_session_snapshots(tx: &Transaction<'_>, record: &SessionRecord) -> anyhow::Result<()> {
+    tx.execute("DELETE FROM session_smoothness WHERE session_id = ?1", params![&record.id])?;
+    tx.execute("DELETE FROM session_stats_panels WHERE session_id = ?1", params![&record.id])?;
+    tx.execute("DELETE FROM session_shot_timings WHERE session_id = ?1", params![&record.id])?;
+
+    if let Some(smoothness) = record.smoothness.as_ref() {
+        tx.execute(
+            "
+            INSERT INTO session_smoothness (
+                session_id,
+                composite,
+                jitter,
+                overshoot_rate,
+                velocity_std,
+                path_efficiency,
+                avg_speed,
+                click_timing_cv,
+                correction_ratio,
+                directional_bias
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ",
+            params![
+                &record.id,
+                smoothness.composite,
+                smoothness.jitter,
+                smoothness.overshoot_rate,
+                smoothness.velocity_std,
+                smoothness.path_efficiency,
+                smoothness.avg_speed,
+                smoothness.click_timing_cv,
+                smoothness.correction_ratio,
+                smoothness.directional_bias,
+            ],
+        )?;
+    }
+
+    if let Some(stats_panel) = record.stats_panel.as_ref() {
+        tx.execute(
+            "
+            INSERT INTO session_stats_panels (
+                session_id,
+                scenario_type,
+                kills,
+                avg_kps,
+                accuracy_pct,
+                total_damage,
+                avg_ttk_ms,
+                best_ttk_ms,
+                ttk_std_ms,
+                accuracy_trend
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ",
+            params![
+                &record.id,
+                &stats_panel.scenario_type,
+                stats_panel.kills.map(|value| value as i64),
+                stats_panel.avg_kps,
+                stats_panel.accuracy_pct,
+                stats_panel.total_damage,
+                stats_panel.avg_ttk_ms,
+                stats_panel.best_ttk_ms,
+                stats_panel.ttk_std_ms,
+                stats_panel.accuracy_trend,
+            ],
+        )?;
+    }
+
+    if let Some(shot_timing) = record.shot_timing.as_ref() {
+        tx.execute(
+            "
+            INSERT INTO session_shot_timings (
+                session_id,
+                paired_shot_hits,
+                avg_fire_to_hit_ms,
+                p90_fire_to_hit_ms,
+                avg_shots_to_hit,
+                corrective_shot_ratio
+            )
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            ",
+            params![
+                &record.id,
+                shot_timing.paired_shot_hits as i64,
+                shot_timing.avg_fire_to_hit_ms,
+                shot_timing.p90_fire_to_hit_ms,
+                shot_timing.avg_shots_to_hit,
+                shot_timing.corrective_shot_ratio,
+            ],
+        )?;
+    }
+
+    Ok(())
+}
+
+fn smoothness_from_row(row: &Row<'_>) -> rusqlite::Result<Option<SmoothnessSnapshot>> {
+    let composite = row.get::<_, Option<f32>>("smoothness_composite")?;
+    let Some(composite) = composite else {
+        return Ok(None);
+    };
+
+    Ok(Some(SmoothnessSnapshot {
+        composite,
+        jitter: row.get::<_, Option<f32>>("smoothness_jitter")?.unwrap_or_default(),
+        overshoot_rate: row.get::<_, Option<f32>>("smoothness_overshoot_rate")?.unwrap_or_default(),
+        velocity_std: row.get::<_, Option<f32>>("smoothness_velocity_std")?.unwrap_or_default(),
+        path_efficiency: row.get::<_, Option<f32>>("smoothness_path_efficiency")?.unwrap_or_default(),
+        avg_speed: row.get::<_, Option<f32>>("smoothness_avg_speed")?.unwrap_or_default(),
+        click_timing_cv: row.get::<_, Option<f32>>("smoothness_click_timing_cv")?.unwrap_or_default(),
+        correction_ratio: row.get::<_, Option<f32>>("smoothness_correction_ratio")?.unwrap_or_default(),
+        directional_bias: row.get::<_, Option<f32>>("smoothness_directional_bias")?.unwrap_or_default(),
+    }))
+}
+
+fn stats_panel_from_row(row: &Row<'_>) -> rusqlite::Result<Option<StatsPanelSnapshot>> {
+    let scenario_type = row.get::<_, Option<String>>("stats_panel_scenario_type")?;
+    let Some(scenario_type) = scenario_type else {
+        return Ok(None);
+    };
+
+    Ok(Some(StatsPanelSnapshot {
+        scenario_type,
+        kills: row.get::<_, Option<i64>>("stats_panel_kills")?.map(|value| value as u32),
+        avg_kps: row.get("stats_panel_avg_kps")?,
+        accuracy_pct: row.get("stats_panel_accuracy_pct")?,
+        total_damage: row.get("stats_panel_total_damage")?,
+        avg_ttk_ms: row.get("stats_panel_avg_ttk_ms")?,
+        best_ttk_ms: row.get("stats_panel_best_ttk_ms")?,
+        ttk_std_ms: row.get("stats_panel_ttk_std_ms")?,
+        accuracy_trend: row.get("stats_panel_accuracy_trend")?,
+    }))
+}
+
+fn shot_timing_from_row(row: &Row<'_>) -> rusqlite::Result<Option<ShotTimingSnapshot>> {
+    let paired_shot_hits = row.get::<_, Option<i64>>("shot_timing_paired_shot_hits")?;
+    let avg_fire_to_hit_ms = row.get::<_, Option<f32>>("shot_timing_avg_fire_to_hit_ms")?;
+    let p90_fire_to_hit_ms = row.get::<_, Option<f32>>("shot_timing_p90_fire_to_hit_ms")?;
+    let avg_shots_to_hit = row.get::<_, Option<f32>>("shot_timing_avg_shots_to_hit")?;
+    let corrective_shot_ratio = row.get::<_, Option<f32>>("shot_timing_corrective_shot_ratio")?;
+
+    if paired_shot_hits.is_none()
+        && avg_fire_to_hit_ms.is_none()
+        && p90_fire_to_hit_ms.is_none()
+        && avg_shots_to_hit.is_none()
+        && corrective_shot_ratio.is_none()
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(ShotTimingSnapshot {
+        paired_shot_hits: paired_shot_hits.unwrap_or_default() as u32,
+        avg_fire_to_hit_ms,
+        p90_fire_to_hit_ms,
+        avg_shots_to_hit,
+        corrective_shot_ratio,
+    }))
 }
 
 fn deserialize_optional_json<T>(
