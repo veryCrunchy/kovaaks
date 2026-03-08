@@ -8,6 +8,7 @@ import type {
   ReplayPayloadData,
   BridgeRunSnapshot,
   BridgeRunTimelinePoint,
+  BridgeShotTelemetryEvent,
 } from "../types/mouse";
 import {
   LineChart,
@@ -232,6 +233,11 @@ function formatDateTime(ts: string): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+function formatTelemetryOffset(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
 }
 
 function fmtScore(n: number) {
@@ -2189,6 +2195,7 @@ function ReplayTab({
   const [replayPayload, setReplayPayload] = useState<ReplayPayloadData | null>(null);
   const [runSummary, setRunSummary] = useState<BridgeRunSnapshot | null>(null);
   const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
+  const [shotTelemetry, setShotTelemetry] = useState<BridgeShotTelemetryEvent[]>([]);
   const [loading, setLoading] = useState(false);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
   // const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
@@ -2199,6 +2206,7 @@ function ReplayTab({
       setReplayPayload(null);
       setRunSummary(null);
       setRunTimeline([]);
+      setShotTelemetry([]);
       return () => {
         active = false;
       };
@@ -2208,11 +2216,13 @@ function ReplayTab({
       invoke<ReplayPayloadData | null>("get_session_replay_payload", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeRunSnapshot | null>("get_session_run_summary", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeRunTimelinePoint[]>("get_session_run_timeline", { sessionId: selectedId }).catch(() => []),
-    ]).then(([payload, summary, timeline]) => {
+      invoke<BridgeShotTelemetryEvent[]>("get_session_shot_telemetry", { sessionId: selectedId }).catch(() => []),
+    ]).then(([payload, summary, timeline, telemetry]) => {
       if (!active) return;
       setReplayPayload(payload);
       setRunSummary(summary);
       setRunTimeline(timeline);
+      setShotTelemetry(telemetry);
       setLoading(false);
     });
 
@@ -2284,6 +2294,75 @@ function ReplayTab({
       ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
       : null
     );
+  const shotTelemetrySummary = useMemo(() => {
+    if (shotTelemetry.length === 0) return null;
+    const nearestDistances: number[] = [];
+    const nearestYawErrors: number[] = [];
+    const nearestPitchErrors: number[] = [];
+    const profileCounts = new Map<string, number>();
+    let firedEvents = 0;
+    let hitEvents = 0;
+    let botTargetTotal = 0;
+
+    for (const event of shotTelemetry) {
+      if (event.event === "shot_fired") firedEvents += 1;
+      if (event.event === "shot_hit") hitEvents += 1;
+
+      const botTargets = event.targets.filter((target) => target.is_bot);
+      botTargetTotal += botTargets.length;
+
+      const nearest =
+        botTargets.find((target) => target.is_nearest)
+        ?? botTargets[0]
+        ?? event.targets.find((target) => target.is_nearest)
+        ?? event.targets[0];
+      if (!nearest) continue;
+
+      const label = nearest.profile?.trim() || nearest.entity_id;
+      profileCounts.set(label, (profileCounts.get(label) ?? 0) + 1);
+
+      const distance = nearest.distance_3d ?? nearest.distance_2d;
+      if (distance != null) nearestDistances.push(distance);
+      if (nearest.yaw_error_deg != null) nearestYawErrors.push(Math.abs(nearest.yaw_error_deg));
+      if (nearest.pitch_error_deg != null) nearestPitchErrors.push(Math.abs(nearest.pitch_error_deg));
+    }
+
+    return {
+      totalEvents: shotTelemetry.length,
+      firedEvents,
+      hitEvents,
+      avgBotCount: botTargetTotal > 0 ? botTargetTotal / shotTelemetry.length : null,
+      avgNearestDistance: nearestDistances.length > 0 ? mean(nearestDistances) : null,
+      avgNearestYawError: nearestYawErrors.length > 0 ? mean(nearestYawErrors) : null,
+      avgNearestPitchError: nearestPitchErrors.length > 0 ? mean(nearestPitchErrors) : null,
+      topProfiles: [...profileCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4),
+    };
+  }, [shotTelemetry]);
+  const recentShotTelemetryRows = useMemo(() => {
+    if (shotTelemetry.length === 0) return [];
+    const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
+    return shotTelemetry.slice(-12).reverse().map((event, index) => {
+      const botTargets = event.targets.filter((target) => target.is_bot);
+      const nearest =
+        botTargets.find((target) => target.is_nearest)
+        ?? botTargets[0]
+        ?? event.targets.find((target) => target.is_nearest)
+        ?? event.targets[0]
+        ?? null;
+
+      return {
+        key: `${event.ts_ms}-${event.sample_seq ?? index}-${event.event}`,
+        offsetMs: Math.max(0, event.ts_ms - firstTs),
+        eventLabel: event.event === "shot_hit" ? "Hit" : "Fired",
+        total: event.total,
+        botCount: botTargets.length,
+        nearestLabel: nearest ? (nearest.profile?.trim() || nearest.entity_id) : "—",
+        nearestDistance: nearest?.distance_3d ?? nearest?.distance_2d ?? null,
+        yawError: nearest?.yaw_error_deg != null ? Math.abs(nearest.yaw_error_deg) : null,
+        pitchError: nearest?.pitch_error_deg != null ? Math.abs(nearest.pitch_error_deg) : null,
+      };
+    });
+  }, [shotTelemetry]);
 
   // In-game replay logic disabled for development. Logic is preserved but not executed.
   // const handlePlayInGameReplay = async () => {
@@ -2492,6 +2571,117 @@ function ReplayTab({
             {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
               <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
                 Per-second bridge timeline data is sparse for this run. Aggregate values above are shown from available session data.
+              </div>
+            )}
+          </div>
+
+          <div style={CHART_STYLE}>
+            <SectionTitle>Shot telemetry (persisted)</SectionTitle>
+            {shotTelemetrySummary ? (
+              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  <StatCard
+                    label="Events"
+                    value={shotTelemetrySummary.totalEvents.toLocaleString()}
+                    sub={`${shotTelemetrySummary.firedEvents} fired · ${shotTelemetrySummary.hitEvents} hit`}
+                    accent="#00f5a0"
+                  />
+                  <StatCard
+                    label="Avg bots seen"
+                    value={shotTelemetrySummary.avgBotCount != null ? shotTelemetrySummary.avgBotCount.toFixed(1) : "—"}
+                    accent="#00b4ff"
+                  />
+                  <StatCard
+                    label="Nearest range"
+                    value={shotTelemetrySummary.avgNearestDistance != null ? shotTelemetrySummary.avgNearestDistance.toFixed(0) : "—"}
+                    accent="#ffd700"
+                  />
+                  <StatCard
+                    label="Yaw error"
+                    value={shotTelemetrySummary.avgNearestYawError != null ? `${shotTelemetrySummary.avgNearestYawError.toFixed(1)}°` : "—"}
+                    accent="#ff9f43"
+                  />
+                  <StatCard
+                    label="Pitch error"
+                    value={shotTelemetrySummary.avgNearestPitchError != null ? `${shotTelemetrySummary.avgNearestPitchError.toFixed(1)}°` : "—"}
+                    accent="#a78bfa"
+                  />
+                </div>
+                {shotTelemetrySummary.topProfiles.length > 0 && (
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.42)" }}>Nearest target mix</span>
+                    {shotTelemetrySummary.topProfiles.map(([profile, count]) => (
+                      <span
+                        key={profile}
+                        style={{
+                          fontSize: 11,
+                          padding: "4px 8px",
+                          borderRadius: 999,
+                          background: "rgba(255,255,255,0.05)",
+                          border: "1px solid rgba(255,255,255,0.08)",
+                          color: "rgba(255,255,255,0.72)",
+                        }}
+                      >
+                        {profile} · {count}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                        {["T", "Event", "Total", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                          <th
+                            key={heading}
+                            style={{
+                              padding: "0 0 6px",
+                              textAlign: "left",
+                              fontWeight: 500,
+                              borderBottom: "1px solid rgba(255,255,255,0.07)",
+                            }}
+                          >
+                            {heading}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {recentShotTelemetryRows.map((row) => (
+                        <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                            {formatTelemetryOffset(row.offsetMs)}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: row.eventLabel === "Hit" ? "#00f5a0" : "#ffd166" }}>
+                            {row.eventLabel}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                            {row.total ?? "—"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                            {row.botCount || "—"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                            {row.nearestLabel}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                            {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                            {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
+                          </td>
+                          <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                            {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ) : (
+              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
+                No stored shot telemetry was saved for this replay.
               </div>
             )}
           </div>
