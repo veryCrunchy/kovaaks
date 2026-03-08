@@ -140,6 +140,49 @@ interface BridgeParsedEvent {
   raw?: string;
 }
 
+interface ShotTelemetryContextRow {
+  key: string;
+  label: string;
+  startMs: number;
+  endMs: number;
+  firedCount: number;
+  hitCount: number;
+  accuracyPct: number | null;
+  avgBotCount: number | null;
+  nearestLabel: string;
+  nearestDistance: number | null;
+  yawError: number | null;
+  pitchError: number | null;
+  source: "sql" | "derived";
+  contextKind: string | null;
+  phase: string | null;
+  primaryTargetShare: number | null;
+  avgScorePerMinute: number | null;
+  avgKillsPerSecond: number | null;
+  avgTimelineAccuracyPct: number | null;
+  avgDamageEfficiency: number | null;
+}
+
+interface ReplayContextCoachingSignal {
+  id: string;
+  contextKey: string;
+  title: string;
+  badge: string;
+  badgeColor: string;
+  detail: string;
+  action: string;
+  startMs: number;
+  endMs: number;
+}
+
+type AimAxisKey = "precision" | "speed" | "control" | "consistency" | "decisiveness" | "rhythm";
+
+interface AimAxisProfile {
+  key: AimAxisKey;
+  label: string;
+  volatility: number;
+}
+
 type Tab = "overview" | "movement" | "performance" | "coaching" | "replay" | "leaderboard";
 type DateRangePreset = "all" | "30d" | "90d" | "365d";
 
@@ -374,6 +417,29 @@ function drillRecommendationsForCard(title: string, scenarioType: string): Drill
 function formatTelemetryOffset(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
+}
+
+function isTrackingScenario(scenarioType: string | null | undefined): boolean {
+  if (!scenarioType) return false;
+  return scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+}
+
+function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
+  return startA <= endB && endA >= startB;
+}
+
+function sliceRowsToRange<T extends { timestamp_ms: number }>(rows: T[], startMs: number, endMs: number): T[] {
+  if (rows.length === 0) return rows;
+  let startIndex = rows.findIndex((row) => row.timestamp_ms >= startMs);
+  if (startIndex === -1) return [];
+  let endIndex = rows.length - 1;
+  while (endIndex >= 0 && rows[endIndex].timestamp_ms > endMs) {
+    endIndex -= 1;
+  }
+  if (endIndex < startIndex) return [];
+  startIndex = Math.max(0, startIndex - 1);
+  endIndex = Math.min(rows.length - 1, endIndex + 1);
+  return rows.slice(startIndex, endIndex + 1);
 }
 
 function fmtScore(n: number) {
@@ -612,6 +678,150 @@ function percentileOf(sortedArr: number[], p: number): number {
   if (!sortedArr.length) return 0;
   const idx = Math.max(0, Math.ceil((sortedArr.length * p) / 100) - 1);
   return sortedArr[idx];
+}
+
+function clampNumber(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function metricDistribution(values: number[]): { median: number; p25: number; p75: number } | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  return {
+    median: percentileOf(sorted, 50),
+    p25: percentileOf(sorted, 25),
+    p75: percentileOf(sorted, 75),
+  };
+}
+
+function scaleToScore(value: number, min: number, max: number): number {
+  if (max <= min) return 0;
+  return clampNumber(((value - min) / (max - min)) * 100, 0, 100);
+}
+
+function scaleToVolatility(iqr: number, span: number): number {
+  if (span <= 0) return 0;
+  return clampNumber((iqr / span) * 100, 0, 100);
+}
+
+function buildReplayContextCoaching(
+  rows: ShotTelemetryContextRow[],
+  scenarioType: string,
+): ReplayContextCoachingSignal[] {
+  if (rows.length === 0) return [];
+
+  const ordered = [...rows].sort((a, b) => a.startMs - b.startMs);
+  const accuracyDist = metricDistribution(
+    ordered.map((row) => row.accuracyPct).filter((value): value is number => value != null),
+  );
+  const yawDist = metricDistribution(
+    ordered.map((row) => row.yawError).filter((value): value is number => value != null),
+  );
+  const kpsDist = metricDistribution(
+    ordered.map((row) => row.avgKillsPerSecond).filter((value): value is number => value != null),
+  );
+  const damageDist = metricDistribution(
+    ordered.map((row) => row.avgDamageEfficiency).filter((value): value is number => value != null),
+  );
+  const tracking = isTrackingScenario(scenarioType);
+  const signals: ReplayContextCoachingSignal[] = [];
+
+  for (let index = 0; index < ordered.length; index += 1) {
+    const row = ordered[index];
+    const prev = index > 0 ? ordered[index - 1] : null;
+
+    if (
+      row.firedCount >= 6
+      && row.accuracyPct != null
+      && accuracyDist
+      && row.accuracyPct <= Math.min(72, accuracyDist.median - 8)
+    ) {
+      signals.push({
+        id: `${row.key}-correction`,
+        contextKey: row.key,
+        title: "Corrective-shot spike",
+        badge: "Correction",
+        badgeColor: "#00b4ff",
+        detail: `${row.label} fell to ${row.accuracyPct.toFixed(1)}% accuracy across ${row.firedCount} fired shots, which is where extra recovery shots start stacking up.`,
+        action: "Replay this window and look for the first miss that forces a second adjustment. Slow the entry slightly until first-shot conversion stabilizes.",
+        startMs: row.startMs,
+        endMs: row.endMs,
+      });
+    }
+
+    if (
+      row.yawError != null
+      && yawDist
+      && row.yawError >= Math.max(6, yawDist.median * 1.35)
+      && row.firedCount >= 4
+    ) {
+      signals.push({
+        id: `${row.key}-overshoot`,
+        contextKey: row.key,
+        title: tracking ? "Tracking overshoot pocket" : "Overshoot burst",
+        badge: tracking ? "Tracking" : "Overshoot",
+        badgeColor: "#ff9f43",
+        detail: `${row.label} averaged ${row.yawError.toFixed(1)}° yaw error${row.nearestLabel !== "—" ? ` against ${row.nearestLabel}` : ""}, a clear sign that entry speed outran your stop control in this segment.`,
+        action: tracking
+          ? "Use this window as a smoothing rep: match target speed first, then let damage efficiency climb back before pushing pace."
+          : "Replay this burst and brake earlier on approach. The goal is to land inside the target zone instead of correcting back through it.",
+        startMs: row.startMs,
+        endMs: row.endMs,
+      });
+    }
+
+    if (
+      prev
+      && row.avgBotCount != null
+      && row.avgBotCount >= 1.8
+      && row.avgKillsPerSecond != null
+      && kpsDist
+      && row.avgKillsPerSecond <= kpsDist.median * 0.72
+      && row.primaryTargetShare != null
+      && row.primaryTargetShare <= 0.58
+      && row.nearestLabel !== prev.nearestLabel
+    ) {
+      signals.push({
+        id: `${row.key}-hesitation`,
+        contextKey: row.key,
+        title: "Target-switch hesitation",
+        badge: "Switching",
+        badgeColor: "#ffd700",
+        detail: `${row.label} slowed to ${(row.avgKillsPerSecond ?? 0).toFixed(2)} KPS while juggling ${row.avgBotCount.toFixed(1)} bots and no single target owned more than ${Math.round(row.primaryTargetShare * 100)}% of the window.`,
+        action: "Replay this segment and pre-plan the next target before the current shot finishes. The hesitation is happening between confirmations, not during the flick itself.",
+        startMs: row.startMs,
+        endMs: row.endMs,
+      });
+    }
+  }
+
+  if (tracking && ordered.length >= 3 && damageDist) {
+    const splitIndex = Math.max(1, Math.floor(ordered.length / 2));
+    const early = ordered.slice(0, splitIndex);
+    const late = ordered.slice(splitIndex);
+    const earlyDamage = mean(early.map((row) => row.avgDamageEfficiency).filter((value): value is number => value != null));
+    const lateDamage = mean(late.map((row) => row.avgDamageEfficiency).filter((value): value is number => value != null));
+    const earlyYaw = mean(early.map((row) => row.yawError).filter((value): value is number => value != null));
+    const lateYaw = mean(late.map((row) => row.yawError).filter((value): value is number => value != null));
+
+    if (lateDamage > 0 && earlyDamage > 0 && lateDamage <= earlyDamage - 8 && lateYaw >= earlyYaw + 1.5) {
+      const lateStart = late[0]?.startMs ?? 0;
+      const lateEnd = late[late.length - 1]?.endMs ?? lateStart;
+      signals.push({
+        id: "tracking-stability-decay",
+        contextKey: late[0]?.key ?? ordered[ordered.length - 1].key,
+        title: "Tracking stability decay",
+        badge: "Decay",
+        badgeColor: "#a78bfa",
+        detail: `Late-run tracking damage efficiency dropped ${earlyDamage.toFixed(1)}% → ${lateDamage.toFixed(1)}% while yaw error climbed ${earlyYaw.toFixed(1)}° → ${lateYaw.toFixed(1)}°. Contact quality is fading as the run progresses.`,
+        action: "Use the late segment as an endurance rep. Keep cursor speed even and reduce reactivity spikes before trying to recover score.",
+        startMs: lateStart,
+        endMs: lateEnd,
+      });
+    }
+  }
+
+  return signals.slice(0, 5);
 }
 
 interface RunMomentInsight {
@@ -989,8 +1199,41 @@ function StatCard({
   );
 }
 
-function SectionTitle({ children }: { children: React.ReactNode }) {
-  return <SectionLabel className="mb-3">{children}</SectionLabel>;
+function InfoTip({ text }: { text: string }) {
+  return (
+    <span
+      title={text}
+      aria-label={text}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        width: 14,
+        height: 14,
+        borderRadius: "50%",
+        border: "1px solid rgba(255,255,255,0.18)",
+        background: "rgba(255,255,255,0.05)",
+        color: "rgba(255,255,255,0.56)",
+        fontSize: 9,
+        fontWeight: 700,
+        lineHeight: 1,
+        cursor: "help",
+        verticalAlign: "middle",
+        marginLeft: 6,
+      }}
+    >
+      i
+    </span>
+  );
+}
+
+function SectionTitle({ children, info }: { children: React.ReactNode; info?: string }) {
+  return (
+    <SectionLabel className="mb-3">
+      {children}
+      {info ? <InfoTip text={info} /> : null}
+    </SectionLabel>
+  );
 }
 
 function MiniTooltip({ active, payload }: TooltipProps<number, string>) {
@@ -2468,6 +2711,7 @@ function ReplayTab({
   const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
   const [shotTelemetry, setShotTelemetry] = useState<BridgeShotTelemetryEvent[]>([]);
   const [replayContextWindows, setReplayContextWindows] = useState<BridgeReplayContextWindow[]>([]);
+  const [selectedContextKey, setSelectedContextKey] = useState<string | null>(null);
   const [shotTelemetryDisplayMode, setShotTelemetryDisplayMode] = useState<ShotTelemetryDisplayMode>("context");
   const [loading, setLoading] = useState(false);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
@@ -2485,6 +2729,7 @@ function ReplayTab({
         active = false;
       };
     }
+    setSelectedContextKey(null);
     setLoading(true);
     Promise.all([
       invoke<ReplayPayloadData | null>("get_session_replay_payload", { sessionId: selectedId }).catch(() => null),
@@ -2600,6 +2845,70 @@ function ReplayTab({
       ? (runSnapshot.damage_done / runSnapshot.damage_possible) * 100
       : null
     );
+  const bridgeRunStatCards = useMemo(() => {
+    const cards: Array<{ label: string; value: string; sub?: string; accent: string }> = [];
+
+    if (runDurationSecs != null) {
+      cards.push({
+        label: "Duration",
+        value: fmtDuration(runDurationSecs),
+        accent: "#00b4ff",
+      });
+    }
+    const scorePerMinute = runSnapshot?.score_per_minute;
+    const peakScorePerMinute = runSnapshot?.peak_score_per_minute;
+
+    if (scorePerMinute != null) {
+      cards.push({
+        label: "SPM",
+        value: scorePerMinute.toFixed(0),
+        sub: peakScorePerMinute != null ? `peak ${peakScorePerMinute.toFixed(0)}` : undefined,
+        accent: "#00f5a0",
+      });
+    }
+    if (runAccuracy != null) {
+      cards.push({
+        label: "Accuracy",
+        value: `${runAccuracy.toFixed(1)}%`,
+        accent: "#ffd700",
+      });
+    }
+    if (runDamageEff != null) {
+      cards.push({
+        label: "Damage Eff",
+        value: `${runDamageEff.toFixed(1)}%`,
+        accent: "#a78bfa",
+      });
+    }
+    if (runShotsToHit != null) {
+      cards.push({
+        label: "Shots / Hit",
+        value: runShotsToHit.toFixed(2),
+        sub: runCorrectiveRatio != null ? `${(runCorrectiveRatio * 100).toFixed(0)}% corrective` : undefined,
+        accent: "#00b4ff",
+      });
+    }
+    if (runFireToHitMs != null) {
+      cards.push({
+        label: "Fire→Hit",
+        value: `${runFireToHitMs.toFixed(0)}ms`,
+        sub: runFireToHitP90Ms != null ? `p90 ${runFireToHitP90Ms.toFixed(0)}ms` : undefined,
+        accent: "#ff9f43",
+      });
+    }
+
+    return cards;
+  }, [
+    runAccuracy,
+    runCorrectiveRatio,
+    runDamageEff,
+    runDurationSecs,
+    runFireToHitMs,
+    runFireToHitP90Ms,
+    runShotsToHit,
+    runSnapshot?.peak_score_per_minute,
+    runSnapshot?.score_per_minute,
+  ]);
   const nearestTargetProfileEntityCounts = useMemo(() => {
     const counts = new Map<string, Set<string>>();
     for (const event of shotTelemetry) {
@@ -2617,77 +2926,14 @@ function ReplayTab({
     }
     return counts;
   }, [shotTelemetry]);
-  const shotTelemetrySummary = useMemo(() => {
-    if (shotTelemetry.length === 0) return null;
-    const nearestDistances: number[] = [];
-    const nearestYawErrors: number[] = [];
-    const nearestPitchErrors: number[] = [];
-    const profileCounts = new Map<string, { label: string; count: number }>();
-    let firedEvents = 0;
-    let hitEvents = 0;
-    let totalEvents = 0;
-    let weightedBotTargetTotal = 0;
-
-    for (const event of shotTelemetry) {
-      const weight = Math.max(1, event.count ?? 1);
-      totalEvents += weight;
-      if (event.event === "shot_fired") firedEvents += weight;
-      if (event.event === "shot_hit") hitEvents += weight;
-
-      const botTargets = event.targets.filter((target) => target.is_bot);
-      weightedBotTargetTotal += botTargets.length * weight;
-
-      const nearest =
-        botTargets.find((target) => target.is_nearest)
-        ?? botTargets[0]
-        ?? event.targets.find((target) => target.is_nearest)
-        ?? event.targets[0];
-      if (!nearest) continue;
-
-      const baseProfile = nearest.profile?.trim() || nearest.entity_id;
-      const duplicateProfile = (nearestTargetProfileEntityCounts.get(baseProfile)?.size ?? 0) > 1;
-      const identityKey = `${baseProfile}::${nearest.entity_id}`;
-      const current = profileCounts.get(identityKey);
-      profileCounts.set(identityKey, {
-        label: formatShotTelemetryTargetLabel(nearest.profile, nearest.entity_id, duplicateProfile),
-        count: (current?.count ?? 0) + weight,
-      });
-
-      const distance = nearest.distance_3d ?? nearest.distance_2d;
-      if (distance != null) {
-        for (let i = 0; i < weight; i += 1) nearestDistances.push(distance);
-      }
-      if (nearest.yaw_error_deg != null) {
-        for (let i = 0; i < weight; i += 1) nearestYawErrors.push(Math.abs(nearest.yaw_error_deg));
-      }
-      if (nearest.pitch_error_deg != null) {
-        for (let i = 0; i < weight; i += 1) nearestPitchErrors.push(Math.abs(nearest.pitch_error_deg));
-      }
-    }
-
-    return {
-      totalEvents,
-      firedEvents,
-      hitEvents,
-      avgBotCount: weightedBotTargetTotal > 0 && totalEvents > 0
-        ? weightedBotTargetTotal / totalEvents
-        : null,
-      avgNearestDistance: nearestDistances.length > 0 ? mean(nearestDistances) : null,
-      avgNearestYawError: nearestYawErrors.length > 0 ? mean(nearestYawErrors) : null,
-      avgNearestPitchError: nearestPitchErrors.length > 0 ? mean(nearestPitchErrors) : null,
-      topProfiles: [...profileCounts.values()]
-        .sort((a, b) => b.count - a.count)
-        .slice(0, 4)
-        .map((entry) => [entry.label, entry.count] as const),
-    };
-  }, [nearestTargetProfileEntityCounts, shotTelemetry]);
+  const shotTelemetryBaseTs = shotTelemetry[0]?.ts_ms ?? 0;
   const shotTelemetryContext = useMemo(() => {
     if (replayContextWindows.length > 0) {
       return {
         source: "sql" as const,
         rows: [...replayContextWindows]
           .sort((a, b) => b.start_ms - a.start_ms)
-          .map((window) => ({
+          .map((window): ShotTelemetryContextRow => ({
             key: `window-${window.window_idx}`,
             label: window.label,
             startMs: window.start_ms,
@@ -2700,23 +2946,18 @@ function ReplayTab({
             nearestDistance: window.avg_nearest_distance,
             yawError: window.avg_nearest_yaw_error_deg,
             pitchError: window.avg_nearest_pitch_error_deg,
+            source: "sql",
+            contextKind: window.context_kind,
+            phase: window.phase,
+            primaryTargetShare: window.primary_target_share,
+            avgScorePerMinute: window.avg_score_per_minute,
+            avgKillsPerSecond: window.avg_kills_per_second,
+            avgTimelineAccuracyPct: window.avg_timeline_accuracy_pct,
+            avgDamageEfficiency: window.avg_damage_efficiency,
           })),
       };
     }
-    if (shotTelemetry.length === 0) return { source: "empty" as const, rows: [] as Array<{
-      key: string;
-      label: string;
-      startMs: number;
-      endMs: number;
-      firedCount: number;
-      hitCount: number;
-      accuracyPct: number | null;
-      avgBotCount: number | null;
-      nearestLabel: string;
-      nearestDistance: number | null;
-      yawError: number | null;
-      pitchError: number | null;
-    }> };
+    if (shotTelemetry.length === 0) return { source: "empty" as const, rows: [] as ShotTelemetryContextRow[] };
     const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
     const windowMs = selectShotTelemetryWindowMs(runDurationSecs, shotTelemetry.length);
     const windows = new Map<number, {
@@ -2799,7 +3040,7 @@ function ReplayTab({
       source: "derived" as const,
       rows: [...windows.entries()]
         .sort((a, b) => b[0] - a[0])
-        .map(([bucketIndex, bucket]) => {
+        .map(([bucketIndex, bucket]): ShotTelemetryContextRow => {
           const nearestLabel =
             [...bucket.nearestCounts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "—";
           return {
@@ -2815,14 +3056,173 @@ function ReplayTab({
             nearestDistance: bucket.weightedDistanceCount > 0 ? bucket.weightedDistanceSum / bucket.weightedDistanceCount : null,
             yawError: bucket.weightedYawCount > 0 ? bucket.weightedYawSum / bucket.weightedYawCount : null,
             pitchError: bucket.weightedPitchCount > 0 ? bucket.weightedPitchSum / bucket.weightedPitchCount : null,
+            source: "derived",
+            contextKind: null,
+            phase: null,
+            primaryTargetShare: null,
+            avgScorePerMinute: null,
+            avgKillsPerSecond: null,
+            avgTimelineAccuracyPct: null,
+            avgDamageEfficiency: null,
           };
         }),
     };
   }, [nearestTargetProfileEntityCounts, replayContextWindows, runDurationSecs, shotTelemetry]);
+  const replayScenarioType = selectedRecord?.stats_panel?.scenario_type ?? "Unknown";
+  const replayContextCoaching = useMemo(
+    () => buildReplayContextCoaching(shotTelemetryContext.rows, replayScenarioType),
+    [replayScenarioType, shotTelemetryContext.rows],
+  );
+  const selectedContextRow = useMemo(
+    () => shotTelemetryContext.rows.find((row) => row.key === selectedContextKey) ?? null,
+    [selectedContextKey, shotTelemetryContext.rows],
+  );
+  useEffect(() => {
+    if (selectedContextKey && !shotTelemetryContext.rows.some((row) => row.key === selectedContextKey)) {
+      setSelectedContextKey(null);
+    }
+  }, [selectedContextKey, shotTelemetryContext.rows]);
+  const visibleShotTelemetry = useMemo(() => {
+    if (!selectedContextRow) return shotTelemetry;
+    return shotTelemetry.filter((event) => {
+      const offsetMs = Math.max(0, event.ts_ms - shotTelemetryBaseTs);
+      return offsetMs >= selectedContextRow.startMs && offsetMs <= selectedContextRow.endMs;
+    });
+  }, [selectedContextRow, shotTelemetry, shotTelemetryBaseTs]);
+  const shotTelemetrySummary = useMemo(() => {
+    if (visibleShotTelemetry.length === 0) return null;
+    const nearestDistances: number[] = [];
+    const nearestYawErrors: number[] = [];
+    const nearestPitchErrors: number[] = [];
+    const profileCounts = new Map<string, { label: string; count: number }>();
+    let firedEvents = 0;
+    let hitEvents = 0;
+    let totalEvents = 0;
+    let weightedBotTargetTotal = 0;
+
+    for (const event of visibleShotTelemetry) {
+      const weight = Math.max(1, event.count ?? 1);
+      totalEvents += weight;
+      if (event.event === "shot_fired") firedEvents += weight;
+      if (event.event === "shot_hit") hitEvents += weight;
+
+      const botTargets = event.targets.filter((target) => target.is_bot);
+      weightedBotTargetTotal += botTargets.length * weight;
+
+      const nearest =
+        botTargets.find((target) => target.is_nearest)
+        ?? botTargets[0]
+        ?? event.targets.find((target) => target.is_nearest)
+        ?? event.targets[0];
+      if (!nearest) continue;
+
+      const baseProfile = nearest.profile?.trim() || nearest.entity_id;
+      const duplicateProfile = (nearestTargetProfileEntityCounts.get(baseProfile)?.size ?? 0) > 1;
+      const identityKey = `${baseProfile}::${nearest.entity_id}`;
+      const current = profileCounts.get(identityKey);
+      profileCounts.set(identityKey, {
+        label: formatShotTelemetryTargetLabel(nearest.profile, nearest.entity_id, duplicateProfile),
+        count: (current?.count ?? 0) + weight,
+      });
+
+      const distance = nearest.distance_3d ?? nearest.distance_2d;
+      if (distance != null) {
+        for (let i = 0; i < weight; i += 1) nearestDistances.push(distance);
+      }
+      if (nearest.yaw_error_deg != null) {
+        for (let i = 0; i < weight; i += 1) nearestYawErrors.push(Math.abs(nearest.yaw_error_deg));
+      }
+      if (nearest.pitch_error_deg != null) {
+        for (let i = 0; i < weight; i += 1) nearestPitchErrors.push(Math.abs(nearest.pitch_error_deg));
+      }
+    }
+
+    return {
+      totalEvents,
+      firedEvents,
+      hitEvents,
+      avgBotCount: weightedBotTargetTotal > 0 && totalEvents > 0
+        ? weightedBotTargetTotal / totalEvents
+        : null,
+      avgNearestDistance: nearestDistances.length > 0 ? mean(nearestDistances) : null,
+      avgNearestYawError: nearestYawErrors.length > 0 ? mean(nearestYawErrors) : null,
+      avgNearestPitchError: nearestPitchErrors.length > 0 ? mean(nearestPitchErrors) : null,
+      topProfiles: [...profileCounts.values()]
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 4)
+        .map((entry) => [entry.label, entry.count] as const),
+    };
+  }, [nearestTargetProfileEntityCounts, visibleShotTelemetry]);
+  const shotTelemetrySummaryCards = useMemo(() => {
+    if (!shotTelemetrySummary) return [] as Array<{ label: string; value: string; sub?: string; accent: string }>;
+
+    const cards: Array<{ label: string; value: string; sub?: string; accent: string }> = [
+      {
+        label: "Events",
+        value: shotTelemetrySummary.totalEvents.toLocaleString(),
+        sub: `${shotTelemetrySummary.firedEvents} fired · ${shotTelemetrySummary.hitEvents} hit`,
+        accent: "#00f5a0",
+      },
+    ];
+
+    if (shotTelemetrySummary.avgBotCount != null) {
+      cards.push({
+        label: "Avg bots seen",
+        value: shotTelemetrySummary.avgBotCount.toFixed(1),
+        accent: "#00b4ff",
+      });
+    }
+    if (shotTelemetrySummary.avgNearestDistance != null) {
+      cards.push({
+        label: "Nearest range",
+        value: shotTelemetrySummary.avgNearestDistance.toFixed(0),
+        accent: "#ffd700",
+      });
+    }
+    if (shotTelemetrySummary.avgNearestYawError != null) {
+      cards.push({
+        label: "Yaw error",
+        value: `${shotTelemetrySummary.avgNearestYawError.toFixed(1)}°`,
+        accent: "#ff9f43",
+      });
+    }
+    if (shotTelemetrySummary.avgNearestPitchError != null) {
+      cards.push({
+        label: "Pitch error",
+        value: `${shotTelemetrySummary.avgNearestPitchError.toFixed(1)}°`,
+        accent: "#a78bfa",
+      });
+    }
+
+    return cards;
+  }, [shotTelemetrySummary]);
+  const shotTelemetrySummaryLabel = useMemo(() => {
+    if (shotTelemetryDisplayMode === "context") {
+      if (shotTelemetryContext.source === "sql") {
+        return `Showing ${shotTelemetryContext.rows.length.toLocaleString()} windows`;
+      }
+      return `Showing ${shotTelemetryContext.rows.length.toLocaleString()} fallback windows`;
+    }
+    if (selectedContextRow) {
+      return `Showing ${visibleShotTelemetry.length.toLocaleString()} samples in window`;
+    }
+    return `Showing ${shotTelemetry.length.toLocaleString()} samples`;
+  }, [selectedContextRow, shotTelemetry.length, shotTelemetryContext.rows.length, shotTelemetryContext.source, shotTelemetryDisplayMode, visibleShotTelemetry.length]);
+  const shotTelemetrySummaryInfo = useMemo(() => {
+    if (shotTelemetryDisplayMode === "context") {
+      if (shotTelemetryContext.source === "sql") {
+        return `${shotTelemetryContext.rows.length.toLocaleString()} persisted context windows backed by SQL and derived from shot telemetry plus run timeline data.`;
+      }
+      return `${shotTelemetryContext.rows.length.toLocaleString()} fallback context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`;
+    }
+    if (selectedContextRow) {
+      return `${visibleShotTelemetry.length.toLocaleString()} raw persisted telemetry samples inside the selected context window.`;
+    }
+    return `All ${shotTelemetry.length.toLocaleString()} raw persisted telemetry samples for this run.`;
+  }, [selectedContextRow, shotTelemetry.length, shotTelemetryContext.rows.length, shotTelemetryContext.source, shotTelemetryDisplayMode, visibleShotTelemetry.length]);
   const shotTelemetrySampleRows = useMemo(() => {
-    if (shotTelemetry.length === 0) return [];
-    const firstTs = shotTelemetry[0]?.ts_ms ?? 0;
-    return [...shotTelemetry].reverse().map((event, index) => {
+    if (visibleShotTelemetry.length === 0) return [];
+    return [...visibleShotTelemetry].reverse().map((event, index) => {
       const botTargets = event.targets.filter((target) => target.is_bot);
       const nearest =
         botTargets.find((target) => target.is_nearest)
@@ -2833,7 +3233,7 @@ function ReplayTab({
 
       return {
         key: `${event.ts_ms}-${event.sample_seq ?? index}-${event.event}`,
-        offsetMs: Math.max(0, event.ts_ms - firstTs),
+        offsetMs: Math.max(0, event.ts_ms - shotTelemetryBaseTs),
         eventLabel: event.event === "shot_hit" ? "Hit" : "Fired",
         count: Math.max(1, event.count ?? 1),
         total: event.total,
@@ -2850,7 +3250,64 @@ function ReplayTab({
         pitchError: nearest?.pitch_error_deg != null ? Math.abs(nearest.pitch_error_deg) : null,
       };
     });
-  }, [nearestTargetProfileEntityCounts, shotTelemetry]);
+  }, [nearestTargetProfileEntityCounts, shotTelemetryBaseTs, visibleShotTelemetry]);
+  const filteredRunMoments = useMemo(() => {
+    if (!selectedContextRow) return runMoments;
+    return runMoments.filter((moment) =>
+      rangesOverlap(moment.startSec * 1000, moment.endSec * 1000, selectedContextRow.startMs, selectedContextRow.endMs),
+    );
+  }, [runMoments, selectedContextRow]);
+  const replaySelectionRange = useMemo(() => {
+    if (!selectedContextRow) return null;
+    return {
+      startMs: Math.max(0, selectedContextRow.startMs - 750),
+      endMs: selectedContextRow.endMs + 750,
+    };
+  }, [selectedContextRow]);
+  const replayPayloadView = useMemo(() => {
+    if (!replayPayload || !replaySelectionRange) return replayPayload;
+    const positions = sliceRowsToRange(replayPayload.positions, replaySelectionRange.startMs, replaySelectionRange.endMs);
+    const metrics = sliceRowsToRange(replayPayload.metrics, replaySelectionRange.startMs, replaySelectionRange.endMs);
+    const frames = sliceRowsToRange(replayPayload.frames ?? [], replaySelectionRange.startMs, replaySelectionRange.endMs);
+    if (positions.length < 2 && metrics.length === 0 && frames.length === 0) {
+      return replayPayload;
+    }
+    return {
+      positions,
+      metrics,
+      frames,
+    };
+  }, [replayPayload, replaySelectionRange]);
+  const visibleReplayContextCoaching = useMemo(() => {
+    if (!selectedContextRow) return replayContextCoaching;
+    return replayContextCoaching.filter((signal) => signal.contextKey === selectedContextRow.key);
+  }, [replayContextCoaching, selectedContextRow]);
+  const replayTimelineMarkers = useMemo(() => {
+    if (visibleShotTelemetry.length === 0) return [] as Array<{ id: string; timestamp_ms: number; color: string; label: string }>;
+    const hitEvents = visibleShotTelemetry.filter((event) => event.event === "shot_hit");
+    const firedEvents = visibleShotTelemetry.filter((event) => event.event === "shot_fired");
+    const markerSource = hitEvents.length > 0 ? hitEvents : firedEvents;
+    const step = Math.max(1, Math.ceil(markerSource.length / 24));
+    return markerSource.filter((_, index) => index % step === 0).map((event, index) => {
+      const nearest = event.targets.find((target) => target.is_nearest) ?? event.targets[0] ?? null;
+      return {
+        id: `${event.event}-${event.ts_ms}-${index}`,
+        timestamp_ms: Math.max(0, event.ts_ms - shotTelemetryBaseTs),
+        color: event.event === "shot_hit" ? "#00f5a0" : "#ffd166",
+        label: `${event.event === "shot_hit" ? "Hit" : "Shot"}${nearest ? ` · ${nearest.profile || nearest.entity_id}` : ""}`,
+      };
+    });
+  }, [shotTelemetryBaseTs, visibleShotTelemetry]);
+  const replayTimelineWindows = useMemo(
+    () => visibleReplayContextCoaching.map((signal) => ({
+      id: signal.id,
+      start_ms: signal.startMs,
+      end_ms: signal.endMs,
+      color: signal.badgeColor,
+      label: signal.title,
+    })),
+    [visibleReplayContextCoaching],
+  );
 
   // In-game replay logic disabled for development. Logic is preserved but not executed.
   // const handlePlayInGameReplay = async () => {
@@ -2894,11 +3351,9 @@ function ReplayTab({
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Session selector */}
       <div style={CHART_STYLE}>
-        <SectionTitle>Select session</SectionTitle>
+        <SectionTitle info="Pick any run to inspect the replay, shot telemetry, and exact run timeline.">Select session</SectionTitle>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
-          <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}>
-            Pick any run to inspect the replay, shot telemetry, and exact run timeline.
-          </div>
+          <div />
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
               Sort
@@ -3059,41 +3514,19 @@ function ReplayTab({
 
           <div style={CHART_STYLE}>
             <SectionTitle>Bridge run stats (persisted)</SectionTitle>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              <StatCard
-                label="Duration"
-                value={runDurationSecs != null ? fmtDuration(runDurationSecs) : "—"}
-                accent="#00b4ff"
-              />
-              <StatCard
-                label="SPM"
-                value={runSnapshot.score_per_minute != null ? runSnapshot.score_per_minute.toFixed(0) : "—"}
-                sub={runSnapshot.peak_score_per_minute != null ? `peak ${runSnapshot.peak_score_per_minute.toFixed(0)}` : undefined}
-                accent="#00f5a0"
-              />
-              <StatCard
-                label="Accuracy"
-                value={runAccuracy != null ? `${runAccuracy.toFixed(1)}%` : "—"}
-                accent="#ffd700"
-              />
-              <StatCard
-                label="Damage Eff"
-                value={runDamageEff != null ? `${runDamageEff.toFixed(1)}%` : "—"}
-                accent="#a78bfa"
-              />
-              <StatCard
-                label="Shots / Hit"
-                value={runShotsToHit != null ? runShotsToHit.toFixed(2) : "—"}
-                sub={runCorrectiveRatio != null ? `${(runCorrectiveRatio * 100).toFixed(0)}% corrective` : undefined}
-                accent="#00b4ff"
-              />
-              <StatCard
-                label="Fire→Hit"
-                value={runFireToHitMs != null ? `${runFireToHitMs.toFixed(0)}ms` : "—"}
-                sub={runFireToHitP90Ms != null ? `p90 ${runFireToHitP90Ms.toFixed(0)}ms` : undefined}
-                accent="#ff9f43"
-              />
-            </div>
+            {bridgeRunStatCards.length > 0 && (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                {bridgeRunStatCards.map((card) => (
+                  <StatCard
+                    key={card.label}
+                    label={card.label}
+                    value={card.value}
+                    sub={card.sub}
+                    accent={card.accent}
+                  />
+                ))}
+              </div>
+            )}
             {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
               <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
                 Per-second bridge timeline data is sparse for this run. Aggregate values above are shown from available session data.
@@ -3105,34 +3538,19 @@ function ReplayTab({
             <SectionTitle>Shot telemetry (persisted)</SectionTitle>
             {shotTelemetrySummary ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                  <StatCard
-                    label="Events"
-                    value={shotTelemetrySummary.totalEvents.toLocaleString()}
-                    sub={`${shotTelemetrySummary.firedEvents} fired · ${shotTelemetrySummary.hitEvents} hit`}
-                    accent="#00f5a0"
-                  />
-                  <StatCard
-                    label="Avg bots seen"
-                    value={shotTelemetrySummary.avgBotCount != null ? shotTelemetrySummary.avgBotCount.toFixed(1) : "—"}
-                    accent="#00b4ff"
-                  />
-                  <StatCard
-                    label="Nearest range"
-                    value={shotTelemetrySummary.avgNearestDistance != null ? shotTelemetrySummary.avgNearestDistance.toFixed(0) : "—"}
-                    accent="#ffd700"
-                  />
-                  <StatCard
-                    label="Yaw error"
-                    value={shotTelemetrySummary.avgNearestYawError != null ? `${shotTelemetrySummary.avgNearestYawError.toFixed(1)}°` : "—"}
-                    accent="#ff9f43"
-                  />
-                  <StatCard
-                    label="Pitch error"
-                    value={shotTelemetrySummary.avgNearestPitchError != null ? `${shotTelemetrySummary.avgNearestPitchError.toFixed(1)}°` : "—"}
-                    accent="#a78bfa"
-                  />
-                </div>
+                {shotTelemetrySummaryCards.length > 0 && (
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {shotTelemetrySummaryCards.map((card) => (
+                      <StatCard
+                        key={card.label}
+                        label={card.label}
+                        value={card.value}
+                        sub={card.sub}
+                        accent={card.accent}
+                      />
+                    ))}
+                  </div>
+                )}
                 {shotTelemetrySummary.topProfiles.length > 0 && (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                     <span style={{ fontSize: 11, color: "rgba(255,255,255,0.42)" }}>Nearest target mix</span>
@@ -3153,13 +3571,55 @@ function ReplayTab({
                     ))}
                   </div>
                 )}
+                {selectedContextRow && (
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "flex-start",
+                      gap: 12,
+                      flexWrap: "wrap",
+                      padding: "10px 12px",
+                      borderRadius: 10,
+                      background: selectedContextRow.source === "sql" ? "rgba(0,245,160,0.08)" : "rgba(255,209,102,0.08)",
+                      border: `1px solid ${selectedContextRow.source === "sql" ? "rgba(0,245,160,0.22)" : "rgba(255,209,102,0.22)"}`,
+                    }}
+                  >
+                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.82)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
+                        <span>Drilldown active: {selectedContextRow.label}</span>
+                        <InfoTip text="Target mix, raw samples, moment coaching, and mouse replay are filtered to this window." />
+                      </div>
+                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.5 }}>
+                        {formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}
+                        {selectedContextRow.phase ? ` · phase ${selectedContextRow.phase}` : ""}
+                        {selectedContextRow.contextKind ? ` · ${selectedContextRow.contextKind}` : ""}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setSelectedContextKey(null)}
+                      style={{
+                        background: "rgba(255,255,255,0.05)",
+                        border: "1px solid rgba(255,255,255,0.14)",
+                        borderRadius: 999,
+                        color: "rgba(255,255,255,0.74)",
+                        cursor: "pointer",
+                        fontSize: 10,
+                        padding: "5px 10px",
+                        textTransform: "uppercase",
+                        letterSpacing: "0.06em",
+                        fontWeight: 700,
+                      }}
+                    >
+                      Clear drilldown
+                    </button>
+                  </div>
+                )}
                 <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
-                    {shotTelemetryDisplayMode === "context"
-                      ? shotTelemetryContext.source === "sql"
-                        ? `Showing ${shotTelemetryContext.rows.length.toLocaleString()} persisted context windows backed by SQL and derived from shot telemetry plus run timeline data.`
-                        : `Showing ${shotTelemetryContext.rows.length.toLocaleString()} fallback context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`
-                      : `Showing all ${shotTelemetry.length.toLocaleString()} raw persisted telemetry samples for this run.`}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
+                    <span>{shotTelemetrySummaryLabel}</span>
+                    <InfoTip text={shotTelemetrySummaryInfo} />
                   </div>
                   <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                     {([
@@ -3214,12 +3674,26 @@ function ReplayTab({
                       </thead>
                       <tbody>
                         {shotTelemetryContext.rows.map((row) => (
-                          <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                          <tr
+                            key={row.key}
+                            onClick={() => setSelectedContextKey((current) => current === row.key ? null : row.key)}
+                            style={{
+                              borderBottom: "1px solid rgba(255,255,255,0.04)",
+                              cursor: "pointer",
+                              background: selectedContextKey === row.key ? "rgba(0,245,160,0.08)" : "transparent",
+                            }}
+                          >
                             <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
                               {formatTelemetryWindowLabel(row.startMs, row.endMs)}
                             </td>
                             <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.label}
+                              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                                <span>{row.label}</span>
+                                <span style={{ fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
+                                  {row.source === "sql" ? "persisted context" : "derived fallback"}
+                                  {row.phase ? ` · ${row.phase}` : ""}
+                                </span>
+                              </div>
                             </td>
                             <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>
                               {row.firedCount.toLocaleString()}
@@ -3309,6 +3783,69 @@ function ReplayTab({
             )}
           </div>
 
+          {visibleReplayContextCoaching.length > 0 && (
+            <div style={CHART_STYLE}>
+              <SectionTitle>Context coaching (persisted windows)</SectionTitle>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {visibleReplayContextCoaching.map((signal) => {
+                  const active = selectedContextKey === signal.contextKey;
+                  return (
+                    <button
+                      key={signal.id}
+                      type="button"
+                      onClick={() => setSelectedContextKey(signal.contextKey)}
+                      style={{
+                        background: active ? `${signal.badgeColor}12` : "rgba(255,255,255,0.03)",
+                        border: `1px solid ${active ? `${signal.badgeColor}50` : "rgba(255,255,255,0.08)"}`,
+                        borderLeft: `3px solid ${signal.badgeColor}`,
+                        borderRadius: 10,
+                        padding: "12px 14px",
+                        textAlign: "left",
+                        cursor: "pointer",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 7,
+                      }}
+                    >
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                          <span
+                            style={{
+                              background: `${signal.badgeColor}20`,
+                              border: `1px solid ${signal.badgeColor}45`,
+                              color: signal.badgeColor,
+                              borderRadius: 4,
+                              fontSize: 10,
+                              padding: "2px 7px",
+                              textTransform: "uppercase",
+                              letterSpacing: 0.8,
+                              whiteSpace: "nowrap",
+                            }}
+                          >
+                            {signal.badge}
+                          </span>
+                          <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.84)" }}>
+                            {signal.title}
+                          </span>
+                        </div>
+                        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                          {formatTelemetryWindowLabel(signal.startMs, signal.endMs)}
+                        </span>
+                      </div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.6 }}>
+                        {signal.detail}
+                      </div>
+                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.6 }}>
+                        <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
+                        {signal.action}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           {runChartData.length > 1 && hasRunTimelineSignal && (
             <div style={CHART_STYLE}>
               <SectionTitle>Timeline by second (exact run windows)</SectionTitle>
@@ -3349,6 +3886,15 @@ function ReplayTab({
                       strokeOpacity={0}
                     />
                   ))}
+                  {selectedContextRow && (
+                    <ReferenceArea
+                      x1={selectedContextRow.startMs / 1000}
+                      x2={selectedContextRow.endMs / 1000}
+                      fill={selectedContextRow.source === "sql" ? "#00f5a0" : "#ffd166"}
+                      fillOpacity={0.14}
+                      strokeOpacity={0}
+                    />
+                  )}
                   <Line
                     yAxisId="pace"
                     type="monotone"
@@ -3391,11 +3937,15 @@ function ReplayTab({
             </div>
           )}
 
-          {runMoments.length > 0 && (
+          {filteredRunMoments.length > 0 && (
             <div style={CHART_STYLE}>
-              <SectionTitle>Moment coaching (time-specific)</SectionTitle>
+              <SectionTitle
+                info={selectedContextRow ? `Showing only coaching callouts that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.` : undefined}
+              >
+                Moment coaching (time-specific)
+              </SectionTitle>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {runMoments.map((moment) => (
+                {filteredRunMoments.map((moment) => (
                   <div
                     key={moment.id}
                     style={{
@@ -3443,9 +3993,13 @@ function ReplayTab({
             pts · {formatDateTime(selectedRecord.timestamp)}
           </SectionTitle>
           <MousePathViewer
-            rawPositions={replayPayload.positions}
-            metricPoints={replayPayload.metrics}
-            screenFrames={replayPayload.frames ?? []}
+            rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
+            metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
+            screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
+            segmentLabel={selectedContextRow?.label ?? null}
+            segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
+            timelineMarkers={replayTimelineMarkers}
+            timelineWindows={replayTimelineWindows}
           />
         </div>
       )}
@@ -3462,6 +4016,9 @@ interface AimFingerprint {
   consistency: number;  // 0-100 (1 - velocity_std)
   decisiveness: number; // 0-100 (1 - correction_ratio)
   rhythm: number;       // 0-100 (1 - click_timing_cv)
+  sessionCount: number;
+  basisLabel: string;
+  axes: AimAxisProfile[];
 }
 
 function dominantScenarioType(records: SessionRecord[]): string {
@@ -3480,31 +4037,74 @@ function dominantScenarioType(records: SessionRecord[]): string {
 }
 
 function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: string): AimFingerprint {
-  const g = (fn: (s: SmoothnessSnapshot) => number) =>
-    mean(smoothRecords.map((r) => fn(r.smoothness!)));
+  const dist = (fn: (s: SmoothnessSnapshot) => number) =>
+    metricDistribution(smoothRecords.map((r) => fn(r.smoothness!))) ?? { median: 0, p25: 0, p75: 0 };
 
-  const jitter     = g((s) => s.jitter);
-  const overshoot  = g((s) => s.overshoot_rate);
-  const velStd     = g((s) => s.velocity_std);
-  const avgSpeed   = g((s) => s.avg_speed);
-  const pathEff    = g((s) => s.path_efficiency);
-  const correction = g((s) => s.correction_ratio);
-  const clickCV    = g((s) => s.click_timing_cv);
+  const jitter = dist((s) => s.jitter);
+  const overshoot = dist((s) => s.overshoot_rate);
+  const velStd = dist((s) => s.velocity_std);
+  const avgSpeed = dist((s) => s.avg_speed);
+  const pathEff = dist((s) => s.path_efficiency);
+  const correction = dist((s) => s.correction_ratio);
+  const clickCV = dist((s) => s.click_timing_cv);
 
-  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+  const tracking = isTrackingScenario(scenarioType);
 
-  const precision    = Math.round(Math.min(100, Math.max(0, (pathEff * 0.65 + Math.max(0, 1 - jitter * 4) * 0.35) * 100)));
-  const speed        = Math.round(Math.min(100, Math.max(0, (avgSpeed - 100) / 19)));
-  const control      = Math.round(Math.min(100, Math.max(0, (1 - overshoot * 2.2) * 100)));
-  const consistency  = Math.round(Math.min(100, Math.max(0, (1 - velStd) * 100)));
-  const decisiveness = Math.round(Math.min(100, Math.max(0, (1 - correction * 2.5) * 100)));
-  // For tracking: 6th axis = tracking flow (speed evenness, not click timing)
-  // For clicking: 6th axis = click rhythm
-  const rhythm = isTracking
-    ? Math.round(Math.min(100, Math.max(0, (1 - Math.min(velStd * 1.5, 1)) * 100)))
-    : Math.round(Math.min(100, Math.max(0, (1 - Math.min(clickCV, 1)) * 100)));
+  const precision = Math.round(
+    clampNumber((pathEff.median * 0.7 + Math.max(0, 1 - jitter.p75 * 3.2) * 0.3) * 100, 0, 100),
+  );
+  const speed = Math.round(scaleToScore(avgSpeed.median, 120, 1750));
+  const control = Math.round(clampNumber((1 - Math.max(overshoot.median, overshoot.p75 * 0.8) * 2.1) * 100, 0, 100));
+  const consistency = Math.round(clampNumber((1 - Math.max(velStd.median, velStd.p75 * 0.85)) * 100, 0, 100));
+  const decisiveness = Math.round(clampNumber((1 - Math.max(correction.median, correction.p75 * 0.8) * 2.25) * 100, 0, 100));
+  const rhythm = tracking
+    ? Math.round(clampNumber((1 - Math.max(velStd.median, velStd.p75 * 1.15)) * 100, 0, 100))
+    : Math.round(clampNumber((1 - Math.max(clickCV.median, clickCV.p75 * 0.9)) * 100, 0, 100));
 
-  return { precision, speed, control, consistency, decisiveness, rhythm };
+  const axes: AimAxisProfile[] = [
+    {
+      key: "precision",
+      label: "Precision",
+      volatility: Math.round((scaleToVolatility(jitter.p75 - jitter.p25, 0.18) + scaleToVolatility(pathEff.p75 - pathEff.p25, 0.2)) / 2),
+    },
+    {
+      key: "speed",
+      label: "Speed",
+      volatility: Math.round(scaleToVolatility(avgSpeed.p75 - avgSpeed.p25, 420)),
+    },
+    {
+      key: "control",
+      label: "Control",
+      volatility: Math.round(scaleToVolatility(overshoot.p75 - overshoot.p25, 0.22)),
+    },
+    {
+      key: "consistency",
+      label: "Consistency",
+      volatility: Math.round(scaleToVolatility(velStd.p75 - velStd.p25, 0.24)),
+    },
+    {
+      key: "decisiveness",
+      label: "Decisiveness",
+      volatility: Math.round(scaleToVolatility(correction.p75 - correction.p25, 0.22)),
+    },
+    {
+      key: "rhythm",
+      label: tracking ? "Flow" : "Rhythm",
+      volatility: Math.round(scaleToVolatility((tracking ? velStd.p75 - velStd.p25 : clickCV.p75 - clickCV.p25), tracking ? 0.24 : 0.3)),
+    },
+  ];
+
+  return {
+    precision,
+    speed,
+    control,
+    consistency,
+    decisiveness,
+    rhythm,
+    sessionCount: smoothRecords.length,
+    basisLabel: "Recent telemetry median with volatility weighting",
+    axes,
+  };
 }
 
 interface AimStyle {
@@ -3819,6 +4419,40 @@ function generateCoachingCards(
         body: `Your rhythm score is ${fingerprint.rhythm}/100 — click timing varies significantly between shots. Studies on elite FPS players show consistent click timing correlates strongly with kill efficiency. Timing variation often means hesitating before each shot, which adds 50–150ms of latency.`,
         tip: "Use click timing scenarios (KovaaK's has several) for 10 minutes per session. Build a consistent pre-shot commitment rhythm: acquire target → commit → click, without a hesitation gap between commit and click.",
       });
+  }
+
+  const controlAxis = fingerprint?.axes.find((axis) => axis.key === "control") ?? null;
+  const rhythmAxis = fingerprint?.axes.find((axis) => axis.key === "rhythm") ?? null;
+  const consistencyAxis = fingerprint?.axes.find((axis) => axis.key === "consistency") ?? null;
+
+  if (!isTracking && controlAxis && controlAxis.volatility >= 42) {
+    cards.push({
+      title: "Overshoot Bursts, Not Constant Drift",
+      badge: "Volatility",
+      badgeColor: "#ff9f43",
+      body: `Your overall control score is one thing, but the bigger issue is volatility: control swings ${controlAxis.volatility}/100 across recent sessions. That usually means some runs are clean while others contain short overshoot bursts that erase otherwise good pacing.`,
+      tip: "Use one repeatable entry cue for every serious run: same grip pressure, same pre-shot deceleration, same first target commitment. The goal is to make clean control reproducible, not just occasionally present.",
+    });
+  }
+
+  if (!isTracking && rhythmAxis && rhythmAxis.volatility >= 44) {
+    cards.push({
+      title: "Hesitation Spikes Between Shots",
+      badge: "Commitment",
+      badgeColor: "#ffd700",
+      body: `Your click rhythm is swingy from run to run (${rhythmAxis.volatility}/100 volatility). That pattern usually means you are not slow all the time; instead, you hesitate in pockets where target confirmation becomes uncertain.`,
+      tip: "Practice a fixed commit rule for one block: once the crosshair enters the acceptable target zone, fire immediately. Review whether this reduces the number of runs that feel sticky rather than simply slower.",
+    });
+  }
+
+  if (isTracking && consistencyAxis && consistencyAxis.volatility >= 40) {
+    cards.push({
+      title: "Tracking Stability Swings",
+      badge: "Endurance",
+      badgeColor: "#a78bfa",
+      body: `Your tracking consistency changes sharply across recent sessions (${consistencyAxis.volatility}/100 volatility). This usually means your contact quality is good when fresh but degrades once reactivity or fatigue ramps up.`,
+      tip: "Add one endurance rep at the end of each block where the goal is not score, but keeping cursor speed smooth for the full run. Stable tracking under fatigue is the skill gap here.",
+    });
   }
 
   // Tracking-specific: target prediction card
@@ -4194,6 +4828,12 @@ function CoachingTab({
   const aimStyle     = fingerprint ? classifyAimStyle(fingerprint, scenarioType) : null;
 
   const sixthAxisLabel = isTracking ? "Flow" : "Rhythm";
+  const stableAxes = fingerprint
+    ? [...fingerprint.axes].sort((a, b) => a.volatility - b.volatility).slice(0, 2)
+    : [];
+  const volatileAxes = fingerprint
+    ? [...fingerprint.axes].sort((a, b) => b.volatility - a.volatility).slice(0, 2)
+    : [];
 
   const radarData = fingerprint
     ? [
@@ -4417,7 +5057,11 @@ function CoachingTab({
       {fingerprint && aimStyle && (
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={{ ...CHART_STYLE, flex: "1 1 280px", minWidth: 220 }}>
-            <SectionTitle>Aim Fingerprint</SectionTitle>
+            <SectionTitle
+              info={`Built from ${fingerprint.sessionCount} recent telemetry snapshots using ${fingerprint.basisLabel.toLowerCase()} so one outlier run does not rewrite the whole profile.`}
+            >
+              Aim Fingerprint
+            </SectionTitle>
             <ResponsiveContainer width="100%" height={220}>
               <RadarChart data={radarData} cx="50%" cy="50%">
                 <PolarGrid stroke="rgba(255,255,255,0.1)" />
@@ -4440,6 +5084,40 @@ function CoachingTab({
                 />
               </RadarChart>
             </ResponsiveContainer>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {stableAxes.map((axis) => (
+                  <span
+                    key={`stable-${axis.key}`}
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 8px",
+                      borderRadius: 999,
+                      background: "rgba(0,245,160,0.10)",
+                      border: "1px solid rgba(0,245,160,0.18)",
+                      color: "rgba(255,255,255,0.74)",
+                    }}
+                  >
+                    Stable: {axis.label}
+                  </span>
+                ))}
+                {volatileAxes.map((axis) => (
+                  <span
+                    key={`volatile-${axis.key}`}
+                    style={{
+                      fontSize: 11,
+                      padding: "4px 8px",
+                      borderRadius: 999,
+                      background: "rgba(255,159,67,0.10)",
+                      border: "1px solid rgba(255,159,67,0.18)",
+                      color: "rgba(255,255,255,0.74)",
+                    }}
+                  >
+                    Swingy: {axis.label}
+                  </span>
+                ))}
+              </div>
+            </div>
           </div>
           <div
             style={{
