@@ -239,6 +239,30 @@ function formatDateTime(ts: string): string {
   });
 }
 
+function relativeTime(ts: string): string {
+  const d = parseTimestamp(ts);
+  if (!d) return "";
+  const diffMs = Date.now() - d.getTime();
+  const diffMins = Math.floor(diffMs / 60_000);
+  if (diffMins < 60) return diffMins <= 1 ? "just now" : `${diffMins}m ago`;
+  const diffHours = Math.floor(diffMins / 60);
+  if (diffHours < 24) return `${diffHours}h ago`;
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffWeeks < 5) return `${diffWeeks}w ago`;
+  const diffMonths = Math.floor(diffDays / 30);
+  return `${diffMonths}mo ago`;
+}
+
+function formatPlayTime(secs: number): string {
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h === 0) return `${m}m`;
+  if (m === 0) return `${h}h`;
+  return `${h}h ${m}m`;
+}
+
 function formatTelemetryOffset(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
@@ -4137,11 +4161,28 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedScenario;
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const analyticsRecords = useMemo(() => buildAnalyticsRecords(records), [records]);
   const flaggedRecordCount = useMemo(
     () => analyticsRecords.filter((record) => !record.isReliableForAnalysis).length,
     [analyticsRecords],
   );
+  const totalPlaySeconds = useMemo(
+    () => records.reduce((sum, r) => sum + (r.duration_secs ?? 0), 0),
+    [records],
+  );
+
+  // "/" shortcut to focus search
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "/" && !["INPUT", "TEXTAREA", "SELECT"].includes((e.target as HTMLElement).tagName)) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, []);
 
   async function loadHistory(preserveSelection: boolean) {
     setLoading(true);
@@ -4332,6 +4373,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       lastTs: string;
       scenarioType: string | null;
       scenarioTypeCounts: Map<string, number>;
+      // {score, tsMs} pairs for reliable sessions — used for trend
+      reliableSessions: Array<{ score: number; tsMs: number }>;
     }>();
     for (const r of analyticsRecords) {
       const name = r.normalizedScenario;
@@ -4351,6 +4394,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         [...scenarioTypeCounts.entries()]
           .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
         ?? null;
+      const reliableSessions = cur?.reliableSessions ?? [];
+      if (r.isReliableForAnalysis) {
+        reliableSessions.push({ score: r.score, tsMs: parseTimestamp(r.timestamp)?.getTime() ?? 0 });
+      }
       map.set(name, {
         bestReliable: r.isReliableForAnalysis
           ? Math.max(cur?.bestReliable ?? 0, r.score)
@@ -4362,23 +4409,38 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         lastTs: isNewer ? r.timestamp : curTs,
         scenarioType: (isNewer && scenarioType) ? scenarioType : (cur?.scenarioType ?? dominantScenarioType),
         scenarioTypeCounts,
+        reliableSessions,
       });
     }
     return [...map.entries()]
-      .map(([name, s]) => ({
-        name,
-        bestReliable: s.bestReliable,
-        bestAny: s.bestAny,
-        count: s.count,
-        reliableCount: s.reliableCount,
-        flaggedCount: s.flaggedCount,
-        lastTs: s.lastTs,
-        scenarioType:
-          [...s.scenarioTypeCounts.entries()]
-            .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
-          ?? s.scenarioType
-          ?? "Unknown",
-      }))
+      .map(([name, s]) => {
+        // Compute trend: compare avg of last 3 reliable sessions vs sessions 4–6
+        const sorted = [...s.reliableSessions].sort((a, b) => a.tsMs - b.tsMs);
+        let trend: "up" | "down" | "flat" | null = null;
+        if (sorted.length >= 6) {
+          const recent = sorted.slice(-3).map((x) => x.score);
+          const older  = sorted.slice(-6, -3).map((x) => x.score);
+          const recentAvg = mean(recent);
+          const olderAvg  = mean(older);
+          const delta = (recentAvg - olderAvg) / (olderAvg || 1);
+          trend = delta > 0.02 ? "up" : delta < -0.02 ? "down" : "flat";
+        }
+        return {
+          name,
+          bestReliable: s.bestReliable,
+          bestAny: s.bestAny,
+          count: s.count,
+          reliableCount: s.reliableCount,
+          flaggedCount: s.flaggedCount,
+          lastTs: s.lastTs,
+          trend,
+          scenarioType:
+            [...s.scenarioTypeCounts.entries()]
+              .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
+            ?? s.scenarioType
+            ?? "Unknown",
+        };
+      })
       .sort((a, b) => {
         if (scenarioSort === "plays") {
           return b.count - a.count
@@ -4400,6 +4462,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const selectedRecords = useMemo(
     () => analyticsRecords.filter((r) => r.normalizedScenario === selectedScenario),
     [analyticsRecords, selectedScenario],
+  );
+
+  const selectedGroup = useMemo(
+    () => scenarioGroups.find((g) => g.name === selectedScenario) ?? null,
+    [scenarioGroups, selectedScenario],
   );
 
   return (
@@ -4471,17 +4538,38 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textFaint, marginBottom: 10 }}>
             Scenarios
           </div>
-          <input
-            type="text"
-            placeholder="Search…"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="am-input"
-            style={{
-              width: "100%",
-              boxSizing: "border-box",
-            }}
-          />
+          <div style={{ position: "relative" }}>
+            <input
+              ref={searchInputRef}
+              type="text"
+              placeholder="Search… (/)"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              className="am-input"
+              style={{ width: "100%", boxSizing: "border-box", paddingRight: search ? 24 : undefined }}
+            />
+            {search && (
+              <button
+                onClick={() => setSearch("")}
+                style={{
+                  position: "absolute",
+                  right: 7,
+                  top: "50%",
+                  transform: "translateY(-50%)",
+                  background: "none",
+                  border: "none",
+                  color: C.textMuted,
+                  cursor: "pointer",
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+                title="Clear search"
+              >
+                ×
+              </button>
+            )}
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
             <span
               style={{
@@ -4572,24 +4660,31 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                       fontSize: 10,
                       color: active ? C.textMuted : C.textFaint,
                       display: "flex",
-                      gap: 8,
+                      gap: 6,
                       alignItems: "center",
+                      flexWrap: "nowrap",
+                      overflow: "hidden",
                     }}
                   >
-                    <span style={{ color: typeColor, fontWeight: 600 }}>
+                    <span style={{ color: typeColor, fontWeight: 600, flexShrink: 0 }}>
                       {SCENARIO_LABELS[g.scenarioType] ?? g.scenarioType}
                     </span>
-                    <span>{g.count}×</span>
+                    <span style={{ flexShrink: 0 }}>{g.count}×</span>
+                    <span style={{ color: C.textFaint, flexShrink: 0 }}>
+                      {relativeTime(g.lastTs)}
+                    </span>
                     {g.flaggedCount > 0 && (
-                      <span style={{ color: C.warn }}>
-                        {g.flaggedCount} flagged
+                      <span style={{ color: C.warn, flexShrink: 0 }}>
+                        ⚑ {g.flaggedCount}
                       </span>
                     )}
                     <span
                       className="tabular-nums"
-                      style={{ marginLeft: "auto", color: active ? C.accent : C.textFaint }}
+                      style={{ marginLeft: "auto", color: active ? C.accent : C.textFaint, flexShrink: 0, display: "flex", alignItems: "center", gap: 3 }}
                     >
-                      PB {fmtScore(g.bestReliable ?? g.bestAny)}
+                      {g.trend === "up" && <span style={{ color: "#4ade80", fontSize: 9, fontWeight: 700 }}>▲</span>}
+                      {g.trend === "down" && <span style={{ color: C.danger, fontSize: 9, fontWeight: 700 }}>▼</span>}
+                      {fmtScore(g.bestReliable ?? g.bestAny)}
                     </span>
                   </div>
                 </button>
@@ -4616,7 +4711,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             }}
           >
             <span style={{ fontSize: 10, color: C.textFaint }}>
-              {records.length} total{flaggedRecordCount > 0 ? ` • ${flaggedRecordCount} flagged` : ""}
+              {records.length} sessions
+              {totalPlaySeconds > 0 && ` · ${formatPlayTime(totalPlaySeconds)}`}
+              {flaggedRecordCount > 0 && ` · ${flaggedRecordCount} flagged`}
             </span>
             <div style={{ display: "flex", gap: 5 }}>
               <Btn
@@ -4651,10 +4748,26 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           <>
             <div style={{ marginBottom: 20 }}>
               <h2
-                style={{ margin: 0, fontSize: 15, fontWeight: 700, color: C.text, letterSpacing: "-0.01em" }}
+                style={{ margin: "0 0 6px", fontSize: 15, fontWeight: 700, color: C.text, letterSpacing: "-0.01em" }}
               >
                 {selectedScenario}
               </h2>
+              {selectedGroup && (
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 11, flexWrap: "wrap" }}>
+                  <span style={{ color: scenarioColor(selectedGroup.scenarioType), fontWeight: 600 }}>
+                    {SCENARIO_LABELS[selectedGroup.scenarioType] ?? selectedGroup.scenarioType}
+                  </span>
+                  <span style={{ color: C.textFaint }}>{selectedGroup.count} sessions</span>
+                  <span style={{ color: C.textFaint }}>PB {fmtScore(selectedGroup.bestReliable ?? selectedGroup.bestAny)}</span>
+                  <span style={{ color: C.textFaint }}>{relativeTime(selectedGroup.lastTs)}</span>
+                  {selectedGroup.trend === "up" && (
+                    <span style={{ color: "#4ade80", fontWeight: 700, fontSize: 11 }}>▲ Improving</span>
+                  )}
+                  {selectedGroup.trend === "down" && (
+                    <span style={{ color: C.danger, fontWeight: 700, fontSize: 11 }}>▼ Declining</span>
+                  )}
+                </div>
+              )}
             </div>
             <ScenarioDetails records={selectedRecords} scenarioName={selectedScenario!} />
           </>
