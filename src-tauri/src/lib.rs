@@ -839,6 +839,31 @@ fn load_session_replay(app: AppHandle, session_id: String) -> Option<replay_stor
 }
 
 #[tauri::command]
+fn get_session_run_summary(app: AppHandle, session_id: String) -> Option<bridge::BridgeRunSnapshot> {
+    match stats_db::get_run_summary(&app, &session_id) {
+        Ok(summary) => summary,
+        Err(error) => {
+            log::warn!("could not load run summary for {}: {error}", session_id);
+            None
+        }
+    }
+}
+
+#[tauri::command]
+fn get_session_run_timeline(
+    app: AppHandle,
+    session_id: String,
+) -> Vec<bridge::BridgeRunTimelinePoint> {
+    match stats_db::get_run_timeline(&app, &session_id) {
+        Ok(timeline) => timeline,
+        Err(error) => {
+            log::warn!("could not load run timeline for {}: {error}", session_id);
+            vec![]
+        }
+    }
+}
+
+#[tauri::command]
 fn replay_play_in_game(
     app: AppHandle,
     session_id: String,
@@ -952,8 +977,27 @@ fn open_stats_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn get_session_history(app: AppHandle) -> Vec<session_store::SessionRecord> {
-    session_store::get_all_sessions(&app)
+fn get_session_history_page(
+    app: AppHandle,
+    offset: Option<usize>,
+    limit: Option<usize>,
+) -> session_store::SessionHistoryPage {
+    let offset = offset.unwrap_or(0);
+    let limit = limit.unwrap_or(500).clamp(1, 2_000);
+    session_store::get_session_page(&app, offset, limit)
+}
+
+#[tauri::command]
+fn get_recent_session_scenarios(
+    app: AppHandle,
+    limit: Option<usize>,
+) -> Vec<session_store::RecentScenarioRecord> {
+    session_store::get_recent_scenarios(&app, limit.unwrap_or(15).clamp(1, 100))
+}
+
+#[tauri::command]
+fn get_personal_best_for_scenario(app: AppHandle, scenario_name: String) -> Option<u32> {
+    session_store::get_personal_best_for_scenario(&app, &scenario_name)
 }
 
 #[tauri::command]
@@ -1158,7 +1202,9 @@ pub fn run() {
             quit_app,
             open_logs_window,
             open_stats_window,
-            get_session_history,
+            get_session_history_page,
+            get_recent_session_scenarios,
+            get_personal_best_for_scenario,
             clear_session_history,
             import_session_csv_history,
             get_overlay_origin,
@@ -1183,6 +1229,8 @@ pub fn run() {
             get_session_raw_positions,
             get_session_screen_frames,
             load_session_replay,
+            get_session_run_summary,
+            get_session_run_timeline,
             replay_play_in_game,
             replay_stop_in_game,
             toggle_settings,
