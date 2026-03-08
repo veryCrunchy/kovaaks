@@ -90,6 +90,14 @@ interface SessionCsvImportSummary {
   total_after: number;
 }
 
+interface SessionHistoryPage {
+  records: SessionRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+  has_more: boolean;
+}
+
 interface AnalyticsSessionRecord extends SessionRecord {
   normalizedScenario: string;
   timestampMs: number;
@@ -171,6 +179,35 @@ const TOOLTIP_STYLE: React.CSSProperties = {
   fontFamily: "'JetBrains Mono', monospace",
   fontSize: 12,
 };
+
+const HISTORY_PAGE_SIZE = 500;
+const STATS_WINDOW_STORAGE_KEYS = {
+  search: "stats-window:search",
+  selectedScenario: "stats-window:selected-scenario",
+  rootMode: "stats-window:root-mode",
+  scenarioTab: "stats-window:scenario-tab",
+  sessionFilter: "stats-window:session-filter",
+} as const;
+
+function readStoredValue(key: string): string | null {
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredValue(key: string, value: string | null) {
+  try {
+    if (!value) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, value);
+  } catch {
+    // Ignore storage failures in restricted environments.
+  }
+}
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -3716,8 +3753,20 @@ function CoachingTab({
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
 function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionRecord[]; scenarioName: string }) {
-  const [activeTab, setActiveTab] = useState<Tab>("overview");
-  const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
+    return stored === "movement"
+      || stored === "performance"
+      || stored === "coaching"
+      || stored === "replay"
+      || stored === "leaderboard"
+      ? stored
+      : "overview";
+  });
+  const [sessionFilter, setSessionFilter] = useState<SessionFilter>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionFilter);
+    return stored === "warmup" || stored === "warmedup" ? stored : "all";
+  });
   const qualitySummary = useMemo(() => summarizeScenarioTelemetry(records), [records]);
   const analysisRecords = useMemo(
     () => records.filter((record) => record.isReliableForAnalysis),
@@ -3760,6 +3809,27 @@ function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionR
     { id: "replay", label: "Replay" },
     { id: "leaderboard", label: "Leaderboard" },
   ];
+
+  useEffect(() => {
+    if (tabs.some((tab) => !tab.hidden && tab.id === activeTab)) {
+      return;
+    }
+    setActiveTab("overview");
+  }, [activeTab, tabs]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab, activeTab);
+  }, [activeTab, scenarioName]);
+
+  useEffect(() => {
+    if (!hasWarmup && sessionFilter !== "all") {
+      setSessionFilter("all");
+    }
+  }, [hasWarmup, sessionFilter]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionFilter, sessionFilter);
+  }, [sessionFilter, scenarioName]);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -3927,13 +3997,19 @@ type RootMode = "sessions" | "leaderboards" | "debug";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
-  const [search, setSearch] = useState("");
-  const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
+  const [search, setSearch] = useState(() => readStoredValue(STATS_WINDOW_STORAGE_KEYS.search) ?? "");
+  const [selectedScenario, setSelectedScenario] = useState<string | null>(
+    () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.selectedScenario),
+  );
   const [loading, setLoading] = useState(true);
+  const [loadingMessage, setLoadingMessage] = useState<string>("Loading history…");
   const [confirmClear, setConfirmClear] = useState(false);
   const [importingHistory, setImportingHistory] = useState(false);
   const [importStatus, setImportStatus] = useState<string | null>(null);
-  const [rootMode, setRootMode] = useState<RootMode>("sessions");
+  const [rootMode, setRootMode] = useState<RootMode>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode);
+    return stored === "leaderboards" || stored === "debug" ? stored : "sessions";
+  });
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
 
@@ -3947,26 +4023,72 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   );
 
   async function loadHistory(preserveSelection: boolean) {
+    setLoading(true);
+    setLoadingMessage("Loading history…");
     try {
-      const data = await invoke<SessionRecord[]>("get_session_history");
-      setRecords(data);
-      if (!preserveSelection || !selectedRef.current) {
-        if (data.length > 0) {
-          const latest = data.reduce((a, b) =>
-            (parseTimestamp(b.timestamp)?.getTime() ?? 0) >
-            (parseTimestamp(a.timestamp)?.getTime() ?? 0)
-              ? b
-              : a,
-          );
-          setSelectedScenario(normalizeScenario(latest.scenario));
+      const data: SessionRecord[] = [];
+      let offset = 0;
+      let total = 0;
+
+      while (true) {
+        const page = await invoke<SessionHistoryPage>("get_session_history_page", {
+          offset,
+          limit: HISTORY_PAGE_SIZE,
+        });
+        if (offset === 0) {
+          total = page.total;
         }
+
+        data.push(...page.records);
+
+        if (!page.has_more || page.records.length === 0) {
+          break;
+        }
+
+        offset += page.records.length;
+        setLoadingMessage(`Loading history… ${Math.min(offset, total)} / ${total}`);
+      }
+
+      setRecords(data);
+      const currentSelection = selectedRef.current;
+      if (currentSelection) {
+        const exists = data.some((record) => normalizeScenario(record.scenario) === currentSelection);
+        if (exists) {
+          setSelectedScenario(currentSelection);
+          return;
+        }
+      }
+
+      if (data.length > 0) {
+        const latest = data.reduce((a, b) =>
+          (parseTimestamp(b.timestamp)?.getTime() ?? 0) >
+          (parseTimestamp(a.timestamp)?.getTime() ?? 0)
+            ? b
+            : a,
+        );
+        setSelectedScenario(normalizeScenario(latest.scenario));
+      } else if (!preserveSelection) {
+        setSelectedScenario(null);
       }
     } catch (e) {
       console.error(e);
     } finally {
+      setLoadingMessage("Loading history…");
       setLoading(false);
     }
   }
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.search, search.trim() ? search : null);
+  }, [search]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.selectedScenario, selectedScenario);
+  }, [selectedScenario]);
+
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode, rootMode);
+  }, [rootMode]);
 
   useEffect(() => {
     loadHistory(false);
@@ -4206,7 +4328,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             <div
               style={{ padding: "20px 16px", color: "rgba(255,255,255,0.3)", fontSize: 12 }}
             >
-              Loading…
+              {loadingMessage}
             </div>
           ) : scenarioGroups.length === 0 ? (
             <div
