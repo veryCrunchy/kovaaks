@@ -1817,6 +1817,14 @@ mod imp {
                     state.tick_stream_v1.context = Some(ctx.clone());
                 }
 
+                let session_active = bridge_session_state()
+                    .lock()
+                    .map(|state| state.session_active)
+                    .unwrap_or(false);
+                if !session_active {
+                    return;
+                }
+
                 let mut time_hint = None;
                 if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
                     time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
@@ -1835,6 +1843,14 @@ mod imp {
                 if state.tick_stream_v1.deltas.len() > MAX_TICK_STREAM_DELTAS {
                     let trim = state.tick_stream_v1.deltas.len() - MAX_TICK_STREAM_DELTAS;
                     state.tick_stream_v1.deltas.drain(0..trim);
+                }
+
+                let session_active = bridge_session_state()
+                    .lock()
+                    .map(|state| state.session_active)
+                    .unwrap_or(false);
+                if !session_active {
+                    return;
                 }
 
                 let mut time_hint = None;
@@ -3756,7 +3772,7 @@ mod imp {
             ));
         }
 
-        if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) =
+        if let Some((_has_active_metrics, challenge_active_hint, authoritative_active_state)) =
             recovery_signal
         {
             let should_start_from_recovery = {
@@ -3770,14 +3786,6 @@ mod imp {
                 } else if authoritative_active_state {
                     state.recovery_start_streak = 0;
                     true
-                } else if has_active_metrics {
-                    state.recovery_start_streak = state.recovery_start_streak.saturating_add(1);
-                    if state.recovery_start_streak >= 2 {
-                        state.recovery_start_streak = 0;
-                        true
-                    } else {
-                        false
-                    }
                 } else {
                     state.recovery_start_streak = 0;
                     false
