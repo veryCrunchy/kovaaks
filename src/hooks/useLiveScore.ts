@@ -10,6 +10,18 @@ const SCORE_TOTAL_STALE_MS = 1500;
 const DERIVED_SCORE_FRESH_MS = 3000;
 const SESSION_ACTIVITY_STALE_MS = 12_000;
 
+function gameStateImpliesActive(code: number | null | undefined): boolean {
+  return code === 3 || code === 4;
+}
+
+function hasAuthoritativeActiveContext(
+  isInScenario: boolean,
+  isInChallenge: boolean,
+  gameStateCode: number | null | undefined,
+): boolean {
+  return isInScenario || isInChallenge || gameStateImpliesActive(gameStateCode);
+}
+
 interface BridgeMetricPayload {
   ev: string;
   value?: number | null;
@@ -41,6 +53,7 @@ export function useLiveScore(): UseLiveScoreReturn {
   const lastBridgeActivityAtMs = useRef<number>(0);
   const isInScenario = useRef(false);
   const isInChallenge = useRef(false);
+  const activeGameStateCode = useRef<number | null>(null);
   const lastStateSeq = useRef<number>(0);
   const lastStateTsMs = useRef<number>(0);
 
@@ -55,6 +68,7 @@ export function useLiveScore(): UseLiveScoreReturn {
     lastBridgeActivityAtMs.current = 0;
     isInScenario.current = false;
     isInChallenge.current = false;
+    activeGameStateCode.current = null;
     setElapsedSeconds(0);
     setLiveScore(0);
     setIsSessionActive(false);
@@ -93,7 +107,11 @@ export function useLiveScore(): UseLiveScoreReturn {
     if (inactivityTimer.current) clearTimeout(inactivityTimer.current);
     inactivityTimer.current = setTimeout(() => {
       const now = Date.now();
-      const authoritativeActive = isInScenario.current || isInChallenge.current;
+      const authoritativeActive = hasAuthoritativeActiveContext(
+        isInScenario.current,
+        isInChallenge.current,
+        activeGameStateCode.current,
+      );
       const recentlyActive =
         sessionStartTime.current !== 0
         && (now - lastBridgeActivityAtMs.current) <= SESSION_ACTIVITY_STALE_MS;
@@ -149,6 +167,14 @@ export function useLiveScore(): UseLiveScoreReturn {
     };
 
     const handleExplicitSessionEnd = () => {
+      if (hasAuthoritativeActiveContext(
+        isInScenario.current,
+        isInChallenge.current,
+        activeGameStateCode.current,
+      )) {
+        armSessionHeartbeat();
+        return;
+      }
       clearSessionState();
     };
 
@@ -224,7 +250,26 @@ export function useLiveScore(): UseLiveScoreReturn {
         return;
       }
 
-      if (payload.ev === "pull_seconds_total") {
+      if (payload.ev === "pull_game_state_code" || payload.ev === "pull_game_state") {
+        if (shouldIgnoreStaleStateEvent(payload)) {
+          return;
+        }
+
+        const numericCode = payload.value != null && Number.isFinite(payload.value)
+          ? Math.round(payload.value)
+          : null;
+        const nextCode = numericCode ?? activeGameStateCode.current;
+        activeGameStateCode.current = nextCode;
+
+        if (gameStateImpliesActive(nextCode)) {
+          touchSessionActive(now);
+        } else if (!isInScenario.current && !isInChallenge.current) {
+          armSessionHeartbeat();
+        }
+        return;
+      }
+
+      if (payload.ev === "pull_seconds_total" || payload.ev === "pull_challenge_seconds_total") {
         const value = payload.value;
         if (value != null && Number.isFinite(value) && value >= 0) {
           touchSessionActive(now);
