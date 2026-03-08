@@ -400,9 +400,32 @@ interface Props {
   rawPositions: RawPositionPoint[];
   metricPoints: MetricPoint[];
   screenFrames: ScreenFrame[];
+  segmentLabel?: string | null;
+  segmentWindowLabel?: string | null;
+  timelineMarkers?: Array<{
+    id: string;
+    timestamp_ms: number;
+    color: string;
+    label: string;
+  }>;
+  timelineWindows?: Array<{
+    id: string;
+    start_ms: number;
+    end_ms: number;
+    color: string;
+    label: string;
+  }>;
 }
 
-export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Props) {
+export function MousePathViewer({
+  rawPositions,
+  metricPoints,
+  screenFrames,
+  segmentLabel,
+  segmentWindowLabel,
+  timelineMarkers = [],
+  timelineWindows = [],
+}: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef   = useRef<number | null>(null);
 
@@ -456,6 +479,25 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
     () => computeSensitivitySuggestion(metricPoints),
     [metricPoints],
   )();
+  const externalTimelineMarkers = useMemo(
+    () => timelineMarkers
+      .map((marker) => ({
+        ...marker,
+        timestamp_ms: Math.max(0, marker.timestamp_ms - replayStartMs),
+      }))
+      .filter((marker) => marker.timestamp_ms <= durationMs),
+    [durationMs, replayStartMs, timelineMarkers],
+  );
+  const externalTimelineWindows = useMemo(
+    () => timelineWindows
+      .map((window) => ({
+        ...window,
+        start_ms: Math.max(0, window.start_ms - replayStartMs),
+        end_ms: Math.max(0, window.end_ms - replayStartMs),
+      }))
+      .filter((window) => window.end_ms >= 0 && window.start_ms <= durationMs),
+    [durationMs, replayStartMs, timelineWindows],
+  );
 
   // Nearest game recording frame for the current playback position
   const currentFrameSrc = useMemo<string | null>(() => {
@@ -538,6 +580,16 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
   const formatMs = (ms: number) =>
     `${Math.floor(ms / 60000)}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, "0")}.${String(Math.floor((ms % 1000) / 100)).padStart(1, "0")}`;
 
+  const overshootTimelineMarkers = useMemo(
+    () => overshoots.map((marker, index) => ({
+      id: `overshoot-${index}`,
+      timestamp_ms: marker.timestamp_ms,
+      color: "#ff6b6b",
+      label: `Overshoot at ${formatMs(marker.timestamp_ms)}`,
+    })),
+    [overshoots],
+  );
+
   if (positions.length < 2) {
     return (
       <div
@@ -554,7 +606,9 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           Mouse Path Replay
         </h3>
         <p style={{ color: C.textMuted, fontSize: 13 }}>
-          No path data recorded. Mouse tracking requires at least one active session.
+          {segmentLabel
+            ? "No mouse path samples were recorded inside the selected context window."
+            : "No path data recorded. Mouse tracking requires at least one active session."}
         </p>
       </div>
     );
@@ -582,7 +636,20 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           >
             Mouse Path Replay
           </h3>
-          <div className="flex items-center gap-3" style={{ fontSize: 11, color: C.textFaint }}>
+          <div className="flex items-center gap-3 flex-wrap justify-end" style={{ fontSize: 11, color: C.textFaint }}>
+            {segmentLabel && (
+              <span
+                style={{
+                  color: "rgba(0,245,160,0.82)",
+                  border: "1px solid rgba(0,245,160,0.24)",
+                  background: "rgba(0,245,160,0.08)",
+                  borderRadius: 999,
+                  padding: "3px 8px",
+                }}
+              >
+                Segment: {segmentLabel}{segmentWindowLabel ? ` · ${segmentWindowLabel}` : ""}
+              </span>
+            )}
             {/* Stat pills */}
             {hasVideo && (
               <span style={{ color: "rgba(0,245,160,0.7)" }}>
@@ -683,16 +750,65 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
             >
               {formatMs(showFull ? durationMs : playbackMs)}
             </span>
-            <input
-              type="range"
-              min={0}
-              max={durationMs}
-              step={50}
-              value={showFull ? durationMs : playbackMs}
-              onChange={handleScrub}
-              className="flex-1"
-              style={{ accentColor: "#00f5a0" }}
-            />
+            <div className="flex-1" style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+              <input
+                type="range"
+                min={0}
+                max={durationMs}
+                step={50}
+                value={showFull ? durationMs : playbackMs}
+                onChange={handleScrub}
+                className="flex-1"
+                style={{ accentColor: "#00f5a0" }}
+              />
+              {durationMs > 0 && (externalTimelineMarkers.length > 0 || externalTimelineWindows.length > 0 || overshootTimelineMarkers.length > 0) && (
+                <div
+                  style={{
+                    position: "relative",
+                    height: 14,
+                    borderRadius: 999,
+                    background: "rgba(255,255,255,0.04)",
+                    overflow: "hidden",
+                  }}
+                >
+                  {externalTimelineWindows.map((window) => {
+                    const leftPct = (window.start_ms / durationMs) * 100;
+                    const widthPct = Math.max(1, ((window.end_ms - window.start_ms) / durationMs) * 100);
+                    return (
+                      <div
+                        key={window.id}
+                        title={window.label}
+                        style={{
+                          position: "absolute",
+                          left: `${leftPct}%`,
+                          width: `${widthPct}%`,
+                          top: 0,
+                          bottom: 0,
+                          background: `${window.color}30`,
+                          borderLeft: `1px solid ${window.color}`,
+                          borderRight: `1px solid ${window.color}`,
+                        }}
+                      />
+                    );
+                  })}
+                  {[...overshootTimelineMarkers, ...externalTimelineMarkers].map((marker) => (
+                    <div
+                      key={marker.id}
+                      title={marker.label}
+                      style={{
+                        position: "absolute",
+                        left: `${(marker.timestamp_ms / durationMs) * 100}%`,
+                        top: 0,
+                        bottom: 0,
+                        width: 2,
+                        background: marker.color,
+                        boxShadow: `0 0 0 1px ${marker.color}55`,
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
             <span
               className="tabular-nums"
               style={{ color: C.textFaint, fontSize: 11, minWidth: 60, textAlign: "right" }}
@@ -853,7 +969,7 @@ export function MousePathViewer({ rawPositions, metricPoints, screenFrames }: Pr
           </div>
           <p style={{ color: C.textSub, fontSize: 12, lineHeight: 1.5 }}>
             Orange triangles indicate where your cursor reversed direction sharply after a fast
-            movement — a sign the flick carried past the intended target.
+            movement — a sign the flick carried past the intended target. The same moments are also marked on the replay timeline so you can scrub directly to them.
           </p>
         </div>
       )}
