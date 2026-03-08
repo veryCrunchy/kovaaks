@@ -4669,7 +4669,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     });
 
     // Fallback when bridge signals completion but file-watcher timing varies.
-    const unlistenBridgeParsed = listen<BridgeParsedEvent>("bridge-parsed-event", (event) => {
+    const unlistenBridgeParsed = listen<BridgeParsedEvent>("bridge-metric", (event) => {
       const ev = String(event.payload?.ev ?? "");
       if (
         ev === "challenge_complete" ||
