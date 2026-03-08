@@ -1550,6 +1550,40 @@ mod imp {
         }
     }
 
+    fn map_stats_panel_snapshot(
+        stats: &BridgeStatsPanelEvent,
+    ) -> Option<crate::session_store::StatsPanelSnapshot> {
+        let has_signal = stats.kills.is_some()
+            || stats.kps.is_some()
+            || stats.accuracy_pct.is_some()
+            || stats.damage_dealt.is_some()
+            || stats.ttk_secs.is_some()
+            || stats.session_time_secs.is_some()
+            || stats.challenge_seconds_total.is_some()
+            || stats.scenario_name.is_some();
+
+        if !has_signal && stats.scenario_type == "Unknown" {
+            return None;
+        }
+
+        Some(crate::session_store::StatsPanelSnapshot {
+            scenario_type: stats.scenario_type.clone(),
+            kills: stats.kills,
+            avg_kps: stats.kps.map(|value| value as f32),
+            accuracy_pct: stats.accuracy_pct.map(|value| value as f32),
+            total_damage: stats.damage_dealt.map(|value| value as f32),
+            avg_ttk_ms: stats.ttk_secs.map(|value| (value * 1000.0) as f32),
+            best_ttk_ms: None,
+            ttk_std_ms: None,
+            accuracy_trend: None,
+        })
+    }
+
+    pub fn take_stats_panel_snapshot() -> Option<crate::session_store::StatsPanelSnapshot> {
+        let state = bridge_compat_state().lock().ok()?;
+        map_stats_panel_snapshot(&state.stats)
+    }
+
     fn authoritative_run_time_hint_from_stats(stats: &BridgeStatsPanelEvent) -> Option<f64> {
         finite_non_negative(stats.challenge_seconds_total)
             .or_else(|| finite_non_negative(stats.session_time_secs))
@@ -4559,6 +4593,16 @@ pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn take_run_snapshot() -> Option<BridgeRunSnapshot> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn take_stats_panel_snapshot() -> Option<crate::session_store::StatsPanelSnapshot> {
+    imp::take_stats_panel_snapshot()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn take_stats_panel_snapshot() -> Option<crate::session_store::StatsPanelSnapshot> {
     None
 }
 
