@@ -2060,6 +2060,10 @@ mod imp {
             scenario_name: stats.scenario_name.clone(),
             scenario_type,
             scenario_subtype: stats.scenario_subtype.clone(),
+            score_per_minute: stats.spm,
+            accuracy_pct: stats.accuracy_pct,
+            kills: stats.kills,
+            elapsed_secs: stats.challenge_seconds_total.or(stats.session_time_secs),
             time_remaining_secs: stats.time_remaining,
             queue_time_remaining_secs: stats.queue_time_remaining,
         });
@@ -3451,33 +3455,38 @@ mod imp {
 
     fn command_pipe_loop() {
         let name = to_wide(COMMAND_PIPE_NAME);
-        // PIPE_ACCESS_OUTBOUND = 0x00000002
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                windows::core::PCWSTR(name.as_ptr()),
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000002), // PIPE_ACCESS_OUTBOUND
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                1,     // max instances
-                65536, // out buffer
-                0,     // in buffer
-                0,
-                None,
-            )
-        };
         use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-        if pipe == INVALID_HANDLE_VALUE {
-            log::error!("bridge: CreateNamedPipe(command) failed");
-            return;
-        }
+        let retry_delay = Duration::from_millis(500);
 
         loop {
+            // Pipe creation can race old AimMod shutdown during restart; keep retrying.
+            let pipe = unsafe {
+                CreateNamedPipeW(
+                    windows::core::PCWSTR(name.as_ptr()),
+                    windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000002), // PIPE_ACCESS_OUTBOUND
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    1,     // max instances
+                    65536, // out buffer
+                    0,     // in buffer
+                    0,
+                    None,
+                )
+            };
+            if pipe == INVALID_HANDLE_VALUE {
+                log::warn!("bridge: CreateNamedPipe(command) failed; retrying");
+                std::thread::sleep(retry_delay);
+                continue;
+            }
+
             log::debug!("bridge: waiting for command pipe client");
             unsafe {
                 let r = ConnectNamedPipe(pipe, None);
                 if let Err(ref e) = r {
                     if e.code().0 != ERROR_PIPE_CONNECTED_HRESULT {
                         log::error!("bridge: command ConnectNamedPipe failed: {e}");
-                        break;
+                        let _ = CloseHandle(pipe);
+                        std::thread::sleep(retry_delay);
+                        continue;
                     }
                 }
             }
@@ -3515,37 +3524,36 @@ mod imp {
 
             unsafe {
                 let _ = DisconnectNamedPipe(pipe);
+                let _ = CloseHandle(pipe);
             }
-        }
-
-        unsafe {
-            let _ = CloseHandle(pipe);
         }
     }
 
     fn pipe_server_loop(app: AppHandle) {
         let name = to_wide("\\\\.\\pipe\\kovaaks-bridge");
-        // PIPE_ACCESS_INBOUND = 0x00000001
-        let pipe = unsafe {
-            CreateNamedPipeW(
-                windows::core::PCWSTR(name.as_ptr()),
-                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000001), // PIPE_ACCESS_INBOUND
-                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                1,     // max instances
-                0,     // out buffer (server only reads)
-                65536, // in buffer
-                0,     // default timeout
-                None,  // default security
-            )
-        };
         use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-        if pipe == INVALID_HANDLE_VALUE {
-            log::error!("bridge: CreateNamedPipe failed");
-            return;
-        }
-
+        let retry_delay = Duration::from_millis(500);
         mark_bridge_dll_connected(false);
         loop {
+            // Pipe creation can race old AimMod shutdown during restart; keep retrying.
+            let pipe = unsafe {
+                CreateNamedPipeW(
+                    windows::core::PCWSTR(name.as_ptr()),
+                    windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000001), // PIPE_ACCESS_INBOUND
+                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                    1,     // max instances
+                    0,     // out buffer (server only reads)
+                    65536, // in buffer
+                    0,     // default timeout
+                    None,  // default security
+                )
+            };
+            if pipe == INVALID_HANDLE_VALUE {
+                log::warn!("bridge: CreateNamedPipe failed; retrying");
+                std::thread::sleep(retry_delay);
+                continue;
+            }
+
             log::debug!("bridge: waiting for DLL connection");
             unsafe {
                 let r = ConnectNamedPipe(pipe, None);
@@ -3553,7 +3561,9 @@ mod imp {
                     // ERROR_PIPE_CONNECTED means the client connected before us — still good
                     if e.code().0 != ERROR_PIPE_CONNECTED_HRESULT {
                         log::error!("bridge: ConnectNamedPipe: {e}");
-                        break;
+                        let _ = CloseHandle(pipe);
+                        std::thread::sleep(retry_delay);
+                        continue;
                     }
                 }
             }
@@ -3567,11 +3577,8 @@ mod imp {
 
             unsafe {
                 let _ = DisconnectNamedPipe(pipe);
+                let _ = CloseHandle(pipe);
             }
-        }
-
-        unsafe {
-            let _ = CloseHandle(pipe);
         }
     }
 

@@ -164,38 +164,8 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 
                             if can_attempt {
                                 log::warn!(
-                                    "UE4SS is loaded for KovaaK pid {pid} but the bridge pipe is disconnected; attempting hot reload"
+                                    "UE4SS is loaded for KovaaK pid {pid} but the bridge pipe is disconnected; waiting for mod-side reconnect"
                                 );
-                                match bridge::trigger_hot_reload() {
-                                    Ok(()) => {
-                                        log::info!(
-                                            "UE4SS hot reload triggered for KovaaK pid {pid} to recover bridge connectivity"
-                                        );
-                                    }
-                                    Err(error) => {
-                                        log::warn!(
-                                            "UE4SS hot reload failed for KovaaK pid {pid}: {error}; retrying deploy/inject"
-                                        );
-                                        match deploy_and_inject_ue4ss(&app, &stats_dir) {
-                                            Ok(()) => {
-                                                log::info!(
-                                                    "UE4SS deploy/inject retry finished for KovaaK pid {pid}"
-                                                );
-                                            }
-                                            Err(e) => {
-                                                if bridge::is_injection_deferred_error(&e) {
-                                                    log::info!(
-                                                        "UE4SS deploy/inject deferred for KovaaK pid {pid}: {e}"
-                                                    );
-                                                } else {
-                                                    log::warn!(
-                                                        "UE4SS deploy/inject retry failed for KovaaK pid {pid}: {e}"
-                                                    );
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
                                 last_attempt = Some((pid, std::time::Instant::now()));
                             }
                         } else {
@@ -1392,6 +1362,10 @@ pub fn run() {
                 scenario_name: None,
                 scenario_type: None,
                 scenario_subtype: None,
+                score_per_minute: None,
+                accuracy_pct: None,
+                kills: None,
+                elapsed_secs: None,
                 time_remaining_secs: None,
                 queue_time_remaining_secs: None,
             });

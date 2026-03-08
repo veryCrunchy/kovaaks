@@ -5,6 +5,10 @@ pub struct BridgePresenceState {
     pub scenario_name: Option<String>,
     pub scenario_type: Option<String>,
     pub scenario_subtype: Option<String>,
+    pub score_per_minute: Option<f64>,
+    pub accuracy_pct: Option<f64>,
+    pub kills: Option<u32>,
+    pub elapsed_secs: Option<f64>,
     pub time_remaining_secs: Option<f64>,
     pub queue_time_remaining_secs: Option<f64>,
 }
@@ -21,6 +25,10 @@ mod imp {
     const DISCORD_CLIENT_ID: &str = "1162428887066742904";
     const DISCORD_PIPE_PREFIX: &str = r"\\.\pipe\discord-ipc-";
     const MAX_DISCORD_PIPES: u8 = 10;
+    const DISCORD_LARGE_IMAGE_KEY: &str = "https://s.crun.zip/aimmod.png";
+    const DISCORD_SMALL_IMAGE_KEY: &str = "https://cdn.discordapp.com/app-icons/1162428887066742904/798981b85db0ce80a8168c1184ef92a2.png?size=1280";
+    const AIMMOD_URL: &str = "https://github.com/veryCrunchy/kovaaks";
+    const AIMMOD_DISCORD_URL: &str = "https://discord.gg/snwC66wShD";
 
     struct DiscordIpcClient {
         pipe: std::fs::File,
@@ -103,6 +111,58 @@ mod imp {
         Some(now.checked_add(delta)?.as_secs())
     }
 
+    fn start_timestamp_from_elapsed(elapsed_secs: Option<f64>) -> Option<u64> {
+        let secs = elapsed_secs?;
+        if !secs.is_finite() || secs <= 0.0 {
+            return None;
+        }
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?;
+        let delta = Duration::from_secs_f64(secs.max(0.0));
+        Some(now.checked_sub(delta)?.as_secs())
+    }
+
+    fn fmt_pct(value: f64) -> String {
+        format!("{value:.1}%")
+    }
+
+    fn fmt_compact_number(value: f64) -> String {
+        if value >= 1000.0 {
+            format!("{:.1}k", value / 1000.0)
+        } else {
+            format!("{value:.0}")
+        }
+    }
+
+    fn semantic_signature(state: &BridgePresenceState) -> String {
+        let timer_bucket = if state.game_state_code == 2 {
+            state
+                .queue_time_remaining_secs
+                .map(|v| v.max(0.0).round() as i64)
+        } else {
+            state.time_remaining_secs.map(|v| v.max(0.0).round() as i64)
+        };
+        let elapsed_bucket = state.elapsed_secs.map(|v| v.max(0.0).round() as i64);
+        format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
+            state.game_state_code,
+            state.game_state.trim(),
+            state.scenario_name.as_deref().unwrap_or(""),
+            state.scenario_type.as_deref().unwrap_or(""),
+            state.scenario_subtype.as_deref().unwrap_or(""),
+            state
+                .score_per_minute
+                .map(|v| v.round() as i64)
+                .unwrap_or_default(),
+            state
+                .accuracy_pct
+                .map(|v| (v * 10.0).round() as i64)
+                .unwrap_or_default(),
+            state.kills.unwrap_or_default(),
+            elapsed_bucket.unwrap_or_default(),
+            timer_bucket.unwrap_or_default(),
+        )
+    }
+
     fn build_activity(state: &BridgePresenceState) -> serde_json::Value {
         let scenario_name = state
             .scenario_name
@@ -122,56 +182,89 @@ mod imp {
             .map(|s| clean_text(s, 64))
             .filter(|s| !s.is_empty());
 
-        let state_line = match state.game_state_code {
+        let mut detail_line = scenario_name;
+        let mut state_parts: Vec<String> = Vec::new();
+        let mut remaining = None;
+
+        match state.game_state_code {
             4 => {
-                if let Some(remain) = state.time_remaining_secs.filter(|v| *v > 0.0) {
-                    format!("Challenge - {} left", format_countdown(remain))
-                } else {
-                    "In Challenge".to_string()
-                }
+                state_parts.push("In Challenge".to_string());
+                remaining = state.time_remaining_secs.filter(|v| *v > 0.0);
             }
-            3 => "In Freeplay".to_string(),
+            3 => state_parts.push("In Freeplay".to_string()),
             2 => {
-                if let Some(remain) = state.queue_time_remaining_secs.filter(|v| *v > 0.0) {
-                    format!("Queue - {} left", format_countdown(remain))
-                } else {
-                    "Queued".to_string()
-                }
+                state_parts.push("Queued".to_string());
+                remaining = state.queue_time_remaining_secs.filter(|v| *v > 0.0);
             }
-            5 => "Scenario Paused".to_string(),
-            6 => "In Scenario Editor".to_string(),
-            1 => "Trainer Menu".to_string(),
+            5 => state_parts.push("Scenario Paused".to_string()),
+            6 => state_parts.push("In Scenario Editor".to_string()),
+            1 => state_parts.push("Trainer Menu".to_string()),
             _ => {
                 let normalized = clean_text(&state.game_state, 64);
-                if normalized.is_empty() {
+                state_parts.push(if normalized.is_empty() {
                     "Main Menu".to_string()
                 } else {
                     normalized
-                }
-            }
-        };
-
-        let mut detail_line = scenario_name;
-        if let Some(kind) = family {
-            if let Some(sub) = subtype {
-                detail_line = format!("{detail_line} ({kind}: {sub})");
-            } else {
-                detail_line = format!("{detail_line} ({kind})");
+                });
             }
         }
+
+        if let Some(kind) = family.clone() {
+            state_parts.push(kind);
+        }
+        if let Some(sub) = subtype.clone() {
+            state_parts.push(sub);
+        }
+        if let Some(accuracy) = state.accuracy_pct.filter(|v| v.is_finite() && *v > 0.0) {
+            state_parts.push(format!("Acc {}", fmt_pct(accuracy)));
+        }
+        if let Some(spm) = state.score_per_minute.filter(|v| v.is_finite() && *v > 0.0) {
+            state_parts.push(format!("SPM {}", fmt_compact_number(spm)));
+        }
+        if let Some(kills) = state.kills.filter(|v| *v > 0) {
+            state_parts.push(format!("{kills} kills"));
+        }
+        if let Some(remain) = remaining {
+            state_parts.push(format!("{} left", format_countdown(remain)));
+        }
+
         detail_line = clean_text(&detail_line, 128);
+        let state_line = clean_text(&state_parts.join(" • "), 128);
 
         let mut activity_obj = serde_json::Map::new();
         activity_obj.insert("details".to_string(), json!(detail_line));
-        activity_obj.insert("state".to_string(), json!(clean_text(&state_line, 128)));
+        activity_obj.insert("state".to_string(), json!(state_line));
+        activity_obj.insert(
+            "assets".to_string(),
+            json!({
+                "large_image": DISCORD_LARGE_IMAGE_KEY,
+                "large_text": "AimMod",
+                "small_image": DISCORD_SMALL_IMAGE_KEY,
+                "small_text": "KovaaK's Aim Trainer",
+            }),
+        );
+        activity_obj.insert(
+            "buttons".to_string(),
+            json!([
+                { "label": "AimMod", "url": AIMMOD_URL },
+                { "label": "Discord", "url": AIMMOD_DISCORD_URL }
+            ]),
+        );
 
-        let remaining = if state.game_state_code == 2 {
-            state.queue_time_remaining_secs
-        } else {
-            state.time_remaining_secs
-        };
-        if let Some(end_ts) = end_timestamp_from_remaining(remaining) {
-            activity_obj.insert("timestamps".to_string(), json!({ "end": end_ts }));
+        let start_ts = start_timestamp_from_elapsed(state.elapsed_secs);
+        let end_ts = end_timestamp_from_remaining(remaining);
+        if start_ts.is_some() || end_ts.is_some() {
+            let mut timestamps = serde_json::Map::new();
+            if let Some(start_ts) = start_ts {
+                timestamps.insert("start".to_string(), json!(start_ts));
+            }
+            if let Some(end_ts) = end_ts {
+                timestamps.insert("end".to_string(), json!(end_ts));
+            }
+            activity_obj.insert(
+                "timestamps".to_string(),
+                serde_json::Value::Object(timestamps),
+            );
         }
 
         serde_json::Value::Object(activity_obj)
@@ -209,7 +302,7 @@ mod imp {
             return;
         };
         let activity = build_activity(&presence);
-        let signature = serde_json::to_string(&activity).unwrap_or_default();
+        let signature = semantic_signature(&presence);
         let sent_ok = if send_activity(state, &activity).is_ok() {
             true
         } else {
@@ -246,7 +339,7 @@ mod imp {
     pub fn update_presence_from_bridge(state: BridgePresenceState) {
         start();
         let activity = build_activity(&state);
-        let signature = serde_json::to_string(&activity).unwrap_or_default();
+        let signature = semantic_signature(&state);
         let Ok(mut guard) = rpc_state().lock() else {
             return;
         };
