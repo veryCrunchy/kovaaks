@@ -72,11 +72,61 @@ interface SessionRecord {
   kills: number;
   deaths: number;
   duration_secs: number;
+  damage_done?: number;
   timestamp: string;
   smoothness: SmoothnessSnapshot | null;
   stats_panel: StatsPanelSnapshot | null;
   shot_timing?: ShotTimingSnapshot | null;
   has_replay: boolean;
+}
+
+interface SessionCsvImportSummary {
+  stats_dir: string;
+  scanned: number;
+  parsed: number;
+  imported: number;
+  skipped_existing: number;
+  failed: number;
+  total_after: number;
+}
+
+interface AnalyticsSessionRecord extends SessionRecord {
+  normalizedScenario: string;
+  timestampMs: number;
+  isDurationOutlier: boolean;
+  isZeroSignal: boolean;
+  isReliableForAnalysis: boolean;
+  qualityIssues: string[];
+}
+
+interface ScenarioTelemetrySummary {
+  totalRuns: number;
+  reliableRuns: number;
+  flaggedRuns: number;
+  durationOutliers: number;
+  zeroSignalRuns: number;
+  smoothnessRuns: number;
+  statsPanelRuns: number;
+  shotTimingRuns: number;
+  replayRuns: number;
+  nextSteps: string[];
+}
+
+interface PracticeProfile {
+  sessionCount: number;
+  activeDays: number;
+  spanDays: number;
+  daysPerWeek: number;
+  sessionsPerActiveDay: number;
+  avgBlockRuns: number;
+  avgBlockMinutes: number;
+  maxBlockMinutes: number;
+  scenarioDiversity: number;
+  dominantScenario: string;
+  dominantScenarioShare: number;
+  avgUniqueScenariosPerBlock: number;
+  avgScenarioSwitchesPerBlock: number;
+  switchRate: number;
 }
 
 interface BridgeParsedEvent {
@@ -176,6 +226,203 @@ function stddev(arr: number[]): number {
   if (arr.length < 2) return 0;
   const m = mean(arr);
   return Math.sqrt(mean(arr.map((v) => (v - m) ** 2)));
+}
+
+function median(arr: number[]): number {
+  if (arr.length === 0) return 0;
+  const sorted = [...arr].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+function medianAbsoluteDeviation(arr: number[], center = median(arr)): number {
+  if (arr.length === 0) return 0;
+  return median(arr.map((value) => Math.abs(value - center)));
+}
+
+function buildAnalyticsRecords(records: SessionRecord[]): AnalyticsSessionRecord[] {
+  const durationsByScenario = new Map<string, number[]>();
+
+  for (const record of records) {
+    const normalizedScenario = normalizeScenario(record.scenario);
+    const durations = durationsByScenario.get(normalizedScenario) ?? [];
+    if (Number.isFinite(record.duration_secs) && record.duration_secs > 0) {
+      durations.push(record.duration_secs);
+    }
+    durationsByScenario.set(normalizedScenario, durations);
+  }
+
+  const durationWindows = new Map<string, { lower: number; upper: number }>();
+  for (const [scenario, durations] of durationsByScenario.entries()) {
+    if (durations.length === 0) continue;
+    const durationMedian = median(durations);
+    const durationMad = medianAbsoluteDeviation(durations, durationMedian);
+    const spreadFloor = Math.max(8, durationMedian * 0.3);
+    const spread = Math.max(spreadFloor, durationMad * 10);
+    durationWindows.set(scenario, {
+      lower: Math.max(5, durationMedian - spread),
+      upper: Math.max(durationMedian * 2.25, durationMedian + spread),
+    });
+  }
+
+  return records.map((record) => {
+    const normalizedScenario = normalizeScenario(record.scenario);
+    const timestampMs = parseTimestamp(record.timestamp)?.getTime() ?? 0;
+    const durationWindow = durationWindows.get(normalizedScenario);
+    const isDurationOutlier = durationWindow
+      ? record.duration_secs < durationWindow.lower || record.duration_secs > durationWindow.upper
+      : false;
+    const isZeroSignal = record.score <= 0
+      && record.kills === 0
+      && (record.damage_done ?? 0) <= 0;
+    const qualityIssues: string[] = [];
+
+    if (isDurationOutlier) qualityIssues.push("duration_outlier");
+    if (isZeroSignal) qualityIssues.push("empty_run");
+    if (!Number.isFinite(timestampMs) || timestampMs <= 0) qualityIssues.push("bad_timestamp");
+    if (!Number.isFinite(record.score)) qualityIssues.push("bad_score");
+
+    return {
+      ...record,
+      normalizedScenario,
+      timestampMs,
+      isDurationOutlier,
+      isZeroSignal,
+      isReliableForAnalysis:
+        timestampMs > 0
+        && Number.isFinite(record.score)
+        && Number.isFinite(record.duration_secs)
+        && record.duration_secs > 0
+        && !isDurationOutlier
+        && !isZeroSignal,
+      qualityIssues,
+    };
+  });
+}
+
+function summarizeScenarioTelemetry(records: AnalyticsSessionRecord[]): ScenarioTelemetrySummary {
+  const reliableRecords = records.filter((record) => record.isReliableForAnalysis);
+  const reliableRuns = reliableRecords.length;
+  const flaggedRuns = records.length - reliableRuns;
+  const smoothnessRuns = reliableRecords.filter((record) => record.smoothness != null).length;
+  const statsPanelRuns = reliableRecords.filter((record) => record.stats_panel != null).length;
+  const shotTimingRuns = reliableRecords.filter((record) => record.shot_timing != null).length;
+  const replayRuns = reliableRecords.filter((record) => record.has_replay).length;
+  const avgKills = reliableRuns > 0 ? mean(reliableRecords.map((record) => record.kills)) : 0;
+  const nextSteps: string[] = [];
+
+  if (flaggedRuns > 0) {
+    nextSteps.push(
+      "Persist a run end reason or validation flag so analytics can separate aborted/parser-corrupted runs from genuine low scores.",
+    );
+  }
+  if (statsPanelRuns < Math.max(3, Math.ceil(reliableRuns * 0.4))) {
+    nextSteps.push(
+      "Persist stats_panel on session finalize to unlock fatigue, accuracy-trend, and TTK coaching from real runs.",
+    );
+  }
+  if (smoothnessRuns < Math.max(3, Math.ceil(reliableRuns * 0.4))) {
+    nextSteps.push(
+      "Persist smoothness snapshots more consistently so movement fingerprints and control coaching use enough evidence.",
+    );
+  }
+  if (avgKills >= 1 && shotTimingRuns < Math.max(3, Math.ceil(reliableRuns * 0.35))) {
+    nextSteps.push(
+      "Persist shot_timing for click-heavy runs so first-shot conversion and recovery cost are measured directly instead of inferred.",
+    );
+  }
+
+  return {
+    totalRuns: records.length,
+    reliableRuns,
+    flaggedRuns,
+    durationOutliers: records.filter((record) => record.isDurationOutlier).length,
+    zeroSignalRuns: records.filter((record) => record.isZeroSignal).length,
+    smoothnessRuns,
+    statsPanelRuns,
+    shotTimingRuns,
+    replayRuns,
+    nextSteps: nextSteps.slice(0, 2),
+  };
+}
+
+function startOfLocalDayMs(timestampMs: number): number {
+  const d = new Date(timestampMs);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function buildPracticeProfile(sorted: AnalyticsSessionRecord[]): PracticeProfile | null {
+  const reliable = sorted.filter((record) => record.isReliableForAnalysis);
+  if (reliable.length < 5) return null;
+
+  const recent = reliable.slice(-Math.min(reliable.length, 30));
+  const activeDays = new Set(recent.map((record) => startOfLocalDayMs(record.timestampMs))).size;
+  const firstDayMs = startOfLocalDayMs(recent[0].timestampMs);
+  const lastDayMs = startOfLocalDayMs(recent[recent.length - 1].timestampMs);
+  const spanDays = Math.max(1, Math.round((lastDayMs - firstDayMs) / (24 * 60 * 60 * 1000)) + 1);
+  const daysPerWeek = (activeDays / spanDays) * 7;
+  const sessionsPerActiveDay = recent.length / Math.max(activeDays, 1);
+
+  const blocks = groupIntoPlayBlocks(recent);
+  const blockMinutes = blocks.map((block) =>
+    block.sessions.reduce((sum, session) => sum + Math.max(0, session.duration_secs), 0) / 60,
+  );
+  const avgBlockRuns = mean(blocks.map((block) => block.sessions.length));
+  const avgBlockMinutes = mean(blockMinutes);
+  const maxBlockMinutes = blockMinutes.length > 0 ? Math.max(...blockMinutes) : 0;
+
+  const scenarioCounts = new Map<string, number>();
+  for (const session of recent) {
+    scenarioCounts.set(
+      session.normalizedScenario,
+      (scenarioCounts.get(session.normalizedScenario) ?? 0) + 1,
+    );
+  }
+
+  let dominantScenario = "Unknown";
+  let dominantCount = 0;
+  for (const [scenario, count] of scenarioCounts.entries()) {
+    if (count > dominantCount) {
+      dominantScenario = scenario;
+      dominantCount = count;
+    }
+  }
+
+  const blockUniqueScenarioCounts = blocks.map(
+    (block) => new Set(block.sessions.map((session) => session.normalizedScenario)).size,
+  );
+  const blockSwitchCounts = blocks.map((block) => {
+    let switches = 0;
+    for (let i = 1; i < block.sessions.length; i++) {
+      if (block.sessions[i].normalizedScenario !== block.sessions[i - 1].normalizedScenario) {
+        switches += 1;
+      }
+    }
+    return switches;
+  });
+  const totalAdjacentPairs = blocks.reduce(
+    (sum, block) => sum + Math.max(0, block.sessions.length - 1),
+    0,
+  );
+  const totalSwitches = blockSwitchCounts.reduce((sum, count) => sum + count, 0);
+
+  return {
+    sessionCount: recent.length,
+    activeDays,
+    spanDays,
+    daysPerWeek,
+    sessionsPerActiveDay,
+    avgBlockRuns,
+    avgBlockMinutes,
+    maxBlockMinutes,
+    scenarioDiversity: scenarioCounts.size,
+    dominantScenario,
+    dominantScenarioShare: dominantCount / recent.length,
+    avgUniqueScenariosPerBlock: mean(blockUniqueScenarioCounts),
+    avgScenarioSwitchesPerBlock: mean(blockSwitchCounts),
+    switchRate: totalAdjacentPairs > 0 ? totalSwitches / totalAdjacentPairs : 0,
+  };
 }
 
 function linearRegression(xs: number[], ys: number[]): { slope: number; intercept: number } {
@@ -445,20 +692,18 @@ function runMomentAction(moment: RunMomentInsight): string {
 // ─── Warmup detection ─────────────────────────────────────────────────────────
 
 /** Sessions within a single continuous play block (gap < WARMUP_GAP_MS). */
-interface PlayBlock {
-  sessions: SessionRecord[];
+interface PlayBlock<T extends SessionRecord = SessionRecord> {
+  sessions: T[];
   /** ms gap from last session of previous block; null = first ever block. */
   gapBeforeMs: number | null;
 }
 
-const WARMUP_GAP_MS = 6 * 60 * 60 * 1000; // 6 h gap → new play block
-const WARMUP_SESSION_COUNT = 2;             // first N sessions in a new block = candidates
-const WARMUP_SCORE_SD = 0.8;               // below (avg − N·σ) = warmup candidate
+const WARMUP_GAP_MS = 6 * 60 * 60 * 1000; // separates independent play blocks
 
-function groupIntoPlayBlocks(sorted: SessionRecord[]): PlayBlock[] {
+function groupIntoPlayBlocks<T extends SessionRecord>(sorted: T[]): PlayBlock<T>[] {
   if (sorted.length === 0) return [];
-  const blocks: PlayBlock[] = [];
-  let current: SessionRecord[] = [sorted[0]];
+  const blocks: PlayBlock<T>[] = [];
+  let current: T[] = [sorted[0]];
   let blockGap: number | null = null;
   for (let i = 1; i < sorted.length; i++) {
     const prev = parseTimestamp(sorted[i - 1].timestamp)?.getTime() ?? 0;
@@ -478,23 +723,43 @@ function groupIntoPlayBlocks(sorted: SessionRecord[]): PlayBlock[] {
 
 /**
  * Returns a Set of session IDs classified as warmup runs.
- * A session is warmup if it's one of the first N sessions in a play block
- * that starts after a 6+ hour gap AND its score is below (avg − 0.8σ).
- * Requires ≥ 5 sessions for a reliable baseline.
+ * A session is warmup if it sits in the early under-baseline portion of a play
+ * block and the block later recovers toward the player's normal score band.
+ * This keeps the segmentation block-based while making classification depend on
+ * scenario-relative performance, not a fixed number of early runs.
  */
-function classifyWarmup(sorted: SessionRecord[]): Set<string> {
-  if (sorted.length < 5) return new Set();
-  const scores = sorted.map((r) => r.score);
-  const avg = mean(scores);
-  const sd  = stddev(scores);
-  const threshold = avg - WARMUP_SCORE_SD * sd;
+function classifyWarmup(sorted: AnalyticsSessionRecord[]): Set<string> {
+  const reliable = sorted.filter((record) => record.isReliableForAnalysis);
+  if (reliable.length < 6) return new Set();
+
+  const baselineMedian = median(reliable.map((record) => record.score));
+  const baselineMad = medianAbsoluteDeviation(
+    reliable.map((record) => record.score),
+    baselineMedian,
+  );
+  const scoreScale = Math.max(baselineMad * 1.4826, baselineMedian * 0.06, 1);
   const warmupIds = new Set<string>();
-  for (const block of groupIntoPlayBlocks(sorted)) {
-    if (!block.gapBeforeMs || block.gapBeforeMs < WARMUP_GAP_MS) continue;
-    for (const s of block.sessions.slice(0, WARMUP_SESSION_COUNT)) {
-      if (s.score < threshold) warmupIds.add(s.id);
+
+  for (const block of groupIntoPlayBlocks(reliable)) {
+    if (block.sessions.length < 3) continue;
+
+    const zScores = block.sessions.map(
+      (session) => (session.score - baselineMedian) / scoreScale,
+    );
+    const recoveredIndex = zScores.findIndex((zScore) => zScore >= -0.15);
+    const blockPeak = Math.max(...zScores);
+
+    if (recoveredIndex <= 0 || blockPeak < 0) continue;
+
+    const recoveredZ = zScores[recoveredIndex];
+    for (let i = 0; i < recoveredIndex; i++) {
+      const zScore = zScores[i];
+      if (zScore <= -0.25 && recoveredZ - zScore >= 0.35 && blockPeak - zScore >= 0.5) {
+        warmupIds.add(block.sessions[i].id);
+      }
     }
   }
+
   return warmupIds;
 }
 
@@ -2566,6 +2831,7 @@ function generateCoachingCards(
   slope: number,
   avgScoreVal: number,
   isPlateau: boolean,
+  practiceProfile: PracticeProfile | null,
   scenarioType: string,
 ): CoachingCardData[] {
   const cards: CoachingCardData[] = [];
@@ -2627,6 +2893,39 @@ function generateCoachingCards(
         body: `Your accuracy improves ${avgTrend.toFixed(1)}% from session start to finish — your motor system takes time to fully activate. This means your early-session scores underrepresent your true skill level.`,
         tip: "Add a dedicated warm-up before your main scenario: 2–3 minutes of easy tracking or large relaxed flicks. This pre-activates the motor cortex pathways used in aim and helps you peak sooner.",
       });
+  }
+
+  if (practiceProfile && practiceProfile.sessionCount >= 5) {
+    const daysPerWeek = practiceProfile.daysPerWeek;
+    const avgBlockMinutes = practiceProfile.avgBlockMinutes;
+    const massedPattern = avgBlockMinutes >= 45 || (daysPerWeek < 2.5 && practiceProfile.avgBlockRuns >= 6);
+    const distributedPattern = daysPerWeek >= 3.5 && avgBlockMinutes >= 12 && avgBlockMinutes <= 35;
+
+    if (massedPattern) {
+      cards.push({
+        title: "Massed Practice Pattern",
+        badge: "Spacing Science",
+        badgeColor: "#00b4ff",
+        body: `Your last ${practiceProfile.sessionCount} reliable runs are clustered into ${avgBlockMinutes.toFixed(0)}-minute play blocks across roughly ${daysPerWeek.toFixed(1)} active day${daysPerWeek >= 1.5 ? "s" : ""}/week. Reviews on motor practice schedules describe this as a setup where warm-up gains, short-term performance spikes, and fatigue get stacked together, which can feel productive in-session but hurts retention quality.`,
+        tip: "Keep the volume, split the block. Converting one long grind into two 20–35 minute blocks on separate parts of the day or on adjacent days usually preserves effort while improving what actually sticks.",
+      });
+    } else if (distributedPattern) {
+      cards.push({
+        title: "Well-Spaced Practice",
+        badge: "Spacing Science",
+        badgeColor: "#00f5a0",
+        body: `Recent practice is spread across about ${daysPerWeek.toFixed(1)} active days/week with blocks averaging ${avgBlockMinutes.toFixed(0)} minutes. That is close to the range where the learning benefit of spacing shows up without paying too much warm-up or fatigue tax.`,
+        tip: "This is a good base. Keep block length stable and judge progress with next-day quality and consistency, not only with whether the final run of a long session sets a PB.",
+      });
+    } else {
+      cards.push({
+        title: "Practice Distribution Matters",
+        badge: "Spacing Science",
+        badgeColor: "#00b4ff",
+        body: `Your recent schedule is mixed: about ${daysPerWeek.toFixed(1)} active days/week and ${avgBlockMinutes.toFixed(0)} minutes per play block. Motor learning models treat spacing as a balance between four forces: learning, forgetting, warm-up decrement, and fatigue. Your current pattern likely leaves some easy retention gains on the table.`,
+        tip: "Nudge toward consistency before adding more volume. Aim for repeatable 20–35 minute blocks on 3–5 days/week, then compare your median score and variance after a week instead of chasing one-day highs.",
+      });
+    }
   }
 
   if (hasShotRecoverySignal) {
@@ -2733,27 +3032,45 @@ function generateCoachingCards(
       });
   }
 
-  if (n >= 5)
-    cards.push({
-      title: "The Spacing Effect",
-      badge: "Cognitive Science",
-      badgeColor: "#00b4ff",
-      body: "Distributed practice (multiple short sessions across days) produces significantly better long-term skill retention than massed practice (marathon sessions). This is one of the most replicated findings in motor learning research.",
-      tip: "Aim for 20–30 minutes daily rather than 2+ hour weekend sessions. Even 15 minutes of focused practice 5 days a week outperforms a 2-hour Saturday grind for long-term skill retention and game transfer.",
-    });
+  if (practiceProfile && practiceProfile.sessionCount >= 8 && !isPlateau) {
+    const dominantPct = practiceProfile.dominantScenarioShare * 100;
+    const blockedPattern = practiceProfile.dominantScenarioShare >= 0.72
+      && practiceProfile.avgUniqueScenariosPerBlock < 2;
+    const interleavedPattern = practiceProfile.avgUniqueScenariosPerBlock >= 2.5
+      && practiceProfile.switchRate >= 0.3;
 
-  if (n >= 8 && !isPlateau)
-    cards.push({
-      title: "Interleaved Practice",
-      badge: "Skill Transfer",
-      badgeColor: "#a78bfa",
-      body: "Mixing scenario types in a single session improves overall aim transfer to real games more than repeating the same scenario. The variety forces active pattern retrieval each time, which is harder but produces better long-term retention.",
-      tip: isTracking
-        ? "Structure sessions as: warm-up tracking (5 min) → a precision/clicking scenario (10 min) → your main tracking scenario (15 min). Crossing between tracking and clicking helps your brain build a more complete aim model."
-        : "Structure sessions as: warm-up flicking (5 min) → a tracking scenario to train smooth cursor control (10 min) → your main click scenario (15 min). This interleaved format feels harder but produces superior retention and cross-scenario skill transfer.",
-    });
+    if (blockedPattern) {
+      cards.push({
+        title: "Blocked Practice Bias",
+        badge: "Skill Transfer",
+        badgeColor: "#a78bfa",
+        body: `${dominantPct.toFixed(0)}% of your last ${practiceProfile.sessionCount} reliable runs were ${practiceProfile.dominantScenario}, and most play blocks contain only ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenario on average. Recent contextual-interference meta-analyses show this kind of blocked practice usually feels better during acquisition, but retention and transfer improve more when adults add harder, interleaved retrieval.`,
+        tip: isTracking
+          ? "Keep your main tracking scenario, but after every 2–3 serious runs insert one contrasting clicking or precision scenario. Expect same-day scores to feel worse at first; the point is stronger retention when you come back."
+          : "Keep your main click scenario, but after every 2–3 serious runs insert one smooth tracking scenario. That extra retrieval cost is the part that improves transfer, even if the session feels less comfortable.",
+      });
+    } else if (interleavedPattern) {
+      cards.push({
+        title: "Interleaving Is Working",
+        badge: "Skill Transfer",
+        badgeColor: "#00f5a0",
+        body: `Your recent blocks average ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenarios with a ${Math.round(practiceProfile.switchRate * 100)}% scenario-switch rate. That is enough contextual interference to challenge retrieval without turning practice into random noise.`,
+        tip: "Keep judging this by next-day quality and in-game carryover, not by whether every switch immediately produces a PB. Interleaving often depresses acquisition slightly while improving retention and transfer.",
+      });
+    } else {
+      cards.push({
+        title: "Add One Contrast Scenario",
+        badge: "Skill Transfer",
+        badgeColor: "#a78bfa",
+        body: `You have some variety (${practiceProfile.scenarioDiversity} scenarios across recent practice), but most blocks still revolve around one main task. That is a better base than pure grinding, yet probably not enough interference to maximize transfer.`,
+        tip: isTracking
+          ? "Upgrade one block each session into a simple triangle: tracking main set → clicking contrast set → tracking return set. That pattern gives you interleaving without blowing up your whole routine."
+          : "Upgrade one block each session into flicking main set → tracking contrast set → flicking return set. The return set is important because it tests whether the contrast work actually stabilized your mechanics.",
+      });
+    }
+  }
 
-  return cards.slice(0, 6);
+  return cards.slice(0, 7);
 }
 
 function CoachingCard({ card }: { card: CoachingCardData }) {
@@ -2964,8 +3281,8 @@ function CoachingTab({
   warmupIds,
   sessionFilter,
 }: {
-  records: SessionRecord[];
-  sorted: SessionRecord[];
+  records: AnalyticsSessionRecord[];
+  sorted: AnalyticsSessionRecord[];
   warmupIds: Set<string>;
   sessionFilter: SessionFilter;
 }) {
@@ -3004,6 +3321,7 @@ function CoachingTab({
   const recent7      = scores.slice(-7);
   const recentCV     = mean(recent7) > 0 ? (stddev(recent7) / mean(recent7)) * 100 : 0;
   const isPlateau    = scores.length >= 8 && Math.abs(slopeNormPct) < 0.5 && recentCV < 8;
+  const practiceProfile = buildPracticeProfile(coachSorted);
 
   const scenarioType = dominantScenarioType(coachRecords);
   const isTracking   = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
@@ -3032,6 +3350,7 @@ function CoachingTab({
     slope,
     avgScoreVal,
     isPlateau,
+    practiceProfile,
     scenarioType,
   ) : [];
 
@@ -3332,6 +3651,50 @@ function CoachingTab({
         <StatCard label="Peak Zone"    value={fmtScore(p90)} sub="your top 10% of runs" accent="#00f5a0" />
       </div>
 
+      {practiceProfile && (
+        <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+          <SectionTitle>Practice Profile</SectionTitle>
+          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Active cadence
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#00b4ff" }}>
+                {practiceProfile.daysPerWeek.toFixed(1)} days/wk
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                {practiceProfile.activeDays} active day{practiceProfile.activeDays !== 1 ? "s" : ""} in the last {practiceProfile.spanDays} day{practiceProfile.spanDays !== 1 ? "s" : ""}
+              </div>
+            </div>
+            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Block size
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffd700" }}>
+                {practiceProfile.avgBlockMinutes.toFixed(0)} min
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                avg {practiceProfile.avgBlockRuns.toFixed(1)} runs/block, peak {practiceProfile.maxBlockMinutes.toFixed(0)} min
+              </div>
+            </div>
+            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
+              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+                Scenario mix
+              </div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: "#a78bfa" }}>
+                {Math.round(practiceProfile.dominantScenarioShare * 100)}% main
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+                {practiceProfile.scenarioDiversity} scenarios total, {practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} per block
+              </div>
+            </div>
+          </div>
+          <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.58)", lineHeight: 1.7 }}>
+            Recent reliable practice is centered on {practiceProfile.dominantScenario} and averages {practiceProfile.sessionsPerActiveDay.toFixed(1)} run{practiceProfile.sessionsPerActiveDay >= 1.5 ? "s" : ""} per active day with a {Math.round(practiceProfile.switchRate * 100)}% scenario-switch rate inside blocks. The coaching cards below now use this profile instead of generic advice.
+          </p>
+        </div>
+      )}
+
       {/* ── Distribution chart ── */}
       <ScoreDistributionChart scores={sortedScores} p10={p10} p50={p50} p90={p90} />
 
@@ -3352,28 +3715,33 @@ function CoachingTab({
 
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
-function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; scenarioName: string }) {
+function ScenarioDetails({ records, scenarioName }: { records: AnalyticsSessionRecord[]; scenarioName: string }) {
   const [activeTab, setActiveTab] = useState<Tab>("overview");
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>("all");
+  const qualitySummary = useMemo(() => summarizeScenarioTelemetry(records), [records]);
+  const analysisRecords = useMemo(
+    () => records.filter((record) => record.isReliableForAnalysis),
+    [records],
+  );
 
   const sorted = useMemo(
     () =>
-      [...records].sort((a, b) => {
+      [...analysisRecords].sort((a, b) => {
         const da = parseTimestamp(a.timestamp)?.getTime() ?? 0;
         const db = parseTimestamp(b.timestamp)?.getTime() ?? 0;
         return da - db;
       }),
-    [records],
+    [analysisRecords],
   );
 
   const warmupIds = useMemo(() => classifyWarmup(sorted), [sorted]);
   const hasWarmup = warmupIds.size > 0;
 
   const filteredRecords = useMemo(() => {
-    if (sessionFilter === "warmup")   return records.filter((r) => warmupIds.has(r.id));
-    if (sessionFilter === "warmedup") return records.filter((r) => !warmupIds.has(r.id));
-    return records;
-  }, [records, warmupIds, sessionFilter]);
+    if (sessionFilter === "warmup")   return analysisRecords.filter((r) => warmupIds.has(r.id));
+    if (sessionFilter === "warmedup") return analysisRecords.filter((r) => !warmupIds.has(r.id));
+    return analysisRecords;
+  }, [analysisRecords, warmupIds, sessionFilter]);
 
   const filteredSorted = useMemo(() => {
     if (sessionFilter === "warmup")   return sorted.filter((r) => warmupIds.has(r.id));
@@ -3382,7 +3750,7 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
   }, [sorted, warmupIds, sessionFilter]);
 
   const best = Math.max(...filteredRecords.map((r) => r.score), 0);
-  const hasSmooth = records.some((r) => r.smoothness != null);
+  const hasSmooth = analysisRecords.some((r) => r.smoothness != null);
 
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
     { id: "overview", label: "Overview" },
@@ -3395,6 +3763,61 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div
+        style={{
+          ...CHART_STYLE,
+          padding: "12px 16px",
+          display: "flex",
+          flexDirection: "column",
+          gap: 8,
+        }}
+      >
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+          <span
+            style={{
+              fontSize: 11,
+              color: "#00f5a0",
+              textTransform: "uppercase",
+              letterSpacing: 1,
+              fontWeight: 700,
+            }}
+          >
+            Analytics quality
+          </span>
+          <span style={{ fontSize: 12, color: "rgba(255,255,255,0.75)" }}>
+            Using {qualitySummary.reliableRuns}/{qualitySummary.totalRuns} high-confidence run{qualitySummary.totalRuns !== 1 ? "s" : ""} for charts and coaching.
+          </span>
+          {qualitySummary.flaggedRuns > 0 && (
+            <span style={{ fontSize: 12, color: "#ffb400" }}>
+              Ignored {qualitySummary.flaggedRuns} suspect run{qualitySummary.flaggedRuns !== 1 ? "s" : ""}
+              {qualitySummary.durationOutliers > 0 ? ` (${qualitySummary.durationOutliers} duration outlier${qualitySummary.durationOutliers !== 1 ? "s" : ""}` : ""}
+              {qualitySummary.durationOutliers > 0 && qualitySummary.zeroSignalRuns > 0 ? ", " : ""}
+              {qualitySummary.zeroSignalRuns > 0 ? `${qualitySummary.zeroSignalRuns} empty` : ""}
+              {qualitySummary.durationOutliers > 0 || qualitySummary.zeroSignalRuns > 0 ? ")" : ""}.
+            </span>
+          )}
+        </div>
+
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 14, fontSize: 11, color: "rgba(255,255,255,0.42)" }}>
+          <span>Smoothness {qualitySummary.smoothnessRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
+          <span>Stats panel {qualitySummary.statsPanelRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
+          <span>Shot timing {qualitySummary.shotTimingRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
+          <span>Replay {qualitySummary.replayRuns}/{qualitySummary.reliableRuns || qualitySummary.totalRuns}</span>
+        </div>
+
+        {qualitySummary.nextSteps[0] && (
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.58)", lineHeight: 1.5 }}>
+            Next useful data: {qualitySummary.nextSteps[0]}
+          </div>
+        )}
+      </div>
+
+      {analysisRecords.length === 0 ? (
+        <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.45)", lineHeight: 1.7 }}>
+          All recorded runs for this scenario look incomplete or malformed, so trend and coaching views are hidden until a clean run is recorded.
+        </div>
+      ) : (
+        <>
       {/* Tab bar + session filter toggle */}
       <div
         style={{
@@ -3492,6 +3915,8 @@ function ScenarioDetails({ records, scenarioName }: { records: SessionRecord[]; 
         <ReplayTab records={filteredRecords} sorted={filteredSorted} warmupIds={warmupIds} />
       )}
       {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
+        </>
+      )}
     </div>
   );
 }
@@ -3506,6 +3931,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [selectedScenario, setSelectedScenario] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [importingHistory, setImportingHistory] = useState(false);
+  const [importStatus, setImportStatus] = useState<string | null>(null);
   const [rootMode, setRootMode] = useState<RootMode>("sessions");
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
@@ -3513,6 +3940,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
   selectedRef.current = selectedScenario;
+  const analyticsRecords = useMemo(() => buildAnalyticsRecords(records), [records]);
+  const flaggedRecordCount = useMemo(
+    () => analyticsRecords.filter((record) => !record.isReliableForAnalysis).length,
+    [analyticsRecords],
+  );
 
   async function loadHistory(preserveSelection: boolean) {
     try {
@@ -3617,11 +4049,43 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     setConfirmClear(false);
   }
 
+  async function handleImportHistory() {
+    setImportingHistory(true);
+    setImportStatus(null);
+    try {
+      const result = await invoke<SessionCsvImportSummary>("import_session_csv_history");
+      const summary = [
+        result.imported > 0
+          ? `Imported ${result.imported} run${result.imported !== 1 ? "s" : ""}`
+          : "No new runs imported",
+        result.skipped_existing > 0
+          ? `${result.skipped_existing} already present`
+          : null,
+        result.failed > 0 ? `${result.failed} failed to parse` : null,
+      ]
+        .filter(Boolean)
+        .join(" • ");
+      setImportStatus(summary || `Scanned ${result.scanned} CSV files.`);
+      await loadHistory(true);
+    } catch (error) {
+      setImportStatus(String(error));
+    } finally {
+      setImportingHistory(false);
+    }
+  }
+
   const scenarioGroups = useMemo(() => {
     const q = search.toLowerCase();
-    const map = new Map<string, { best: number; count: number; lastTs: string }>();
-    for (const r of records) {
-      const name = normalizeScenario(r.scenario);
+    const map = new Map<string, {
+      bestReliable: number | null;
+      bestAny: number;
+      count: number;
+      reliableCount: number;
+      flaggedCount: number;
+      lastTs: string;
+    }>();
+    for (const r of analyticsRecords) {
+      const name = r.normalizedScenario;
       if (q && !name.toLowerCase().includes(q)) continue;
       const cur = map.get(name);
       const curTs = cur?.lastTs ?? "";
@@ -3629,8 +4093,13 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         (parseTimestamp(r.timestamp)?.getTime() ?? 0) >
         (parseTimestamp(curTs)?.getTime() ?? 0);
       map.set(name, {
-        best: Math.max(cur?.best ?? 0, r.score),
+        bestReliable: r.isReliableForAnalysis
+          ? Math.max(cur?.bestReliable ?? 0, r.score)
+          : (cur?.bestReliable ?? null),
+        bestAny: Math.max(cur?.bestAny ?? 0, r.score),
         count: (cur?.count ?? 0) + 1,
+        reliableCount: (cur?.reliableCount ?? 0) + (r.isReliableForAnalysis ? 1 : 0),
+        flaggedCount: (cur?.flaggedCount ?? 0) + (r.isReliableForAnalysis ? 0 : 1),
         lastTs: isNewer ? r.timestamp : curTs,
       });
     }
@@ -3641,11 +4110,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           (parseTimestamp(b.lastTs)?.getTime() ?? 0) -
           (parseTimestamp(a.lastTs)?.getTime() ?? 0),
       );
-  }, [records, search]);
+  }, [analyticsRecords, search]);
 
   const selectedRecords = useMemo(
-    () => records.filter((r) => normalizeScenario(r.scenario) === selectedScenario),
-    [records, selectedScenario],
+    () => analyticsRecords.filter((r) => r.normalizedScenario === selectedScenario),
+    [analyticsRecords, selectedScenario],
   );
 
   return (
@@ -3798,12 +4267,17 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                     <span>
                       {g.count} run{g.count !== 1 ? "s" : ""}
                     </span>
+                    {g.flaggedCount > 0 && (
+                      <span style={{ color: "#ffb400" }}>
+                        {g.flaggedCount} flagged
+                      </span>
+                    )}
                     <span
                       style={{
                         color: active ? "#00f5a0" : "rgba(255,255,255,0.35)",
                       }}
                     >
-                      PB {fmtScore(g.best)}
+                      PB {fmtScore(g.bestReliable ?? g.bestAny)}
                     </span>
                   </div>
                 </button>
@@ -3817,30 +4291,63 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             padding: "10px 16px",
             borderTop: "1px solid rgba(255,255,255,0.07)",
             display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
+            flexDirection: "column",
+            gap: 10,
           }}
         >
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.25)" }}>
-            {records.length} total
-          </span>
-          <button
-            onClick={handleClear}
-            onBlur={() => setConfirmClear(false)}
+          <div
             style={{
-              background: confirmClear ? "rgba(255,107,107,0.15)" : "transparent",
-              border: `1px solid ${confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.12)"}`,
-              borderRadius: 6,
-              padding: "4px 10px",
-              cursor: "pointer",
-              color: confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.4)",
-              fontFamily: "inherit",
-              fontSize: 11,
-              transition: "all 0.15s",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: 8,
             }}
           >
-            {confirmClear ? "Confirm clear" : "Clear"}
-          </button>
+            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.25)" }}>
+              {records.length} total{flaggedRecordCount > 0 ? ` • ${flaggedRecordCount} flagged` : ""}
+            </span>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                onClick={handleImportHistory}
+                disabled={importingHistory}
+                style={{
+                  background: importingHistory ? "rgba(255,255,255,0.08)" : "transparent",
+                  border: "1px solid rgba(255,255,255,0.12)",
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  cursor: importingHistory ? "default" : "pointer",
+                  color: importingHistory ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.55)",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  transition: "all 0.15s",
+                }}
+              >
+                {importingHistory ? "Importing…" : "Import CSVs"}
+              </button>
+              <button
+                onClick={handleClear}
+                onBlur={() => setConfirmClear(false)}
+                style={{
+                  background: confirmClear ? "rgba(255,107,107,0.15)" : "transparent",
+                  border: `1px solid ${confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.12)"}`,
+                  borderRadius: 6,
+                  padding: "4px 10px",
+                  cursor: "pointer",
+                  color: confirmClear ? "#ff6b6b" : "rgba(255,255,255,0.4)",
+                  fontFamily: "inherit",
+                  fontSize: 11,
+                  transition: "all 0.15s",
+                }}
+              >
+                {confirmClear ? "Confirm clear" : "Clear"}
+              </button>
+            </div>
+          </div>
+          {importStatus && (
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.4)", lineHeight: 1.5 }}>
+              {importStatus}
+            </div>
+          )}
         </div>
       </div>
 
