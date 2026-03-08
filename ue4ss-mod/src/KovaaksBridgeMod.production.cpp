@@ -4238,6 +4238,159 @@ private:
         return true;
     }
 
+    static auto normalize_angle_degrees(double value) -> double {
+        while (value > 180.0) {
+            value -= 360.0;
+        }
+        while (value < -180.0) {
+            value += 360.0;
+        }
+        return value;
+    }
+
+    static auto append_shot_target_snapshot_json(
+        std::string& out,
+        const kmod_replay::ReplayEntityActorRef& target_ref,
+        const kmod_replay::ReplayEntityActorRef* player_ref,
+        bool is_nearest
+    ) -> void {
+        kmod_replay::replay_append_entity_json(out, target_ref.entity);
+
+        if (player_ref) {
+            constexpr double kPi = 3.14159265358979323846;
+            const double dx = static_cast<double>(target_ref.entity.location.x)
+                - static_cast<double>(player_ref->entity.location.x);
+            const double dy = static_cast<double>(target_ref.entity.location.y)
+                - static_cast<double>(player_ref->entity.location.y);
+            const double dz = static_cast<double>(target_ref.entity.location.z)
+                - static_cast<double>(player_ref->entity.location.z);
+            const double distance_2d = std::sqrt((dx * dx) + (dy * dy));
+            const double distance_3d = std::sqrt((distance_2d * distance_2d) + (dz * dz));
+            const double target_yaw_deg = std::atan2(dy, dx) * (180.0 / kPi);
+            const double target_pitch_deg = std::atan2(dz, std::max(distance_2d, 0.0001)) * (180.0 / kPi);
+            const double yaw_error_deg = normalize_angle_degrees(
+                target_yaw_deg - static_cast<double>(player_ref->entity.rotation.yaw)
+            );
+            const double pitch_error_deg = normalize_angle_degrees(
+                target_pitch_deg - static_cast<double>(player_ref->entity.rotation.pitch)
+            );
+
+            out += ",\"distance_2d\":";
+            kmod_replay::replay_append_f32(out, distance_2d);
+            out += ",\"distance_3d\":";
+            kmod_replay::replay_append_f32(out, distance_3d);
+            out += ",\"yaw_error_deg\":";
+            kmod_replay::replay_append_f32(out, yaw_error_deg);
+            out += ",\"pitch_error_deg\":";
+            kmod_replay::replay_append_f32(out, pitch_error_deg);
+        }
+
+        out += ",\"is_nearest\":";
+        out += is_nearest ? "true" : "false";
+        out += "}";
+    }
+
+    void emit_shot_target_telemetry(const char* shot_event, int32_t delta, int32_t total, uint64_t now) {
+        if (!shot_event || delta <= 0 || total < 0) {
+            return;
+        }
+
+        std::vector<kmod_replay::ReplayEntityActorRef> refs{};
+        kmod_replay::replay_collect_entity_actor_refs(refs);
+
+        const kmod_replay::ReplayEntityActorRef* player_ref = nullptr;
+        std::vector<const kmod_replay::ReplayEntityActorRef*> target_refs{};
+        target_refs.reserve(refs.size());
+
+        for (const auto& ref : refs) {
+            if (ref.entity.is_player) {
+                player_ref = &ref;
+                break;
+            }
+        }
+        if (!player_ref) {
+            for (const auto& ref : refs) {
+                if (!ref.entity.is_bot) {
+                    player_ref = &ref;
+                    break;
+                }
+            }
+        }
+
+        for (const auto& ref : refs) {
+            if (ref.entity.is_bot) {
+                target_refs.emplace_back(&ref);
+            }
+        }
+
+        size_t nearest_target_index = std::numeric_limits<size_t>::max();
+        if (player_ref && !target_refs.empty()) {
+            double nearest_distance_sq = std::numeric_limits<double>::max();
+            for (size_t index = 0; index < target_refs.size(); ++index) {
+                const auto* target = target_refs[index];
+                const double dx = static_cast<double>(target->entity.location.x)
+                    - static_cast<double>(player_ref->entity.location.x);
+                const double dy = static_cast<double>(target->entity.location.y)
+                    - static_cast<double>(player_ref->entity.location.y);
+                const double dz = static_cast<double>(target->entity.location.z)
+                    - static_cast<double>(player_ref->entity.location.z);
+                const double distance_sq = (dx * dx) + (dy * dy) + (dz * dz);
+                if (distance_sq < nearest_distance_sq) {
+                    nearest_distance_sq = distance_sq;
+                    nearest_target_index = index;
+                }
+            }
+        }
+
+        const auto& replay_runtime = kmod_replay::replay_runtime_state();
+        const char* telemetry_ev = std::strcmp(shot_event, "shot_hit") == 0
+            ? "shot_hit_telemetry"
+            : "shot_fired_telemetry";
+
+        for (int32_t emit_index = 0; emit_index < delta; ++emit_index) {
+            std::string msg;
+            msg.reserve(512 + (target_refs.size() * 256));
+            msg += "{\"ev\":\"";
+            msg += telemetry_ev;
+            msg += "\",\"ts_ms\":";
+            kmod_replay::replay_append_u64(msg, now);
+            msg += ",\"total\":";
+            kmod_replay::replay_append_i32(msg, total);
+            msg += ",\"run_id\":";
+            kmod_replay::replay_append_u64(msg, replay_runtime.current_run_id);
+            msg += ",\"sample_seq\":";
+            kmod_replay::replay_append_u64(msg, replay_runtime.seq);
+            msg += ",\"sample_count\":";
+            kmod_replay::replay_append_u64(msg, replay_runtime.samples_emitted);
+            msg += ",\"source\":\"pull_telemetry\",\"method\":\"";
+            msg += kmod_replay::replay_escape_json(emit_method_ ? emit_method_ : "unknown");
+            msg += "\",\"origin_flag\":\"";
+            msg += kmod_replay::replay_escape_json(emit_origin_flag_ ? emit_origin_flag_ : "unknown");
+            msg += "\"";
+
+            if (player_ref) {
+                msg += ",\"player\":";
+                kmod_replay::replay_append_entity_json(msg, player_ref->entity);
+            }
+
+            msg += ",\"targets\":[";
+            for (size_t target_index = 0; target_index < target_refs.size(); ++target_index) {
+                if (target_index > 0) {
+                    msg += ",";
+                }
+                append_shot_target_snapshot_json(
+                    msg,
+                    *target_refs[target_index],
+                    player_ref,
+                    target_index == nearest_target_index
+                );
+            }
+            msg += "]}";
+
+            kovaaks::RustBridge::emit_json(msg.c_str());
+        }
+    }
+
     void emit_state_i32(const char* ev, int32_t& last_value, int32_t value, uint64_t now) {
         if (value != 0 && value != 1) {
             return;
@@ -4319,6 +4472,7 @@ private:
                 alias_ev = "kill";
             }
             if (alias_ev) {
+                emit_shot_target_telemetry(alias_ev, delta, value, now);
                 std::array<char, 192> alias_json{};
                 std::snprintf(
                     alias_json.data(),
