@@ -839,9 +839,27 @@ fn load_session_replay(app: AppHandle, session_id: String) -> Option<replay_stor
 }
 
 #[tauri::command]
+fn get_session_replay_payload(
+    app: AppHandle,
+    session_id: String,
+) -> Option<replay_store::ReplayPayloadData> {
+    replay_store::load_replay_payload(&app, &session_id)
+}
+
+#[tauri::command]
 fn get_session_run_summary(app: AppHandle, session_id: String) -> Option<bridge::BridgeRunSnapshot> {
     match stats_db::get_run_summary(&app, &session_id) {
-        Ok(summary) => summary,
+        Ok(Some(summary)) => Some(summary),
+        Ok(None) => {
+            let _ = replay_store::load_replay(&app, &session_id);
+            match stats_db::get_run_summary(&app, &session_id) {
+                Ok(summary) => summary,
+                Err(error) => {
+                    log::warn!("could not backfill run summary for {}: {error}", session_id);
+                    None
+                }
+            }
+        }
         Err(error) => {
             log::warn!("could not load run summary for {}: {error}", session_id);
             None
@@ -855,7 +873,17 @@ fn get_session_run_timeline(
     session_id: String,
 ) -> Vec<bridge::BridgeRunTimelinePoint> {
     match stats_db::get_run_timeline(&app, &session_id) {
-        Ok(timeline) => timeline,
+        Ok(timeline) if !timeline.is_empty() => timeline,
+        Ok(_) => {
+            let _ = replay_store::load_replay(&app, &session_id);
+            match stats_db::get_run_timeline(&app, &session_id) {
+                Ok(timeline) => timeline,
+                Err(error) => {
+                    log::warn!("could not backfill run timeline for {}: {error}", session_id);
+                    vec![]
+                }
+            }
+        }
         Err(error) => {
             log::warn!("could not load run timeline for {}: {error}", session_id);
             vec![]
@@ -1229,6 +1257,7 @@ pub fn run() {
             get_session_raw_positions,
             get_session_screen_frames,
             load_session_replay,
+            get_session_replay_payload,
             get_session_run_summary,
             get_session_run_timeline,
             replay_play_in_game,

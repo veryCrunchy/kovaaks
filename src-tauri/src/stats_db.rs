@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -34,10 +34,7 @@ pub fn connect(app: &AppHandle) -> Result<Connection> {
 
 pub fn upsert_replay_asset(app: &AppHandle, record: &ReplayAssetRecord<'_>) -> Result<()> {
     let conn = connect(app)?;
-    let updated_at_unix_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as i64;
+    let updated_at_unix_ms = current_unix_ms();
 
     conn.execute(
         "
@@ -73,6 +70,58 @@ pub fn upsert_replay_asset(app: &AppHandle, record: &ReplayAssetRecord<'_>) -> R
     Ok(())
 }
 
+pub fn upsert_replay_payload(
+    app: &AppHandle,
+    session_id: &str,
+    replay: &crate::replay_store::ReplayData,
+) -> Result<()> {
+    let conn = connect(app)?;
+    let replay_json = serde_json::to_string(replay).context("could not serialize replay payload")?;
+
+    conn.execute(
+        "
+        INSERT INTO session_replay_payloads (
+            session_id,
+            replay_json,
+            updated_at_unix_ms
+        )
+        VALUES (?1, ?2, ?3)
+        ON CONFLICT(session_id) DO UPDATE SET
+            replay_json = excluded.replay_json,
+            updated_at_unix_ms = excluded.updated_at_unix_ms
+        ",
+        params![session_id, replay_json, current_unix_ms()],
+    )?;
+
+    Ok(())
+}
+
+pub fn get_replay_data(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<crate::replay_store::ReplayData>> {
+    let conn = connect(app)?;
+    let replay_json = conn
+        .query_row(
+            "
+            SELECT replay_json
+            FROM session_replay_payloads
+            WHERE session_id = ?1
+            ",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("could not load replay payload")?;
+
+    replay_json
+        .map(|json| {
+            serde_json::from_str::<crate::replay_store::ReplayData>(&json)
+                .context("could not parse replay payload")
+        })
+        .transpose()
+}
+
 fn db_path(app: &AppHandle) -> Result<PathBuf> {
     let data_dir = app
         .path()
@@ -96,6 +145,13 @@ fn configure_connection(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "foreign_keys", 1i64)?;
     conn.pragma_update(None, "temp_store", "MEMORY")?;
     Ok(())
+}
+
+fn current_unix_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 fn migrate_schema(conn: &Connection) -> Result<()> {
@@ -202,6 +258,24 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             CREATE INDEX IF NOT EXISTS idx_run_timelines_session ON session_run_timelines(session_id, t_sec);
 
             PRAGMA user_version = 2;
+            COMMIT;
+            ",
+        )?;
+    }
+
+    if user_version < 3 {
+        conn.execute_batch(
+            "
+            BEGIN;
+            CREATE TABLE IF NOT EXISTS session_replay_payloads (
+                session_id TEXT PRIMARY KEY,
+                replay_json TEXT NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_payloads_updated_at ON session_replay_payloads(updated_at_unix_ms);
+
+            PRAGMA user_version = 3;
             COMMIT;
             ",
         )?;

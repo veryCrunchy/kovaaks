@@ -1,9 +1,8 @@
 /// Replay store: persists per-session mouse-path and per-second metric snapshots.
 ///
-/// Each replay is saved as a JSON file in `{app_data_dir}/replays/{session_id}.json`.
+/// Replay payloads now live in SQLite so frontend reads do not depend on sidecar
+/// JSON files. Legacy sidecars are still imported on demand for older sessions.
 /// Positions are downsampled (every Nth point) to reduce file size.
-/// Replays are retained indefinitely so historical replay-backed coaching can
-/// accumulate alongside the unbounded stats database.
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -31,6 +30,24 @@ pub struct ReplayData {
     pub run_snapshot: Option<crate::bridge::BridgeRunSnapshot>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReplayPayloadData {
+    pub positions: Vec<RawPositionPoint>,
+    pub metrics: Vec<MetricPoint>,
+    #[serde(default)]
+    pub frames: Vec<crate::screen_recorder::ScreenFrame>,
+}
+
+impl From<&ReplayData> for ReplayPayloadData {
+    fn from(value: &ReplayData) -> Self {
+        Self {
+            positions: value.positions.clone(),
+            metrics: value.metrics.clone(),
+            frames: value.frames.clone(),
+        }
+    }
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 fn replay_dir(app: &AppHandle) -> Option<PathBuf> {
@@ -40,16 +57,83 @@ fn replay_dir(app: &AppHandle) -> Option<PathBuf> {
     Some(dir)
 }
 
+fn sqlite_replay_path(session_id: &str) -> PathBuf {
+    PathBuf::from(format!("sqlite://session_replay_payloads/{session_id}"))
+}
+
+fn backfill_sqlite_replay(app: &AppHandle, session_id: &str, replay: &ReplayData) -> bool {
+    if let Err(error) = crate::stats_db::upsert_replay_payload(app, session_id, replay) {
+        log::warn!(
+            "replay_store: could not persist replay payload for {}: {error}",
+            session_id
+        );
+        return false;
+    }
+
+    if let Some(snapshot) = replay.run_snapshot.as_ref() {
+        if let Err(error) = crate::stats_db::upsert_run_capture(app, session_id, snapshot) {
+            log::warn!(
+                "replay_store: could not persist run capture for {}: {error}",
+                session_id
+            );
+        }
+    }
+
+    let virtual_path = sqlite_replay_path(session_id);
+    if let Err(error) = crate::stats_db::upsert_replay_asset(
+        app,
+        &crate::stats_db::ReplayAssetRecord {
+            session_id,
+            file_path: &virtual_path,
+            positions_count: replay.positions.len(),
+            metrics_count: replay.metrics.len(),
+            frames_count: replay.frames.len(),
+            has_run_snapshot: replay.run_snapshot.is_some(),
+        },
+    ) {
+        log::warn!(
+            "replay_store: could not register replay metadata for {}: {error}",
+            session_id
+        );
+    }
+
+    true
+}
+
+fn import_legacy_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
+    let dir = replay_dir(app)?;
+    let path = dir.join(format!("{}.json", session_id));
+    let json = std::fs::read_to_string(&path).ok()?;
+    let replay = match serde_json::from_str::<ReplayData>(&json) {
+        Ok(replay) => replay,
+        Err(error) => {
+            log::warn!("replay_store: parse error for {session_id}: {error}");
+            return None;
+        }
+    };
+
+    let _ = backfill_sqlite_replay(app, session_id, &replay);
+    Some(replay)
+}
+
+fn repair_run_capture_if_needed(app: &AppHandle, session_id: &str, replay: &ReplayData) {
+    if replay.run_snapshot.is_none() {
+        return;
+    }
+    let has_summary = crate::stats_db::get_run_summary(app, session_id)
+        .ok()
+        .flatten()
+        .is_some();
+    if !has_summary {
+        let _ = backfill_sqlite_replay(app, session_id, replay);
+    }
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /// Persist `data` for `session_id`.  Positions are downsampled before writing.
-/// Returns `true` if the file was written successfully.
+/// Returns `true` if the replay payload was written successfully.
 pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool {
-    let Some(dir) = replay_dir(app) else {
-        log::warn!("replay_store: could not resolve app data dir");
-        return false;
-    };
-
     // Downsample positions: keep every DOWNSAMPLE_FACTOR-th point.
     // Click events are never dropped so they remain visible in the canvas.
     let downsampled_positions: Vec<RawPositionPoint> = data
@@ -67,57 +151,39 @@ pub fn save_replay(app: &AppHandle, session_id: &str, data: ReplayData) -> bool 
         run_snapshot: data.run_snapshot,
     };
 
-    let path = dir.join(format!("{}.json", session_id));
-    match serde_json::to_string(&stored) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                log::warn!("replay_store: write error for {}: {e}", path.display());
-                return false;
-            }
-            log::info!(
-                "replay_store: saved {} ({} positions, {} metrics, {} frames, run_snapshot={})",
-                session_id,
-                stored.positions.len(),
-                stored.metrics.len(),
-                stored.frames.len(),
-                stored.run_snapshot.is_some(),
-            );
-            if let Err(error) = crate::stats_db::upsert_replay_asset(
-                app,
-                &crate::stats_db::ReplayAssetRecord {
-                    session_id,
-                    file_path: &path,
-                    positions_count: stored.positions.len(),
-                    metrics_count: stored.metrics.len(),
-                    frames_count: stored.frames.len(),
-                    has_run_snapshot: stored.run_snapshot.is_some(),
-                },
-            ) {
-                log::warn!(
-                    "replay_store: could not register replay metadata for {}: {error}",
-                    session_id
-                );
-            }
-            true
-        }
-        Err(e) => {
-            log::warn!("replay_store: serialize error for {session_id}: {e}");
-            false
-        }
+    if !backfill_sqlite_replay(app, session_id, &stored) {
+        return false;
     }
+    log::info!(
+        "replay_store: saved {} ({} positions, {} metrics, {} frames, run_snapshot={})",
+        session_id,
+        stored.positions.len(),
+        stored.metrics.len(),
+        stored.frames.len(),
+        stored.run_snapshot.is_some(),
+    );
+    true
 }
 
 /// Load a previously saved replay. Returns `None` if the file does not exist or
 /// cannot be parsed.
 pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
-    let dir = replay_dir(app)?;
-    let path = dir.join(format!("{}.json", session_id));
-    let json = std::fs::read_to_string(&path).ok()?;
-    match serde_json::from_str(&json) {
-        Ok(data) => Some(data),
-        Err(e) => {
-            log::warn!("replay_store: parse error for {session_id}: {e}");
-            None
+    match crate::stats_db::get_replay_data(app, session_id) {
+        Ok(Some(replay)) => {
+            repair_run_capture_if_needed(app, session_id, &replay);
+            Some(replay)
+        }
+        Ok(None) => import_legacy_replay(app, session_id),
+        Err(error) => {
+            log::warn!(
+                "replay_store: could not load sqlite replay payload for {}: {error}",
+                session_id
+            );
+            import_legacy_replay(app, session_id)
         }
     }
+}
+
+pub fn load_replay_payload(app: &AppHandle, session_id: &str) -> Option<ReplayPayloadData> {
+    load_replay(app, session_id).map(|replay| ReplayPayloadData::from(&replay))
 }
