@@ -224,10 +224,9 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             // Capture smoothness summary BEFORE draining buffers
                             let smoothness = crate::mouse_hook::session_summary();
                             let stats_panel = crate::bridge::take_stats_panel_snapshot();
-                            // Seal session tracking first so no new samples/frames are
-                            // appended while we are draining buffers for persistence.
-                            crate::mouse_hook::stop_session_tracking();
-                            crate::screen_recorder::stop();
+                            // Seal the run through the bridge lifecycle so session-active
+                            // state, mouse metrics, and screen capture stay in sync.
+                            crate::bridge::finalize_session_tracking_from_csv_completion(app);
                             // Drain path + metric + video buffers for replay persistence
                             let raw_positions = crate::mouse_hook::drain_raw_positions();
                             let metric_points = crate::mouse_hook::drain_session_buffer();
