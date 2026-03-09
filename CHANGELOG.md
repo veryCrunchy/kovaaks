@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/veryCrunchy/kovaaks/compare/v1.2.0...v1.2.1) (2026-03-09)
+
+
+### Bug Fixes
+
+* enhance bridge stats flow check logic ([d3e75af](https://github.com/veryCrunchy/kovaaks/commit/d3e75af4a5bca46c0e05f36a66232459edbdfbbc))
+
 ## [1.2.0](https://github.com/veryCrunchy/kovaaks/compare/v1.1.0...v1.2.0) (2026-03-09)
 
 
