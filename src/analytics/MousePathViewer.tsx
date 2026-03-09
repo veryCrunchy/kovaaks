@@ -607,8 +607,8 @@ export function MousePathViewer({
         </h3>
         <p style={{ color: C.textMuted, fontSize: 13 }}>
           {segmentLabel
-            ? "No mouse path samples were recorded inside the selected context window."
-            : "No path data recorded. Mouse tracking requires at least one active session."}
+            ? "No mouse path was recorded in the selected moment."
+            : "No mouse path was recorded for this run."}
         </p>
       </div>
     );
