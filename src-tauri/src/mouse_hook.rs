@@ -422,6 +422,32 @@ fn capture_matches_run(
     }
 }
 
+fn pause_contains_abs_ms(
+    pause_windows: &[crate::bridge::BridgeRunPauseWindow],
+    abs_ms: u64,
+) -> bool {
+    pause_windows
+        .iter()
+        .any(|window| abs_ms >= window.started_at_unix_ms && abs_ms < window.ended_at_unix_ms)
+}
+
+fn paused_duration_before_abs_ms(
+    pause_windows: &[crate::bridge::BridgeRunPauseWindow],
+    abs_ms: u64,
+) -> u64 {
+    pause_windows
+        .iter()
+        .map(|window| {
+            if abs_ms <= window.started_at_unix_ms {
+                0
+            } else {
+                abs_ms.min(window.ended_at_unix_ms)
+                    .saturating_sub(window.started_at_unix_ms)
+            }
+        })
+        .sum()
+}
+
 fn merge_replay_captures(
     mut captures: Vec<CompletedReplayCapture>,
     snapshot: &crate::bridge::BridgeRunSnapshot,
@@ -440,19 +466,40 @@ fn merge_replay_captures(
     let mut metrics = Vec::new();
 
     for capture in captures {
-        let offset_ms = capture
-            .started_at_unix_ms
-            .map(|start_ms| start_ms.saturating_sub(base_start_ms))
-            .unwrap_or(0);
-
-        positions.extend(capture.positions.into_iter().map(|mut point| {
-            point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
-            point
-        }));
-        metrics.extend(capture.metrics.into_iter().map(|mut point| {
-            point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
-            point
-        }));
+        if let Some(capture_start_ms) = capture.started_at_unix_ms {
+            positions.extend(capture.positions.into_iter().filter_map(|mut point| {
+                let abs_ms = capture_start_ms.saturating_add(point.timestamp_ms);
+                if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
+                    return None;
+                }
+                let paused_before = paused_duration_before_abs_ms(&snapshot.pause_windows, abs_ms);
+                point.timestamp_ms = abs_ms
+                    .saturating_sub(base_start_ms)
+                    .saturating_sub(paused_before);
+                Some(point)
+            }));
+            metrics.extend(capture.metrics.into_iter().filter_map(|mut point| {
+                let abs_ms = capture_start_ms.saturating_add(point.timestamp_ms);
+                if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
+                    return None;
+                }
+                let paused_before = paused_duration_before_abs_ms(&snapshot.pause_windows, abs_ms);
+                point.timestamp_ms = abs_ms
+                    .saturating_sub(base_start_ms)
+                    .saturating_sub(paused_before);
+                Some(point)
+            }));
+        } else {
+            let offset_ms = 0;
+            positions.extend(capture.positions.into_iter().map(|mut point| {
+                point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
+                point
+            }));
+            metrics.extend(capture.metrics.into_iter().map(|mut point| {
+                point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
+                point
+            }));
+        }
     }
 
     positions.sort_by_key(|point| point.timestamp_ms);

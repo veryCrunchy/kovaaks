@@ -1981,6 +1981,7 @@ pub fn get_run_summary(
                     challenge_canceled_events: row.get::<_, i64>(28)? as u32,
                 },
                 timeline: vec![],
+                pause_windows: vec![],
                 shot_telemetry: vec![],
                 tick_stream_v1: None,
             })
@@ -2410,6 +2411,7 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
                     ended_at_unix_ms: None,
                     event_counts: crate::bridge::BridgeRunEventCounts::default(),
                     timeline: vec![],
+                    pause_windows: vec![],
                     shot_telemetry: vec![],
                     tick_stream_v1: None,
                 }),

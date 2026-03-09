@@ -368,6 +368,32 @@ fn frame_capture_matches_run(
     }
 }
 
+fn pause_contains_abs_ms(
+    pause_windows: &[crate::bridge::BridgeRunPauseWindow],
+    abs_ms: u64,
+) -> bool {
+    pause_windows
+        .iter()
+        .any(|window| abs_ms >= window.started_at_unix_ms && abs_ms < window.ended_at_unix_ms)
+}
+
+fn paused_duration_before_abs_ms(
+    pause_windows: &[crate::bridge::BridgeRunPauseWindow],
+    abs_ms: u64,
+) -> u64 {
+    pause_windows
+        .iter()
+        .map(|window| {
+            if abs_ms <= window.started_at_unix_ms {
+                0
+            } else {
+                abs_ms.min(window.ended_at_unix_ms)
+                    .saturating_sub(window.started_at_unix_ms)
+            }
+        })
+        .sum()
+}
+
 fn merge_frame_captures(
     mut captures: Vec<CompletedFrameCapture>,
     snapshot: &crate::bridge::BridgeRunSnapshot,
@@ -384,14 +410,21 @@ fn merge_frame_captures(
 
     let mut frames = Vec::new();
     for capture in captures {
-        let offset_ms = capture
-            .started_at_unix_ms
-            .map(|start_ms| start_ms.saturating_sub(base_start_ms))
-            .unwrap_or(0);
-        frames.extend(capture.frames.into_iter().map(|mut frame| {
-            frame.timestamp_ms = frame.timestamp_ms.saturating_add(offset_ms);
-            frame
-        }));
+        if let Some(capture_start_ms) = capture.started_at_unix_ms {
+            frames.extend(capture.frames.into_iter().filter_map(|mut frame| {
+                let abs_ms = capture_start_ms.saturating_add(frame.timestamp_ms);
+                if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
+                    return None;
+                }
+                let paused_before = paused_duration_before_abs_ms(&snapshot.pause_windows, abs_ms);
+                frame.timestamp_ms = abs_ms
+                    .saturating_sub(base_start_ms)
+                    .saturating_sub(paused_before);
+                Some(frame)
+            }));
+        } else {
+            frames.extend(capture.frames);
+        }
     }
 
     frames.sort_by_key(|frame| frame.timestamp_ms);

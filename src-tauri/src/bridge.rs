@@ -175,6 +175,12 @@ pub struct BridgeRunTimelinePoint {
     pub shots_hit: Option<f64>,
 }
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct BridgeRunPauseWindow {
+    pub started_at_unix_ms: u64,
+    pub ended_at_unix_ms: u64,
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeRunSnapshot {
     pub duration_secs: Option<f64>,
@@ -205,6 +211,8 @@ pub struct BridgeRunSnapshot {
     pub ended_at_unix_ms: Option<u64>,
     pub event_counts: BridgeRunEventCounts,
     pub timeline: Vec<BridgeRunTimelinePoint>,
+    #[serde(default)]
+    pub pause_windows: Vec<BridgeRunPauseWindow>,
     #[serde(default)]
     pub shot_telemetry: Vec<BridgeShotTelemetryEvent>,
     #[serde(default)]
@@ -1028,6 +1036,8 @@ mod imp {
         aggregated_shot_batches_seen: bool,
         event_counts: super::BridgeRunEventCounts,
         timeline: Vec<super::BridgeRunTimelinePoint>,
+        pause_windows: Vec<super::BridgeRunPauseWindow>,
+        active_pause_started_at_unix_ms: Option<u64>,
         shot_telemetry: Vec<super::BridgeShotTelemetryEvent>,
         shot_telemetry_summary: ShotTelemetrySummary,
         tick_stream_v1: super::BridgeTickStreamV1,
@@ -1143,9 +1153,53 @@ mod imp {
         state.aggregated_shot_batches_seen = false;
         state.event_counts = super::BridgeRunEventCounts::default();
         state.timeline.clear();
+        state.pause_windows.clear();
+        state.active_pause_started_at_unix_ms = None;
         state.shot_telemetry.clear();
         state.shot_telemetry_summary = ShotTelemetrySummary::default();
         state.tick_stream_v1 = super::BridgeTickStreamV1::default();
+    }
+
+    fn observe_pause_state_locked(state: &mut RunCaptureState, paused: bool) {
+        if state.started_at.is_none() {
+            return;
+        }
+
+        let now_ms = unix_now_ms();
+        if paused {
+            if state.active_pause_started_at_unix_ms.is_none() {
+                state.active_pause_started_at_unix_ms = Some(now_ms);
+            }
+            return;
+        }
+
+        if let Some(started_at_unix_ms) = state.active_pause_started_at_unix_ms.take() {
+            if now_ms > started_at_unix_ms {
+                state.pause_windows.push(super::BridgeRunPauseWindow {
+                    started_at_unix_ms,
+                    ended_at_unix_ms: now_ms,
+                });
+            }
+        }
+    }
+
+    fn finalize_open_pause_locked(state: &mut RunCaptureState, ended_at_unix_ms: u64) {
+        if let Some(started_at_unix_ms) = state.active_pause_started_at_unix_ms.take() {
+            if ended_at_unix_ms > started_at_unix_ms {
+                state.pause_windows.push(super::BridgeRunPauseWindow {
+                    started_at_unix_ms,
+                    ended_at_unix_ms,
+                });
+            }
+        }
+    }
+
+    fn total_paused_wall_ms_locked(state: &RunCaptureState) -> u64 {
+        state
+            .pause_windows
+            .iter()
+            .map(|window| window.ended_at_unix_ms.saturating_sub(window.started_at_unix_ms))
+            .sum()
     }
 
     fn align_run_capture_start_with_hint_locked(
@@ -1299,6 +1353,10 @@ mod imp {
         let Ok(mut state) = run_capture_state().lock() else {
             return;
         };
+
+        if let Some(paused) = stats.scenario_is_paused {
+            observe_pause_state_locked(&mut state, paused);
+        }
 
         let challenge_secs = finite_non_negative(stats.challenge_seconds_total);
         let session_secs = finite_non_negative(stats.session_time_secs);
@@ -1527,6 +1585,9 @@ mod imp {
                     state.metrics.score_total_derived = Some(value);
                     should_record = true;
                 }
+                "pull_scenario_is_paused" => {
+                    observe_pause_state_locked(&mut state, value >= 0.5);
+                }
                 _ => {}
             }
         }
@@ -1595,6 +1656,9 @@ mod imp {
             if v.is_finite() && v >= 0.0 && !state.duration_from_challenge_secs {
                 state.metrics.duration_secs = Some(v);
             }
+        }
+        if let Some(paused) = scalars_obj.get("scenario_is_paused").and_then(replay_json_number) {
+            observe_pause_state_locked(state, paused >= 0.5);
         }
         state.metrics.duration_secs
     }
@@ -1906,11 +1970,14 @@ mod imp {
         if let Ok(mut state) = run_capture_state().lock() {
             if state.started_at.is_some() {
                 let now_ms = unix_now_ms();
+                finalize_open_pause_locked(&mut state, now_ms);
                 let effective_hint = finite_non_negative(time_hint_secs)
                     .or_else(|| run_capture_duration_hint_locked(&state));
                 let ended_ms = match (state.started_at_unix_ms, effective_hint) {
                     (Some(start_ms), Some(hint_secs)) => {
-                        start_ms.saturating_add((hint_secs * 1000.0).round() as u64)
+                        start_ms
+                            .saturating_add((hint_secs * 1000.0).round() as u64)
+                            .saturating_add(total_paused_wall_ms_locked(&state))
                     }
                     _ => now_ms,
                 };
@@ -2054,6 +2121,8 @@ mod imp {
 
         let duration_secs = finite_non_negative(state.metrics.duration_secs)
             .or_else(|| state.timeline.last().map(|p| p.t_sec as f64));
+        let snapshot_end_ms = state.ended_at_unix_ms.or(Some(unix_now_ms())).unwrap_or(0);
+        finalize_open_pause_locked(&mut state, snapshot_end_ms);
 
         let derived_avg_shots_to_hit = match (state.metrics.shots_fired, state.metrics.shots_hit) {
             (Some(shots_fired), Some(shots_hit))
@@ -2127,9 +2196,10 @@ mod imp {
             avg_shots_to_hit,
             corrective_shot_ratio,
             started_at_unix_ms: state.started_at_unix_ms,
-            ended_at_unix_ms: state.ended_at_unix_ms.or(Some(unix_now_ms())),
+            ended_at_unix_ms: Some(snapshot_end_ms),
             event_counts: state.event_counts.clone(),
             timeline: state.timeline.clone(),
+            pause_windows: state.pause_windows.clone(),
             shot_telemetry: state.shot_telemetry.clone(),
             tick_stream_v1: if state.tick_stream_v1.context.is_some()
                 || !state.tick_stream_v1.keyframes.is_empty()
