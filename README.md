@@ -1,106 +1,122 @@
 # AimMod
 
-Your personal KovaaK's coach — AimMod for KovaaK's Aim Trainer.
+AimMod is a live overlay, replay, and coaching suite for KovaaK's Aim Trainer.
 
-> AimMod runtime is injected when AimMod starts
+It is built around two parts:
+- a live in-session HUD while you play
+- a full post-session stats window for replay review, coaching, and scenario analysis
 
----
+AimMod runs as a Windows desktop app and syncs its runtime into KovaaK's while the app is open, so your overlay, replay data, and session analysis stay tied to the same run.
 
 ## Screenshots
 
-**Smoothness HUD — live score, rating, and mouse metrics**
+**Live challenge HUD**
 
-![Smoothness HUD](public/70t7eyHAaC.png)
+![Live stat HUD](public/NzXmg9xdc9.png)
 
-**Post-session popup — final score, accuracy, and smoothness summary**
+**Scenario summary page**
 
-![Post-session overview](public/tdycIGunQH.png)
+![Scenario summary](public/cD4yvwyuz8.png)
 
-**Session stats — overview tab (score over time, recent runs)**
+**Scenario coaching page**
 
-![Stats overview](public/lmRETnbKyZ.png)
+![Scenario coaching](public/tvxcCZoOfC.png)
 
-**Session stats — mouse tab (smoothness trend, error metrics, insights)**
+**Focused replay moment**
 
-![Stats mouse tab](public/Jnw9kPg9WJ.png)
+![Focused moment detail](public/uSIwrmIcw1.png)
 
-**Insights panel — actionable coaching tips based on your mouse data**
+**Full-run replay review**
 
-![Insights](public/rkyCMr1JbT.png)
+![Replay review](public/WuKkgKOWX6.png)
 
-**Region picker — each stat field needs its own region drawn around it in KovaaK's**
+## What AimMod Does
 
-![Region picker setup](public/3lUYSQVhtw.png)
+### In-game overlay
 
----
+- Live challenge HUDs for score, timing, pace, accuracy, and scenario state
+- Smoothness and mouse-control feedback during runs
+- Coaching toasts and a post-session overview
+- Drag-and-scale HUD layout mode with saved positions
 
-## Demo
+### Session stats
 
-<!-- demo gif / video here -->
+- Global overview of all your recent practice
+- Per-scenario pages for summary, mechanics, coaching, replay, and leaderboard views
+- Practice profile and scenario comparison tools
+- SQL-backed session history and replay persistence
 
----
+### Replay analysis
 
-## Features
+- Mouse path replay for the full run or selected moments
+- Saved focus moments, quick notes, and replay navigation
+- Timeline-by-second review
+- Shot detail context for replay segments
+- Video replay capture alongside the mouse path
 
-- **VS Mode** — live score bar vs a friend's personal best fetched from the KovaaK's API. Your score is projected against their pace in real time; final delta shown after the session
-- **Stats HUD** — per-field OCR reads kills, accuracy, and other stats directly from regions you define around the in-game UI
-- **Smoothness HUD** — real-time mouse smoothness score (0–100), jitter, and overshoot from a global OS mouse hook; DPI-normalised so it's comparable across sensitivity setups
-- **Live coaching tips** — auto-dismissing toast notifications during sessions based on your mouse metrics and stats; three verbosity levels
-- **Post-session overview** — auto-detected from KovaaK's results CSV; shows final score, accuracy, and smoothness summary
-- **Smoothness report** — full post-session graphs: velocity curve, jitter histogram, overshoot rate, and actionable advice
-- **Friend manager** — search and add friends by KovaaK's username; profiles and most-played scenarios fetched from the KovaaK's public API
-- **Layout mode** — press F10 to drag and scale every HUD independently; positions and scales persist across restarts
-- **Per-HUD visibility** — toggle VS Mode, Smoothness, Stats Panel, Coaching Tips, and Post-Session overview individually
-- **Multi-monitor** — pick which monitor AimMod covers
+### Coaching and profiling
 
----
+- Aim fingerprint and aim-style summaries
+- Warm-up and practice-pattern insights
+- Scenario-specific coaching cards
+- Trend, floor, peak-zone, and consistency views
 
-## Installation
+### Integration
 
-Download the latest installer from the [Releases](https://github.com/veryCrunchy/kovaaks/releases/latest) page and run it.
+- Discord Rich Presence
+- UE4SS-based runtime bridge into KovaaK's
+- Automatic stats import from KovaaK's run results
 
-**Requirements:** Windows 10/11 · KovaaK's installed via Steam
+## Quick Start
 
----
+1. Download the latest build from [Releases](https://github.com/veryCrunchy/kovaaks/releases/latest).
+2. Launch AimMod.
+3. Start KovaaK's.
+4. Open settings if you want to choose which HUDs are visible or reposition them.
+5. Play a scenario.
+6. Open the stats window to review the run, replay key moments, and inspect scenario-specific coaching.
 
-## Quick start
-
-1. Install and launch the app
-2. Right-click the system tray icon → **Open Settings**
-3. Set your **KovaaK's username** and pick your **AimMod Display**
-4. Click **Pick Region** to draw a box around the live score number in KovaaK's
-5. Optionally add a friend under **Friends** and set them as your battle opponent
-6. Play — AimMod is fully click-through
-
-**Hotkeys**
+### Default hotkeys
 
 | Key | Action |
-|-----|--------|
-| F8 | Toggle Settings panel |
-| F9 | Jump to region picker |
-| F10 | Toggle HUD layout mode (drag / resize) |
+| --- | --- |
+| `F8` | Open settings |
+| `F10` | Toggle HUD layout mode |
 
----
+## Requirements
 
-## Building from source
+- Windows 10 or Windows 11
+- KovaaK's Aim Trainer (Steam)
+- AimMod running while you play if you want live overlay, replay capture, runtime bridge data, and automatic session analysis
+
+## Build From Source
+
+### Frontend
 
 ```bash
-# Prerequisites: Rust stable, Node.js ≥ 18, pnpm
 pnpm install
-pnpm tauri build
+pnpm run build:frontend
 ```
 
-Cross-compiling from Linux/WSL2 to Windows (uses cargo-xwin):
+### Windows app
 
 ```bash
-pnpm build:win
+pnpm run build:win:dev
 ```
 
-## One-command dev pipeline
+Release build:
 
-Target is always **Windows x64** (`x86_64-pc-windows-msvc`), with host support on Windows or WSL/Linux.
+```bash
+pnpm run build:win
+```
 
-Full setup + build + AimMod runtime payload staging can be run with:
+## One-command pipeline
+
+The repo includes a full pipeline that builds:
+- `ue4ss-rust-core`
+- `ue4ss-mod`
+- the staged UE4SS runtime payload
+- the Tauri Windows app
 
 Windows / PowerShell:
 
@@ -108,105 +124,27 @@ Windows / PowerShell:
 pnpm run pipeline:win
 ```
 
-Linux / WSL:
-
-```bash
-pnpm run pipeline:wsl
-```
-
-WSL/Linux release attempt:
-
-```bash
-pnpm run pipeline:wsl:release
-```
-
-The pipeline will:
-
-1. Ensure Rust target/tooling (`cargo-xwin`) is installed
-2. Build `ue4ss-rust-core` (`kovaaks_rust_core.dll`)
-3. Build `ue4ss-mod` (`main.dll`)
-4. Use curated runtime from `external/ue4ss-runtime/current` if present, otherwise extract ZIPs from `external/ue4ss-runtime` (or use `--runtime-dir`)
-5. Stage payload into `src-tauri/ue4ss`
-6. Build the Tauri Windows app
-
-Default staging uses a **minimal AimMod runtime profile**:
-- core runtime binaries + managed settings
-- generic template/signature folders (`VTableLayoutTemplates`, `MemberVarLayoutTemplates`, signatures)
-- only the AimMod runtime package (`Mods/KovaaksBridgeMod`) + `kovaaks_rust_core.dll`
-- generated runtime manifest enabling only `KovaaksBridgeMod`
-- production settings template (`GraphicsAPI=dx11`, `EngineVersionOverride=4.27`, debug tooling off)
-
-Optional dev build variants:
+Windows dev stripped build:
 
 ```powershell
-pnpm run pipeline:win:dev
+pnpm run pipeline:win:dev:stripped
 ```
+
+WSL / Linux dev stripped build:
 
 ```bash
-pnpm run pipeline:wsl:dev
+pnpm run pipeline:wsl:dev:stripped
 ```
 
-Notes:
-
-- `pipeline:wsl` defaults to a Windows **dev** app build (`--no-bundle`) for highest reliability on Linux hosts.
-- On WSL, only the native C++ runtime compile is delegated to Windows MSVC (`powershell.exe`); Rust/payload/orchestration stay in Bash.
-- Runtime staging profile can be switched with `--runtime-profile full` (default is `minimal`).
-- Curated runtime location can be overridden with `--runtime-local-dir`.
-- Dev pipeline scripts keep the native runtime build in `Release` by default (to avoid Debug CRT dependencies in-game). Override with `--mod-configuration Debug` if needed.
-- On non-WSL Linux, missing `mingw-w64` is installed automatically by the pipeline.
-- WSL pipeline auto-generates the native import library from runtime exports (from `external/ue4ss-runtime`) so native runtime linking does not require rebuilding external runtime sources.
-- If you explicitly want MinGW native runtime compilation on WSL, use `scripts/dev-pipeline.sh --force-mingw-mod-build` (not recommended for SDK compatibility).
-- `fmt` headers are auto-resolved in CMake (uses vendored runtime SDK copy if present, else fetches upstream headers).
-- `pipeline:win` builds the full Windows release installer path.
-- SDK path is auto-detected from `external/` (prefers `external/ue4ss-cppsdk`, then template SDK fallbacks).
-- If the template SDK checkout is present but missing nested dependencies, the pipeline attempts `git submodule update --init --recursive` automatically.
-- Native C++ runtime builds require private Unreal headers (`UEPseudo`) via Epic-linked GitHub access.
-- In GitHub Actions, set secret `UE4SS_GITHUB_TOKEN` (PAT from an Epic-linked GitHub account with read access to `Re-UE4SS/UEPseudo`).
-- You can still override the SDK path manually via environment variable or with `--ue4ss-sdk-dir` on the script.
-- Incremental cache is enabled by default (`.cache/pipeline`) and skips unchanged steps (`pnpm install`, rust core build, native runtime build, staging, app build).
-- Use `--no-cache` to force all steps, or `--clear-cache` to wipe cache keys.
-
-| Command | Description |
-|---------|-------------|
-| `pnpm tauri dev` | Dev server + Rust hot-reload (Linux/WSL2, mock OCR) |
-| `pnpm build:win:dev` | Fast dev build for Windows (no LTO, incremental) |
-| `pnpm build:win` | Full release build for Windows (LTO, stripped) |
-| `pnpm check` | Fast Rust type-check on Linux host |
-
----
-
-## AimMod Runtime Payload Staging
-
-Before building a release installer, stage the runtime payload into `src-tauri/ue4ss`:
-
-PowerShell (Windows):
-
-```powershell
-pwsh ./scripts/sync-ue4ss-payload.ps1 `
-  -RuntimeDir "<extracted-ue4ss-runtime-dir>" `
-  -ModMainDll "<path-to-main.dll>" `
-  -RustCoreDll "<path-to-kovaaks_rust_core.dll>" `
-  -RuntimeProfile minimal
-```
-
-Linux / WSL (Bash):
+WSL / Linux release stripped build:
 
 ```bash
-./scripts/sync-ue4ss-payload.sh \
-  --runtime-dir "<extracted-ue4ss-runtime-dir>" \
-  --mod-main-dll "<path-to-main.dll>" \
-  --rust-core-dll "<path-to-kovaaks_rust_core.dll>" \
-  --runtime-profile minimal
+pnpm run pipeline:wsl:release:stripped
 ```
 
----
+## Repo Notes
 
-## Runtime model
-
-On startup, AimMod:
-
-- Syncs bundled runtime payload files into KovaaK's `Binaries/Win64`
-- Injects the runtime so `KovaaksBridgeMod` loads
-- Streams runtime events over a named pipe to the AimMod backend
-
-If AimMod is not running, runtime hooks are not injected/loaded.
+- The overlay frontend lives in `src/`
+- The Tauri backend lives in `src-tauri/`
+- The UE4SS mod lives in `ue4ss-mod/`
+- Runtime payload staging scripts live in `scripts/`
