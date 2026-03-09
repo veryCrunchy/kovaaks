@@ -2571,6 +2571,21 @@ private:
         (void)replay_playback_tick_safe(now);
 
         {
+            const bool replay_effective_active_now =
+                current_is_in_challenge > 0
+                || current_is_in_scenario > 0
+                || current_challenge_tick_count > 0
+                || current_shots_fired > 0
+                || current_shots_hit > 0
+                || current_kills_total > 0
+                || (std::isfinite(current_seconds) && current_seconds > 0.05f)
+                || (std::isfinite(current_time_remaining) && current_time_remaining > 0.05f)
+                || (std::isfinite(current_score_total) && current_score_total > 0.05f)
+                || (std::isfinite(current_score_total_derived) && current_score_total_derived > 0.05f);
+            const bool replay_paused_runtime_context =
+                current_scenario_is_paused == 1
+                || last_scenario_is_paused_ == 1
+                || s_last_pull_scenario_is_paused == 1;
             kmod_replay::ReplayTickInput replay_input{};
             replay_input.now_ms = now;
             replay_input.bridge_connected = bridge_connected;
@@ -2596,7 +2611,7 @@ private:
             replay_input.scalars.score_source = std::string{};
 
             const bool should_emit_live_replay_tick =
-                effective_active_now || (paused_runtime_context && lifecycle_active_);
+                replay_effective_active_now || (replay_paused_runtime_context && lifecycle_active_);
             if (!kmod_replay::replay_ingame_playback_is_active() && should_emit_live_replay_tick) {
                 (void)replay_tick_safe(now, replay_input);
             }
