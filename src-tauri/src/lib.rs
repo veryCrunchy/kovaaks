@@ -286,10 +286,10 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
 
 /// Reposition the overlay window to cover the monitor at `index`.
 ///
-/// Fullscreen bypasses DWM's invisible resize borders entirely, which
-/// eliminates the pixel gap on the left side of borderless windows.
-/// We exit fullscreen first so the OS accepts the new position, then
-/// re-enter fullscreen on the target monitor.
+/// Use a normal borderless window sized to the monitor instead of OS fullscreen.
+/// Transparent fullscreen webviews are much more likely to force desktop
+/// composition over the game surface, which can add present/input latency when
+/// the overlay sits on the same monitor as KovaaK's.
 pub fn apply_monitor(app: &AppHandle, index: usize) {
     let Some(win) = app.get_webview_window("overlay") else {
         return;
@@ -302,13 +302,15 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
     let size = m.size();
     let sf = m.scale_factor();
     let logical_pos = pos.to_logical::<f64>(sf);
+    let logical_size = size.to_logical::<f64>(sf);
 
     let _ = win.set_fullscreen(false);
     let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
-    let _ = win.set_fullscreen(true);
+    let _ = win.set_size(tauri::LogicalSize::new(logical_size.width, logical_size.height));
 
-    // Keep the screen recorder capture rect in sync with whichever monitor the
-    // overlay is on.  Uses physical pixel coordinates to match GDI capture.
+    // Notify the screen recorder that monitor placement changed so it can reset
+    // any cached crop logging. Actual capture bounds are derived from the live
+    // KovaaK client rect, not the overlay monitor.
     let monitor_rect = settings::RegionRect {
         x: pos.x,
         y: pos.y,
