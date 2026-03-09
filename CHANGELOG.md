@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.1](https://github.com/veryCrunchy/kovaaks/compare/v1.0.0...v1.0.1) (2026-03-09)
+
+
+### Bug Fixes
+
+* adjust overlay window to use fixed size instead of fullscreen ([fe4d90e](https://github.com/veryCrunchy/kovaaks/commit/fe4d90e08b2b7b76031930f0d6b71d2dca9d003f))
+* remove backdrop filter from BridgeStateDebugHUD and LiveFeedbackToast styles ([4965254](https://github.com/veryCrunchy/kovaaks/commit/4965254d163c9eec1d9d9101538f5e2fa70e990b))
+
 ## [1.0.0](https://github.com/veryCrunchy/kovaaks/compare/v0.8.1...v1.0.0) (2026-03-09)
 
 
