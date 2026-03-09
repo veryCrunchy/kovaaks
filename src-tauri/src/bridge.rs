@@ -4184,10 +4184,12 @@ mod imp {
             .join("dlls")
             .join("main.dll");
         let payload_rust_core = payload_root.join("kovaaks_rust_core.dll");
+        let mut native_runtime_restart_required = false;
         if payload_mod_dll.is_file() {
             match files_identical(&payload_mod_dll, &managed_mod_dll) {
                 Ok(true) => emit_bridge_log_line("[bridge] runtime DLL is up to date"),
                 Ok(false) => {
+                    native_runtime_restart_required = true;
                     log::warn!(
                         "bridge: runtime DLL differs from staged payload (likely locked while running): {}",
                         managed_mod_dll.display()
@@ -4206,6 +4208,7 @@ mod imp {
             match files_identical(&payload_rust_core, &managed_rust_core) {
                 Ok(true) => emit_bridge_log_line("[bridge] rust core dll is up to date"),
                 Ok(false) => {
+                    native_runtime_restart_required = true;
                     log::warn!(
                         "bridge: rust core DLL differs from staged payload (likely locked while running): {}",
                         managed_rust_core.display()
@@ -4221,7 +4224,8 @@ mod imp {
             }
         }
         let flags_after_sync = read_runtime_flags_for_dir(&game_bin_dir);
-        if flags_after_sync != flags_before_sync {
+        let runtime_flags_restart_required = flags_after_sync != flags_before_sync;
+        if runtime_flags_restart_required {
             log::warn!(
                 "bridge: runtime flags changed by sync before={:?} after={:?}",
                 flags_before_sync,
@@ -4272,7 +4276,10 @@ mod imp {
                 "bridge: UE4SS already loaded in pid {pid}; payload synced. \
                  Runtime/settings changes require game restart."
             );
-            if payload_files_written > 0 {
+            if payload_files_written > 0
+                && !native_runtime_restart_required
+                && !runtime_flags_restart_required
+            {
                 match trigger_hot_reload() {
                     Ok(()) => {
                         log::info!(
@@ -4284,6 +4291,10 @@ mod imp {
                         log::warn!("bridge: UE4SS hot reload failed after payload sync: {e}");
                     }
                 }
+            } else if payload_files_written > 0 {
+                log::warn!(
+                    "bridge: skipping UE4SS hot reload because native/runtime changes are not safely reloadable; restart KovaaK to apply"
+                );
             } else {
                 log::info!(
                     "bridge: payload already up to date for pid {pid}; skipping UE4SS hot reload"
