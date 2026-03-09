@@ -96,3 +96,10 @@ export interface LiveFeedback {
   /** Which metric key triggered this. */
   metric: string;
 }
+
+export interface OverlayRuntimeNotice {
+  visible: boolean;
+  kind: "positive" | "tip" | "warning" | string;
+  title: string;
+  message: string;
+}

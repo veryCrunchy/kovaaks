@@ -14,8 +14,11 @@ const StatsWindowEmbed = lazy(() =>
 type Tab = "general" | "friends" | "stats";
 
 interface SettingsProps {
-  onClose: () => void;
-  onLayoutHUDs: () => void;
+  onClose?: () => void;
+  onLayoutHUDs?: () => void;
+  initialTab?: Tab;
+  hideStatsTab?: boolean;
+  embeddedInStats?: boolean;
 }
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
@@ -30,11 +33,23 @@ const LOADING_PLACEHOLDER = (
   </div>
 );
 
-export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
+export function Settings({
+  onClose,
+  onLayoutHUDs,
+  initialTab = "general",
+  hideStatsTab = false,
+  embeddedInStats = false,
+}: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loadedSettings, setLoadedSettings] = useState<AppSettings | null>(null);
   const [appVersionLabel, setAppVersionLabel] = useState("");
-  const [activeTab, setActiveTab] = useState<Tab>("general");
+  const availableTabs = useMemo(
+    () => TABS.filter((tab) => !(hideStatsTab && tab.id === "stats")),
+    [hideStatsTab],
+  );
+  const [activeTab, setActiveTab] = useState<Tab>(() =>
+    hideStatsTab && initialTab === "stats" ? "general" : initialTab,
+  );
   const [saving, setSaving]       = useState(false);
   const [saved, setSaved]         = useState(false);
   const [error, setError]         = useState<string | null>(null);
@@ -145,21 +160,23 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
               <span style={{ fontSize: 9, letterSpacing: "0.08em", color: C.textDisabled }}>
                 {`AimMod • ${appVersionLabel}`}
               </span>
-            )}
+              )}
           </div>
-          <button
-            onClick={onClose}
-            title="Close (F8)"
-            className="am-btn am-btn-ghost"
-            style={{ width: 22, height: 22, padding: 0, borderRadius: 6, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center" }}
-          >
-            ×
-          </button>
+          {onClose && (
+            <button
+              onClick={onClose}
+              title="Close (F8)"
+              className="am-btn am-btn-ghost"
+              style={{ width: 22, height: 22, padding: 0, borderRadius: 6, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center" }}
+            >
+              ×
+            </button>
+          )}
         </div>
 
         {/* Navigation tabs */}
         <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-          {TABS.map((tab) => (
+          {availableTabs.map((tab) => (
             <button
               key={tab.id}
               onClick={() => setActiveTab(tab.id)}
@@ -172,69 +189,75 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
         </div>
 
         {/* Tools section */}
-        <div style={{ marginTop: 12 }}>
-          <div
-            style={{
-              fontSize:      9,
-              fontWeight:    700,
-              letterSpacing: "0.12em",
-              color:         C.textDisabled,
-              textTransform: "uppercase",
-              padding:       "0 10px 6px",
-            }}
-          >
-            Tools
-          </div>
-          {[
-            { label: "Session Stats", cmd: "open_stats_window" },
-            { label: "View Logs",     cmd: "open_logs_window" },
-          ].map(({ label, cmd }) => (
-            <button
-              key={cmd}
-              onClick={() => invoke(cmd).catch(console.error)}
-              className="am-nav-item"
+        {!embeddedInStats && (
+          <div style={{ marginTop: 12 }}>
+            <div
+              style={{
+                fontSize:      9,
+                fontWeight:    700,
+                letterSpacing: "0.12em",
+                color:         C.textDisabled,
+                textTransform: "uppercase",
+                padding:       "0 10px 6px",
+              }}
             >
-              <span style={{ fontSize: 10, opacity: 0.5 }}>↗</span>
-              {label}
-            </button>
-          ))}
-        </div>
+              Tools
+            </div>
+            {[
+              { label: "Session Stats", cmd: "open_stats_window" },
+              { label: "View Logs",     cmd: "open_logs_window" },
+            ].map(({ label, cmd }) => (
+              <button
+                key={cmd}
+                onClick={() => invoke(cmd).catch(console.error)}
+                className="am-nav-item"
+              >
+                <span style={{ fontSize: 10, opacity: 0.5 }}>↗</span>
+                {label}
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* Bottom actions */}
         <div
           className="flex flex-col gap-1.5 mt-auto pt-3"
-          style={{ borderTop: `1px solid ${C.borderSub}` }}
+          style={{ borderTop: embeddedInStats ? "none" : `1px solid ${C.borderSub}` }}
         >
           {/* Hotkey hints */}
-          <div
-            className="flex flex-col gap-1 px-2 pb-1"
-            style={{ color: C.textDisabled }}
-          >
-            {[
-              { key: "F8",  label: "Toggle settings" },
-              { key: "F10", label: "Reposition HUDs" },
-            ].map(({ key, label }) => (
-              <div key={key} className="flex items-center justify-between text-xs">
-                <span style={{ fontSize: 9, color: C.textFaint }}>{label}</span>
-                <span
-                  style={{
-                    background:    "rgba(255,255,255,0.06)",
-                    border:        `1px solid ${C.border}`,
-                    borderRadius:  3,
-                    padding:       "1px 5px",
-                    fontSize:      9,
-                    color:         C.textDisabled,
-                  }}
-                >
-                  {key}
-                </span>
-              </div>
-            ))}
-          </div>
+          {!embeddedInStats && (
+            <div
+              className="flex flex-col gap-1 px-2 pb-1"
+              style={{ color: C.textDisabled }}
+            >
+              {[
+                { key: "F8",  label: "Toggle settings" },
+                { key: "F10", label: "Reposition HUDs" },
+              ].map(({ key, label }) => (
+                <div key={key} className="flex items-center justify-between text-xs">
+                  <span style={{ fontSize: 9, color: C.textFaint }}>{label}</span>
+                  <span
+                    style={{
+                      background:    "rgba(255,255,255,0.06)",
+                      border:        `1px solid ${C.border}`,
+                      borderRadius:  3,
+                      padding:       "1px 5px",
+                      fontSize:      9,
+                      color:         C.textDisabled,
+                    }}
+                  >
+                    {key}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
 
-          <Btn variant="accent" size="xs" onClick={onLayoutHUDs} className="w-full justify-start">
-            ✥ Reposition HUDs
-          </Btn>
+          {onLayoutHUDs && (
+            <Btn variant="accent" size="xs" onClick={onLayoutHUDs} className="w-full justify-start">
+              ✥ Reposition HUDs
+            </Btn>
+          )}
 
           {/* Updates */}
           <Btn
@@ -256,9 +279,11 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
             {updateStatus.state === "error"       && "Update failed"}
           </Btn>
 
-          <Btn variant="danger" size="xs" onClick={() => invoke("quit_app")} className="w-full justify-start">
-            ✕ Quit App
-          </Btn>
+          {!embeddedInStats && (
+            <Btn variant="danger" size="xs" onClick={() => invoke("quit_app")} className="w-full justify-start">
+              ✕ Quit App
+            </Btn>
+          )}
         </div>
       </div>
 

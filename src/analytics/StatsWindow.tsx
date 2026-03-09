@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
@@ -36,6 +36,10 @@ import {
 import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
 import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
 import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
+
+const SettingsTab = lazy(() =>
+  import("../settings/Settings").then((m) => ({ default: m.Settings })),
+);
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -5886,7 +5890,7 @@ function ScenarioDetails({
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-type RootMode = "sessions" | "leaderboards" | "debug";
+type RootMode = "sessions" | "leaderboards" | "settings" | "debug";
 type ScenarioSortMode = "recent" | "plays" | "type";
 type SessionsPaneMode = "overview" | "scenario";
 
@@ -5903,8 +5907,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [rootMode, setRootMode] = useState<RootMode>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode);
-    return stored === "leaderboards" || stored === "debug" ? stored : "sessions";
+    return stored === "leaderboards" || stored === "settings" || stored === "debug"
+      ? stored
+      : "sessions";
   });
+  const [isDebugBuild, setIsDebugBuild] = useState(false);
   const [scenarioSort, setScenarioSort] = useState<ScenarioSortMode>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioSort);
     return stored === "plays" || stored === "type" ? stored : "recent";
@@ -6053,6 +6060,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
 
   useEffect(() => {
     loadHistory(false);
+    invoke<boolean>("get_is_debug_build")
+      .then(setIsDebugBuild)
+      .catch(() => setIsDebugBuild(false));
     let lastBridgeRefresh = 0;
     const maybeRefreshHistory = (force = false) => {
       const now = Date.now();
@@ -6139,6 +6149,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       unlistenBridgeMetric.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    if (!isDebugBuild && rootMode === "debug") {
+      setRootMode("sessions");
+    }
+  }, [isDebugBuild, rootMode]);
 
   async function handleClear() {
     if (pendingClear) return;
@@ -6380,7 +6396,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           flexShrink: 0,
         }}
       >
-        {(["sessions", "leaderboards", "debug"] as RootMode[]).map((m) => {
+        {([
+          "sessions",
+          "leaderboards",
+          "settings",
+          ...(isDebugBuild ? ["debug"] : []),
+        ] as RootMode[]).map((m) => {
           const active = rootMode === m;
           return (
             <button
@@ -6401,7 +6422,13 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                 transition: "color 0.15s",
               }}
             >
-              {m === "sessions" ? "Session Stats" : m === "leaderboards" ? "Leaderboards" : "Debug"}
+              {m === "sessions"
+                ? "Session Stats"
+                : m === "leaderboards"
+                  ? "Leaderboards"
+                  : m === "settings"
+                    ? "Settings"
+                    : "Debug"}
             </button>
           );
         })}
@@ -6937,8 +6964,28 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         </div>
       )}
 
+      {rootMode === "settings" && (
+        <div style={{ flex: 1, overflow: "hidden" }}>
+          <Suspense
+            fallback={
+              <div style={{ padding: "28px 32px", color: C.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>
+                Loading settings…
+              </div>
+            }
+          >
+            <SettingsTab
+              embeddedInStats
+              hideStatsTab
+              onLayoutHUDs={() => {
+                void invoke("toggle_layout_huds").catch(console.error);
+              }}
+            />
+          </Suspense>
+        </div>
+      )}
+
       {/* ── Memory debug ── */}
-      {rootMode === "debug" && (
+      {isDebugBuild && rootMode === "debug" && (
         <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
           <DebugTab />
         </div>
