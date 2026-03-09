@@ -388,7 +388,9 @@ mod imp {
                     };
                     let target_presence = current_target_presence(&guard);
                     let target_signature = semantic_signature(&target_presence);
-                    if guard.client.is_some() && guard.last_signature.as_ref() == Some(&target_signature) {
+                    if guard.client.is_some()
+                        && guard.last_signature.as_ref() == Some(&target_signature)
+                    {
                         continue;
                     }
                     try_send_cached_presence(&mut guard);

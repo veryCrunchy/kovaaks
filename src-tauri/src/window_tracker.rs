@@ -165,11 +165,7 @@ fn tracker_loop(app: AppHandle) {
                 if last_rect != Some(clamped) {
                     let (x, y, w, h) = clamped;
                     if let Some(win) = app.get_webview_window("overlay") {
-                        let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
-                        let _ = win.set_size(tauri::Size::Physical(tauri::PhysicalSize {
-                            width: w,
-                            height: h,
-                        }));
+                        crate::apply_overlay_bounds(&win, x, y, w, h);
                     }
                     last_rect = Some(clamped);
                     log::info!("AimMod repositioned: ({x},{y}) {w}×{h}");

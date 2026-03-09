@@ -216,8 +216,8 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 #[cfg(not(target_os = "windows"))]
 fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
 
-mod bridge;
 mod app_version;
+mod bridge;
 mod discord_rpc;
 mod file_watcher;
 mod kovaaks_api;
@@ -285,6 +285,93 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
     OverlayOrigin { x, y, scale_factor }
 }
 
+#[cfg(target_os = "windows")]
+fn configure_overlay_window(win: &tauri::WebviewWindow) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
+        SWP_NOMOVE, SWP_NOSIZE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongW,
+        SetWindowPos, WS_EX_OVERLAPPEDWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+    };
+
+    let _ = win.unmaximize();
+    let _ = win.set_decorations(false);
+    let _ = win.set_shadow(false);
+
+    let Ok(hwnd) = win.hwnd() else {
+        return;
+    };
+    let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    let ex_style = unsafe { GetWindowLongW(hwnd, GWL_EXSTYLE) } as u32;
+    let desired_style = (style & !WS_OVERLAPPEDWINDOW.0) | WS_POPUP.0;
+    let desired_ex_style = ex_style & !WS_EX_OVERLAPPEDWINDOW.0;
+
+    if desired_style != style || desired_ex_style != ex_style {
+        unsafe {
+            let _ = SetWindowLongW(hwnd, GWL_STYLE, desired_style as i32);
+            let _ = SetWindowLongW(hwnd, GWL_EXSTYLE, desired_ex_style as i32);
+            let _ = SetWindowPos(
+                hwnd,
+                None,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE
+                    | SWP_NOSIZE
+                    | SWP_NOZORDER
+                    | SWP_NOOWNERZORDER
+                    | SWP_NOACTIVATE
+                    | SWP_FRAMECHANGED,
+            );
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn configure_overlay_window(win: &tauri::WebviewWindow) {
+    let _ = win.unmaximize();
+    let _ = win.set_decorations(false);
+}
+
+pub(crate) fn apply_overlay_bounds(
+    win: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) {
+    let _ = win.set_fullscreen(false);
+    configure_overlay_window(win);
+
+    #[cfg(target_os = "windows")]
+    {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SWP_NOACTIVATE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowPos,
+        };
+
+        if let Ok(hwnd) = win.hwnd() {
+            let hwnd = windows::Win32::Foundation::HWND(hwnd.0 as _);
+            unsafe {
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    x,
+                    y,
+                    width as i32,
+                    height as i32,
+                    SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_NOACTIVATE,
+                );
+            }
+            return;
+        }
+    }
+
+    let _ = win.set_position(tauri::PhysicalPosition::new(x, y));
+    let _ = win.set_size(tauri::PhysicalSize::new(width, height));
+}
+
 /// Reposition the overlay window to cover the monitor at `index`.
 ///
 /// Use a normal borderless window sized to the monitor instead of OS fullscreen.
@@ -301,13 +388,11 @@ pub fn apply_monitor(app: &AppHandle, index: usize) {
 
     let pos = m.position();
     let size = m.size();
-    let sf = m.scale_factor();
-    let logical_pos = pos.to_logical::<f64>(sf);
-    let logical_size = size.to_logical::<f64>(sf);
 
-    let _ = win.set_fullscreen(false);
-    let _ = win.set_position(tauri::LogicalPosition::new(logical_pos.x, logical_pos.y));
-    let _ = win.set_size(tauri::LogicalSize::new(logical_size.width, logical_size.height));
+    // Use physical monitor bounds directly. Converting to logical coordinates
+    // here can apply the current window DPI instead of the target monitor DPI,
+    // which leaves the overlay undersized on mixed-scale setups.
+    apply_overlay_bounds(&win, pos.x, pos.y, size.width, size.height);
 
     // Notify the screen recorder that monitor placement changed so it can reset
     // any cached crop logging. Actual capture bounds are derived from the live
@@ -384,10 +469,7 @@ fn save_settings(
 }
 
 #[tauri::command]
-fn reset_settings(
-    state: tauri::State<AppState>,
-    app: AppHandle,
-) -> Result<AppSettings, String> {
+fn reset_settings(state: tauri::State<AppState>, app: AppHandle) -> Result<AppSettings, String> {
     let defaults = settings::load_default();
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
     *s = defaults.clone();
@@ -1466,6 +1548,19 @@ pub fn run() {
                 // Force the window background to fully transparent so the DWM
                 // compositor does not tint or dim the game colours underneath.
                 let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
+                configure_overlay_window(&win);
+                #[cfg(target_os = "windows")]
+                if let Ok(hwnd) = win.hwnd() {
+                    use windows::Win32::UI::WindowsAndMessaging::{
+                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
+                    };
+                    let _ = unsafe {
+                        SetWindowDisplayAffinity(
+                            windows::Win32::Foundation::HWND(hwnd.0 as _),
+                            WDA_EXCLUDEFROMCAPTURE,
+                        )
+                    };
+                }
                 let _ = win.show();
             }
             // Ensure monitor placement + screen recorder capture rect are initialized
@@ -1526,7 +1621,7 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
 
     let mut tray_builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-            .tooltip(app_version::app_name_with_version());
+        .tooltip(app_version::app_name_with_version());
     if let Some(icon) = app.default_window_icon() {
         tray_builder = tray_builder.icon(icon.clone());
     }

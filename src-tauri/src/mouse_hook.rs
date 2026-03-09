@@ -300,10 +300,8 @@ pub fn take_replay_capture_for_run(
     }
 
     if let Some(snapshot) = run_snapshot {
-        let (matched, remaining) = partition_matching_captures(
-            std::mem::take(&mut *completed),
-            snapshot,
-        );
+        let (matched, remaining) =
+            partition_matching_captures(std::mem::take(&mut *completed), snapshot);
         *completed = remaining;
         if !matched.is_empty() {
             drop(completed);
@@ -378,7 +376,10 @@ fn queue_completed_capture_locked(state: &mut SharedState, ended_at_unix_ms: u64
 fn partition_matching_captures(
     mut captures: VecDeque<CompletedReplayCapture>,
     snapshot: &crate::bridge::BridgeRunSnapshot,
-) -> (Vec<CompletedReplayCapture>, VecDeque<CompletedReplayCapture>) {
+) -> (
+    Vec<CompletedReplayCapture>,
+    VecDeque<CompletedReplayCapture>,
+) {
     let mut matched = Vec::new();
     let mut remaining = VecDeque::new();
     while let Some(capture) = captures.pop_front() {
@@ -445,7 +446,8 @@ fn paused_duration_before_abs_ms(
             if abs_ms <= window.started_at_unix_ms {
                 0
             } else {
-                abs_ms.min(window.ended_at_unix_ms)
+                abs_ms
+                    .min(window.ended_at_unix_ms)
                     .saturating_sub(window.started_at_unix_ms)
             }
         })

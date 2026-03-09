@@ -20,9 +20,7 @@
         "alwaysOnTop": true,
         "skipTaskbar": true,
         "resizable": false,
-        "width": 1280,
-        "height": 720,
-        "visible": true
+        "visible": false
       },
       {
         "label": "logs",

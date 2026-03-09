@@ -625,8 +625,8 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
 
     if user_version < 6 {
         run_schema_migration(conn, 6, |tx| {
-            if let Err(error) =
-                tx.execute_batch("ALTER TABLE session_stats_panels ADD COLUMN scenario_subtype TEXT;")
+            if let Err(error) = tx
+                .execute_batch("ALTER TABLE session_stats_panels ADD COLUMN scenario_subtype TEXT;")
             {
                 if !migration_already_applied(&error) {
                     return Err(error.into());
@@ -999,7 +999,10 @@ fn weighted_average(sum: f64, count: u32) -> Option<f64> {
 }
 
 fn format_entity_suffix(entity_id: &str) -> String {
-    let compact: String = entity_id.chars().filter(|ch| ch.is_ascii_alphanumeric()).collect();
+    let compact: String = entity_id
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .collect();
     if compact.is_empty() {
         return entity_id.to_string();
     }
@@ -1231,16 +1234,34 @@ fn finalize_context_window(
         } else {
             None
         },
-        avg_bot_count: weighted_average(accumulator.weighted_bot_count_sum, accumulator.weighted_event_count),
+        avg_bot_count: weighted_average(
+            accumulator.weighted_bot_count_sum,
+            accumulator.weighted_event_count,
+        ),
         primary_target_label,
         primary_target_profile,
         primary_target_entity_id,
         primary_target_share,
-        avg_nearest_distance: weighted_average(accumulator.weighted_distance_sum, accumulator.weighted_distance_count),
-        avg_nearest_yaw_error_deg: weighted_average(accumulator.weighted_yaw_sum, accumulator.weighted_yaw_count),
-        avg_nearest_pitch_error_deg: weighted_average(accumulator.weighted_pitch_sum, accumulator.weighted_pitch_count),
-        avg_score_per_minute: weighted_average(accumulator.weighted_spm_sum, accumulator.weighted_spm_count),
-        avg_kills_per_second: weighted_average(accumulator.weighted_kps_sum, accumulator.weighted_kps_count),
+        avg_nearest_distance: weighted_average(
+            accumulator.weighted_distance_sum,
+            accumulator.weighted_distance_count,
+        ),
+        avg_nearest_yaw_error_deg: weighted_average(
+            accumulator.weighted_yaw_sum,
+            accumulator.weighted_yaw_count,
+        ),
+        avg_nearest_pitch_error_deg: weighted_average(
+            accumulator.weighted_pitch_sum,
+            accumulator.weighted_pitch_count,
+        ),
+        avg_score_per_minute: weighted_average(
+            accumulator.weighted_spm_sum,
+            accumulator.weighted_spm_count,
+        ),
+        avg_kills_per_second: weighted_average(
+            accumulator.weighted_kps_sum,
+            accumulator.weighted_kps_count,
+        ),
         avg_timeline_accuracy_pct: weighted_average(
             accumulator.weighted_timeline_accuracy_sum,
             accumulator.weighted_timeline_accuracy_count,
@@ -1286,7 +1307,11 @@ fn build_replay_context_windows(
     let avg_timeline_accuracy =
         average_optional(snapshot.timeline.iter().map(|point| point.accuracy_pct));
 
-    let first_ts_ms = snapshot.shot_telemetry.first().map(|event| event.ts_ms).unwrap_or(0);
+    let first_ts_ms = snapshot
+        .shot_telemetry
+        .first()
+        .map(|event| event.ts_ms)
+        .unwrap_or(0);
     let mut annotated = Vec::with_capacity(snapshot.shot_telemetry.len());
     for event in &snapshot.shot_telemetry {
         let offset_ms = event.ts_ms.saturating_sub(first_ts_ms);
@@ -1310,7 +1335,11 @@ fn build_replay_context_windows(
                 .get(&profile_key)
                 .map(|entities| entities.len() > 1)
                 .unwrap_or(false);
-            stable_target_label(Some(target.profile.as_str()), &target.entity_id, duplicate_profile)
+            stable_target_label(
+                Some(target.profile.as_str()),
+                &target.entity_id,
+                duplicate_profile,
+            )
         });
 
         annotated.push(AnnotatedShotEvent {
@@ -1324,7 +1353,8 @@ fn build_replay_context_windows(
             bot_count,
             nearest_distance: nearest.and_then(|target| target.distance_3d.or(target.distance_2d)),
             nearest_yaw_error_deg: nearest.and_then(|target| target.yaw_error_deg.map(f64::abs)),
-            nearest_pitch_error_deg: nearest.and_then(|target| target.pitch_error_deg.map(f64::abs)),
+            nearest_pitch_error_deg: nearest
+                .and_then(|target| target.pitch_error_deg.map(f64::abs)),
             score_per_minute: timeline_point.and_then(|point| point.score_per_minute),
             kills_per_second: timeline_point.and_then(|point| point.kills_per_second),
             timeline_accuracy_pct: timeline_point.and_then(|point| point.accuracy_pct),
@@ -1348,7 +1378,8 @@ fn build_replay_context_windows(
         });
     }
 
-    let (max_gap_ms, max_span_ms) = telemetry_window_thresholds(snapshot.duration_secs, annotated.len());
+    let (max_gap_ms, max_span_ms) =
+        telemetry_window_thresholds(snapshot.duration_secs, annotated.len());
     let mut windows = Vec::new();
     let mut current = ContextWindowAccumulator::default();
     let mut last_event: Option<&AnnotatedShotEvent> = None;
@@ -1358,13 +1389,12 @@ fn build_replay_context_windows(
             let gap_ms = event.offset_ms.saturating_sub(previous.offset_ms);
             let span_ms = event.offset_ms.saturating_sub(current.start_ms);
             let phase_changed = event.phase != previous.phase && current.shot_event_count > 0;
-            let target_changed = event.nearest_label != previous.nearest_label && current.shot_event_count >= 2;
-            let pace_changed =
-                event.pace_state != previous.pace_state
+            let target_changed =
+                event.nearest_label != previous.nearest_label && current.shot_event_count >= 2;
+            let pace_changed = event.pace_state != previous.pace_state
                 && current.shot_event_count >= 2
                 && (event.pace_state != "steady" || previous.pace_state != "steady");
-            let accuracy_changed =
-                event.accuracy_state != previous.accuracy_state
+            let accuracy_changed = event.accuracy_state != previous.accuracy_state
                 && current.shot_event_count >= 2
                 && (event.accuracy_state != "steady" || previous.accuracy_state != "steady");
 
@@ -1409,13 +1439,19 @@ fn build_replay_context_windows(
             });
         }
         *current.pace_counts.entry(event.pace_state).or_insert(0) += event.weight;
-        *current.accuracy_counts.entry(event.accuracy_state).or_insert(0) += event.weight;
+        *current
+            .accuracy_counts
+            .entry(event.accuracy_state)
+            .or_insert(0) += event.weight;
 
         if let Some(distance) = event.nearest_distance.filter(|value| value.is_finite()) {
             current.weighted_distance_sum += distance * event.weight as f64;
             current.weighted_distance_count += event.weight;
         }
-        if let Some(yaw_error) = event.nearest_yaw_error_deg.filter(|value| value.is_finite()) {
+        if let Some(yaw_error) = event
+            .nearest_yaw_error_deg
+            .filter(|value| value.is_finite())
+        {
             current.weighted_yaw_sum += yaw_error * event.weight as f64;
             current.weighted_yaw_count += event.weight;
         }
@@ -1434,7 +1470,10 @@ fn build_replay_context_windows(
             current.weighted_kps_sum += kills_per_second * event.weight as f64;
             current.weighted_kps_count += event.weight;
         }
-        if let Some(accuracy_pct) = event.timeline_accuracy_pct.filter(|value| value.is_finite()) {
+        if let Some(accuracy_pct) = event
+            .timeline_accuracy_pct
+            .filter(|value| value.is_finite())
+        {
             current.weighted_timeline_accuracy_sum += accuracy_pct * event.weight as f64;
             current.weighted_timeline_accuracy_count += event.weight;
         }
@@ -2211,14 +2250,14 @@ fn audit_session_sql_with_conn(conn: &Connection, session_id: &str) -> Result<Se
             "session_shot_events exists but session_replay_context_windows is empty",
         );
     }
-    if let (Some(shots_fired), Some(shots_hit)) = (audit.summary_shots_fired, audit.summary_shots_hit) {
+    if let (Some(shots_fired), Some(shots_hit)) =
+        (audit.summary_shots_fired, audit.summary_shots_hit)
+    {
         if shots_hit > shots_fired + 0.0001 {
             push_audit_failure(
                 &mut audit,
                 "impossible_shot_counts",
-                format!(
-                    "shots_hit ({shots_hit:.3}) exceeds shots_fired ({shots_fired:.3})"
-                ),
+                format!("shots_hit ({shots_hit:.3}) exceeds shots_fired ({shots_fired:.3})"),
             );
         }
     }
@@ -2252,7 +2291,11 @@ pub fn persist_session_sql_audit(app: &AppHandle, audit: &SessionSqlAudit) -> Re
         return Ok(());
     }
     let conn = connect(app)?;
-    let status = if audit.has_issues() { "incomplete" } else { "ok" };
+    let status = if audit.has_issues() {
+        "incomplete"
+    } else {
+        "ok"
+    };
     let failure_codes = if audit.failure_classes.is_empty() {
         None
     } else {

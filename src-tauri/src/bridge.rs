@@ -1198,7 +1198,11 @@ mod imp {
         state
             .pause_windows
             .iter()
-            .map(|window| window.ended_at_unix_ms.saturating_sub(window.started_at_unix_ms))
+            .map(|window| {
+                window
+                    .ended_at_unix_ms
+                    .saturating_sub(window.started_at_unix_ms)
+            })
             .sum()
     }
 
@@ -1373,12 +1377,15 @@ mod imp {
         state.metrics.accuracy_pct = finite_non_negative(stats.accuracy_pct);
         state.metrics.damage_done = finite_non_negative(stats.damage_dealt);
         state.metrics.damage_possible = finite_non_negative(stats.damage_total);
-        state.metrics.damage_efficiency = match (state.metrics.damage_done, state.metrics.damage_possible) {
-            (Some(done), Some(possible)) if possible > 0.0 => Some((done / possible) * 100.0),
-            _ => finite_non_negative(stats.damage_dealt)
-                .zip(finite_non_negative(stats.damage_total))
-                .and_then(|(done, possible)| (possible > 0.0).then_some((done / possible) * 100.0)),
-        };
+        state.metrics.damage_efficiency =
+            match (state.metrics.damage_done, state.metrics.damage_possible) {
+                (Some(done), Some(possible)) if possible > 0.0 => Some((done / possible) * 100.0),
+                _ => finite_non_negative(stats.damage_dealt)
+                    .zip(finite_non_negative(stats.damage_total))
+                    .and_then(|(done, possible)| {
+                        (possible > 0.0).then_some((done / possible) * 100.0)
+                    }),
+            };
         state.metrics.score_per_minute = finite_non_negative(stats.spm);
         state.metrics.score_total = finite_non_negative(stats.score_total);
         state.metrics.score_total_derived = finite_non_negative(stats.score_total_derived);
@@ -1657,7 +1664,10 @@ mod imp {
                 state.metrics.duration_secs = Some(v);
             }
         }
-        if let Some(paused) = scalars_obj.get("scenario_is_paused").and_then(replay_json_number) {
+        if let Some(paused) = scalars_obj
+            .get("scenario_is_paused")
+            .and_then(replay_json_number)
+        {
             observe_pause_state_locked(state, paused >= 0.5);
         }
         state.metrics.duration_secs
@@ -1974,11 +1984,9 @@ mod imp {
                 let effective_hint = finite_non_negative(time_hint_secs)
                     .or_else(|| run_capture_duration_hint_locked(&state));
                 let ended_ms = match (state.started_at_unix_ms, effective_hint) {
-                    (Some(start_ms), Some(hint_secs)) => {
-                        start_ms
-                            .saturating_add((hint_secs * 1000.0).round() as u64)
-                            .saturating_add(total_paused_wall_ms_locked(&state))
-                    }
+                    (Some(start_ms), Some(hint_secs)) => start_ms
+                        .saturating_add((hint_secs * 1000.0).round() as u64)
+                        .saturating_add(total_paused_wall_ms_locked(&state)),
                     _ => now_ms,
                 };
                 state.ended_at_unix_ms = Some(ended_ms.min(now_ms));
@@ -2136,25 +2144,23 @@ mod imp {
             _ => None,
         };
 
-        let avg_fire_to_hit_ms = if state.aggregated_shot_batches_seen
-            || state.shot_to_hit_latencies_ms.is_empty()
-        {
-            None
-        } else {
-            Some(
-                state.shot_to_hit_latencies_ms.iter().sum::<f64>()
-                    / state.shot_to_hit_latencies_ms.len() as f64,
-            )
-        };
-        let p90_fire_to_hit_ms = if state.aggregated_shot_batches_seen
-            || state.shot_to_hit_latencies_ms.is_empty()
-        {
-            None
-        } else {
-            let mut sorted = state.shot_to_hit_latencies_ms.clone();
-            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            percentile_from_sorted(&sorted, 90.0)
-        };
+        let avg_fire_to_hit_ms =
+            if state.aggregated_shot_batches_seen || state.shot_to_hit_latencies_ms.is_empty() {
+                None
+            } else {
+                Some(
+                    state.shot_to_hit_latencies_ms.iter().sum::<f64>()
+                        / state.shot_to_hit_latencies_ms.len() as f64,
+                )
+            };
+        let p90_fire_to_hit_ms =
+            if state.aggregated_shot_batches_seen || state.shot_to_hit_latencies_ms.is_empty() {
+                None
+            } else {
+                let mut sorted = state.shot_to_hit_latencies_ms.clone();
+                sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                percentile_from_sorted(&sorted, 90.0)
+            };
         let avg_shots_to_hit = if state.aggregated_shot_batches_seen {
             derived_avg_shots_to_hit
         } else if state.paired_shot_hits > 0 {
@@ -2797,9 +2803,7 @@ mod imp {
         stats.accuracy_shots.map_or(false, |v| v > 0)
             || stats.kills.map_or(false, |v| v > 0)
             || stats.damage_dealt.map_or(false, |v| v > 0.0)
-            || stats
-                .challenge_tick_count_total
-                .map_or(false, |v| v > 0)
+            || stats.challenge_tick_count_total.map_or(false, |v| v > 0)
             || stats.challenge_seconds_total.map_or(false, |v| v > 1.0)
             || stats.session_time_secs.map_or(false, |v| v > 1.0)
             || stats.score_total.map_or(false, |v| v > 0.0)
@@ -3260,31 +3264,29 @@ mod imp {
                     }
                     false
                 };
-                let update_u32 =
-                    |slot: &mut Option<u32>, key: &str| -> bool {
-                        let next = super::parse_payload_number(obj, key)
-                            .filter(|value| value.is_finite() && *value >= 0.0)
-                            .map(|value| value.round() as u32);
-                        if next.is_some() && *slot != next {
-                            *slot = next;
-                            return true;
-                        }
-                        false
-                    };
-                let update_f64 =
-                    |slot: &mut Option<f64>, key: &str| -> bool {
-                        let next = super::parse_payload_number(obj, key)
-                            .filter(|value| value.is_finite() && *value >= 0.0);
-                        if next.is_some()
-                            && !slot.map_or(false, |prev| {
-                                next.map_or(false, |value| (prev - value).abs() <= 0.0001)
-                            })
-                        {
-                            *slot = next;
-                            return true;
-                        }
-                        false
-                    };
+                let update_u32 = |slot: &mut Option<u32>, key: &str| -> bool {
+                    let next = super::parse_payload_number(obj, key)
+                        .filter(|value| value.is_finite() && *value >= 0.0)
+                        .map(|value| value.round() as u32);
+                    if next.is_some() && *slot != next {
+                        *slot = next;
+                        return true;
+                    }
+                    false
+                };
+                let update_f64 = |slot: &mut Option<f64>, key: &str| -> bool {
+                    let next = super::parse_payload_number(obj, key)
+                        .filter(|value| value.is_finite() && *value >= 0.0);
+                    if next.is_some()
+                        && !slot.map_or(false, |prev| {
+                            next.map_or(false, |value| (prev - value).abs() <= 0.0001)
+                        })
+                    {
+                        *slot = next;
+                        return true;
+                    }
+                    false
+                };
 
                 if update_bool(&mut state.stats.is_in_challenge, "is_in_challenge") {
                     should_emit_stats = true;
@@ -3292,8 +3294,10 @@ mod imp {
                     state.challenge_lifecycle_at = Some(now);
                 }
                 should_emit_stats |= update_bool(&mut state.stats.is_in_scenario, "is_in_scenario");
-                should_emit_stats |=
-                    update_bool(&mut state.stats.is_in_scenario_editor, "is_in_scenario_editor");
+                should_emit_stats |= update_bool(
+                    &mut state.stats.is_in_scenario_editor,
+                    "is_in_scenario_editor",
+                );
                 should_emit_stats |= update_bool(&mut state.stats.is_in_trainer, "is_in_trainer");
                 should_emit_stats |=
                     update_bool(&mut state.stats.scenario_is_paused, "scenario_is_paused");
@@ -3305,11 +3309,16 @@ mod imp {
                     update_u32(&mut state.stats.accuracy_hits, "shots_hit");
                 should_emit_stats |= classification_inputs_changed;
 
+                should_emit_stats |= update_u32(
+                    &mut state.stats.challenge_tick_count_total,
+                    "challenge_tick_count_total",
+                );
                 should_emit_stats |=
-                    update_u32(&mut state.stats.challenge_tick_count_total, "challenge_tick_count_total");
-                should_emit_stats |= update_f64(&mut state.stats.session_time_secs, "session_time_secs");
-                should_emit_stats |=
-                    update_f64(&mut state.stats.challenge_seconds_total, "challenge_seconds_total");
+                    update_f64(&mut state.stats.session_time_secs, "session_time_secs");
+                should_emit_stats |= update_f64(
+                    &mut state.stats.challenge_seconds_total,
+                    "challenge_seconds_total",
+                );
                 should_emit_stats |= update_f64(&mut state.stats.score_total, "score_total");
                 should_emit_stats |=
                     update_f64(&mut state.stats.score_total_derived, "score_total_derived");
@@ -3318,16 +3327,20 @@ mod imp {
                 classification_inputs_changed |=
                     update_f64(&mut state.stats.accuracy_pct, "accuracy_pct");
                 should_emit_stats |= classification_inputs_changed;
-                should_emit_stats |=
-                    update_f64(&mut state.stats.challenge_average_fps, "challenge_average_fps");
+                should_emit_stats |= update_f64(
+                    &mut state.stats.challenge_average_fps,
+                    "challenge_average_fps",
+                );
                 classification_inputs_changed |=
                     update_f64(&mut state.stats.damage_dealt, "damage_done");
                 classification_inputs_changed |=
                     update_f64(&mut state.stats.damage_total, "damage_possible");
                 should_emit_stats |= classification_inputs_changed;
                 should_emit_stats |= update_f64(&mut state.stats.time_remaining, "time_remaining");
-                should_emit_stats |=
-                    update_f64(&mut state.stats.queue_time_remaining, "queue_time_remaining");
+                should_emit_stats |= update_f64(
+                    &mut state.stats.queue_time_remaining,
+                    "queue_time_remaining",
+                );
                 if let Some(value) = state.stats.queue_time_remaining {
                     if value > 0.0001 {
                         if let Some(prev) = state.queue_last_value {
@@ -4324,8 +4337,8 @@ mod imp {
         }
         let flags_after_sync = read_runtime_flags_for_dir(&game_bin_dir);
         let runtime_flags_restart_required = flags_after_sync != flags_before_sync;
-        let restart_required = already_loaded
-            && (native_runtime_restart_required || runtime_flags_restart_required);
+        let restart_required =
+            already_loaded && (native_runtime_restart_required || runtime_flags_restart_required);
         runtime_restart_required_flag().store(restart_required, Ordering::SeqCst);
         if runtime_flags_restart_required {
             log::warn!(

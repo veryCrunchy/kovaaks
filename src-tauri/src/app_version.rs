@@ -11,7 +11,11 @@ fn format_prerelease_label(prerelease: &str) -> String {
     }
 
     let mut parts = prerelease.split('.');
-    let channel = parts.next().unwrap_or("preview").trim().to_ascii_lowercase();
+    let channel = parts
+        .next()
+        .unwrap_or("preview")
+        .trim()
+        .to_ascii_lowercase();
     let build_number = parts.find(|part| part.chars().all(|ch| ch.is_ascii_digit()));
 
     match build_number {
