@@ -346,17 +346,6 @@ function drawPath(
     ctx.fill();
   }
 
-  // ── Playback cursor ───────────────────────────────────────────────────────
-  if (!showFull) {
-    // In follow-cam mode the cursor is always the canvas centre
-    ctx.beginPath();
-    ctx.arc(CW / 2, CH / 2, 7, 0, Math.PI * 2);
-    ctx.fillStyle   = "rgba(255,255,255,0.95)";
-    ctx.strokeStyle = "#000";
-    ctx.lineWidth   = 1.5;
-    ctx.fill();
-    ctx.stroke();
-  }
 }
 
 // ─── Component ────────────────────────────────────────────────────────────────
