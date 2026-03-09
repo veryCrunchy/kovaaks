@@ -395,7 +395,7 @@ export function DraggableHUD({
     const viewportBounds = buildViewportBounds(size, HUD_EDGE_PADDING, topInset);
     const bounds = mergeBounds(viewportBounds, options?.movementBounds);
     const clamped = clampPosToBounds(rawPos, bounds);
-    if (excludeFromOverlap || options?.skipOverlap) return clamped;
+    if (!layoutMode || excludeFromOverlap || options?.skipOverlap) return clamped;
     const basePad = HUD_COLLISION_GAP / 2;
     const collisionPadding: RectPadding = {
       left: basePad,
@@ -460,6 +460,7 @@ export function DraggableHUD({
   }, [emitLayoutChanged, normalizePos, persistPos, saveScale]);
 
   const tryRestoreTowardAnchor = useCallback(() => {
+    if (!layoutMode) return;
     setPos((prev) => {
       const size = getCurrentSize();
       const movementBounds = getAutoMovementBounds(size);
@@ -487,21 +488,14 @@ export function DraggableHUD({
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
-      setPos((prev) => {
-        const normalized = normalizePos(prev);
-        anchorPosRef.current = normalized;
-        if (samePos(prev, normalized)) return prev;
-        persistPos(normalized);
-        emitLayoutChanged();
-        return normalized;
-      });
+      anchorPosRef.current = pos;
       lastSizeRef.current = getCurrentSize();
     });
 
     return () => {
       window.cancelAnimationFrame(rafId);
     };
-  }, [emitLayoutChanged, getCurrentSize, normalizePos, persistPos]);
+  }, [getCurrentSize, pos]);
 
   useEffect(() => {
     const onResize = () => {
@@ -539,12 +533,16 @@ export function DraggableHUD({
       const heightDelta = currentSize.height - previousSize.height;
       if (Math.abs(heightDelta) < HUD_RESIZE_DELTA_EPSILON) return;
 
-      const limitedBounds = getAutoMovementBounds(currentSize, scale);
+      const limitedBounds = layoutMode
+        ? getAutoMovementBounds(currentSize, scale)
+        : undefined;
 
       setPos((prev) => {
-        const roomAbove = prev.y - limitedBounds.minY;
-        const roomBelow = (window.innerHeight - HUD_EDGE_PADDING) - (prev.y + previousSize.height);
-        const growUp = heightDelta > 0 && roomAbove > roomBelow;
+        const roomAbove = limitedBounds ? (prev.y - limitedBounds.minY) : 0;
+        const roomBelow = limitedBounds
+          ? ((window.innerHeight - HUD_EDGE_PADDING) - (prev.y + previousSize.height))
+          : 0;
+        const growUp = !!limitedBounds && heightDelta > 0 && roomAbove > roomBelow;
 
         let desired = prev;
         if (growUp) {
@@ -572,10 +570,11 @@ export function DraggableHUD({
     return () => {
       observer.disconnect();
     };
-  }, [emitLayoutChanged, getAutoMovementBounds, getCurrentSize, normalizePos, persistPos, scale, tryRestoreTowardAnchor]);
+  }, [emitLayoutChanged, getAutoMovementBounds, getCurrentSize, layoutMode, normalizePos, persistPos, scale, tryRestoreTowardAnchor]);
 
   useEffect(() => {
     const onLayoutChanged = (event: Event) => {
+      if (!layoutMode) return;
       const detail = (event as CustomEvent<HudLayoutChangedDetail>).detail;
       if (!detail || detail.source === storageKey) return;
       if (isDragging.current) return;
@@ -586,7 +585,7 @@ export function DraggableHUD({
     return () => {
       window.removeEventListener(HUD_LAYOUT_CHANGED_EVENT, onLayoutChanged);
     };
-  }, [storageKey, tryRestoreTowardAnchor]);
+  }, [layoutMode, storageKey, tryRestoreTowardAnchor]);
 
   useEffect(() => {
     if (presetNonce === lastPresetNonceRef.current) return;
