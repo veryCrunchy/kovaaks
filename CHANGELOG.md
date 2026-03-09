@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.1.0](https://github.com/veryCrunchy/kovaaks/compare/v1.0.1...v1.1.0) (2026-03-09)
+
+
+### Features
+
+* add app version handling and display in Discord RPC ([1a3067b](https://github.com/veryCrunchy/kovaaks/commit/1a3067b0f00ee86bf57d31fd8b10614f4dc18d96))
+* display app version label in settings panel ([d68ac19](https://github.com/veryCrunchy/kovaaks/commit/d68ac19f2f78c4fc3892d14d1555d777ba626029))
+* enhance version metadata handling for prereleases and releases ([793f297](https://github.com/veryCrunchy/kovaaks/commit/793f2972741e2ff40460f0bb8ac75eae65da1550))
+* normalize run timeline data and improve merging logic ([46367c9](https://github.com/veryCrunchy/kovaaks/commit/46367c91709a80d4dc88b75b2c4a6ad1546b4f0d))
+* update aimmod version to 1.0.1 and enhance replay capture handling ([bed0c2e](https://github.com/veryCrunchy/kovaaks/commit/bed0c2e6de5b98a307e7ec1548650a2e8a505cf4))
+* update game state handling and remove version label from activity ([4ff877e](https://github.com/veryCrunchy/kovaaks/commit/4ff877e9869f0a74e01fc010ee2edf11f72fe4e0))
+
+
+### Bug Fixes
+
+* add AIMMOD_DISPLAY_VERSION to Tauri action environment variables ([7b33e5e](https://github.com/veryCrunchy/kovaaks/commit/7b33e5e03740e992ca39c2f57c009d79d5bcb448))
+* set default trail fade duration to 5000ms ([ab8f4e1](https://github.com/veryCrunchy/kovaaks/commit/ab8f4e1a44c3b7fd98b9d6c9a3b4adeea4d5a829))
+
 ## [1.0.1](https://github.com/veryCrunchy/kovaaks/compare/v1.0.0...v1.0.1) (2026-03-09)
 
 
