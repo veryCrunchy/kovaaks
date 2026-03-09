@@ -45,17 +45,17 @@ pub struct SessionReplayContextWindow {
 
 pub fn initialize(app: &AppHandle) -> Result<PathBuf> {
     let path = db_path(app)?;
-    let conn = open_connection(&path)?;
+    let mut conn = open_connection(&path)?;
     configure_connection(&conn)?;
-    migrate_schema(&conn)?;
+    migrate_schema(&mut conn)?;
     Ok(path)
 }
 
 pub fn connect(app: &AppHandle) -> Result<Connection> {
     let path = db_path(app)?;
-    let conn = open_connection(&path)?;
+    let mut conn = open_connection(&path)?;
     configure_connection(&conn)?;
-    migrate_schema(&conn)?;
+    migrate_schema(&mut conn)?;
     Ok(conn)
 }
 
@@ -326,16 +326,32 @@ fn current_unix_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn migrate_schema(conn: &Connection) -> Result<()> {
+fn migration_already_applied(error: &rusqlite::Error) -> bool {
+    let message = error.to_string().to_ascii_lowercase();
+    message.contains("duplicate column name") || message.contains("already exists")
+}
+
+fn run_schema_migration<F>(conn: &mut Connection, version: i32, apply: F) -> Result<()>
+where
+    F: FnOnce(&rusqlite::Transaction<'_>) -> Result<()>,
+{
+    let tx = conn.transaction()?;
+    apply(&tx)?;
+    tx.pragma_update(None, "user_version", version)?;
+    tx.commit()?;
+    Ok(())
+}
+
+fn migrate_schema(conn: &mut Connection) -> Result<()> {
     let user_version = conn.pragma_query_value(None, "user_version", |row| row.get::<_, i32>(0))?;
     if user_version >= SCHEMA_VERSION {
         return Ok(());
     }
 
     if user_version < 1 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 1, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
                 scenario TEXT NOT NULL,
@@ -365,17 +381,16 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 updated_at_unix_ms INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_replay_assets_updated_at ON replay_assets(updated_at_unix_ms);
-
-            PRAGMA user_version = 1;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 2 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 2, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS session_run_summaries (
                 session_id TEXT PRIMARY KEY,
                 duration_secs REAL,
@@ -428,17 +443,16 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_run_timelines_session ON session_run_timelines(session_id, t_sec);
-
-            PRAGMA user_version = 2;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 3 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 3, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS session_replay_payloads (
                 session_id TEXT PRIMARY KEY,
                 replay_json TEXT NOT NULL,
@@ -446,17 +460,16 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_replay_payloads_updated_at ON session_replay_payloads(updated_at_unix_ms);
-
-            PRAGMA user_version = 3;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 4 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 4, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS session_smoothness (
                 session_id TEXT PRIMARY KEY,
                 composite REAL NOT NULL,
@@ -535,17 +548,16 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_replay_frames_session ON session_replay_frames(session_id, seq_idx);
-
-            PRAGMA user_version = 4;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 5 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 5, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS session_shot_events (
                 session_id TEXT NOT NULL,
                 shot_seq_idx INTEGER NOT NULL,
@@ -605,48 +617,42 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_shot_targets_session_seq
                 ON session_shot_targets(session_id, shot_seq_idx, target_idx);
-
-            PRAGMA user_version = 5;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 6 {
-        conn.execute_batch(
-            "
-            BEGIN;
-            ALTER TABLE session_stats_panels ADD COLUMN scenario_subtype TEXT;
-            PRAGMA user_version = 6;
-            COMMIT;
-            ",
-        )?;
+        run_schema_migration(conn, 6, |tx| {
+            if let Err(error) =
+                tx.execute_batch("ALTER TABLE session_stats_panels ADD COLUMN scenario_subtype TEXT;")
+            {
+                if !migration_already_applied(&error) {
+                    return Err(error.into());
+                }
+            }
+            Ok(())
+        })?;
     }
 
     if user_version < 7 {
-        conn.execute_batch(
-            "
-            BEGIN;
-            ALTER TABLE session_shot_events ADD COLUMN count INTEGER;
-            PRAGMA user_version = 7;
-            COMMIT;
-            ",
-        )
-        .or_else(|_| {
-            conn.execute_batch(
-                "
-                BEGIN;
-                PRAGMA user_version = 7;
-                COMMIT;
-                ",
-            )
+        run_schema_migration(conn, 7, |tx| {
+            if let Err(error) =
+                tx.execute_batch("ALTER TABLE session_shot_events ADD COLUMN count INTEGER;")
+            {
+                if !migration_already_applied(&error) {
+                    return Err(error.into());
+                }
+            }
+            Ok(())
         })?;
     }
 
     if user_version < 8 {
-        conn.execute_batch(
-            "
-            BEGIN;
+        run_schema_migration(conn, 8, |tx| {
+            tx.execute_batch(
+                "
             CREATE TABLE IF NOT EXISTS session_replay_context_windows (
                 session_id TEXT NOT NULL,
                 window_idx INTEGER NOT NULL,
@@ -676,31 +682,26 @@ fn migrate_schema(conn: &Connection) -> Result<()> {
             );
             CREATE INDEX IF NOT EXISTS idx_replay_context_windows_session
                 ON session_replay_context_windows(session_id, start_ms);
-            PRAGMA user_version = 8;
-            COMMIT;
             ",
-        )?;
+            )?;
+            Ok(())
+        })?;
     }
 
     if user_version < 9 {
-        conn.execute_batch(
-            "
-            BEGIN;
-            ALTER TABLE sessions ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unknown';
-            ALTER TABLE sessions ADD COLUMN integrity_failure_codes TEXT;
-            ALTER TABLE sessions ADD COLUMN integrity_checked_at_unix_ms INTEGER;
-            PRAGMA user_version = 9;
-            COMMIT;
-            ",
-        )
-        .or_else(|_| {
-            conn.execute_batch(
-                "
-                BEGIN;
-                PRAGMA user_version = 9;
-                COMMIT;
-                ",
-            )
+        run_schema_migration(conn, 9, |tx| {
+            for statement in [
+                "ALTER TABLE sessions ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unknown';",
+                "ALTER TABLE sessions ADD COLUMN integrity_failure_codes TEXT;",
+                "ALTER TABLE sessions ADD COLUMN integrity_checked_at_unix_ms INTEGER;",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
         })?;
     }
 
