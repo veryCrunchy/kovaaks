@@ -51,7 +51,6 @@ export function LiveFeedbackToast({ ttsEnabled = false, ttsVoice = null }: LiveF
                 borderLeft:     `4px solid ${color}`,
                 borderRadius:   8,
                 padding:        "9px 13px",
-                backdropFilter: "blur(16px) saturate(180%)",
                 boxShadow:      `0 4px 18px rgba(0,0,0,0.55), 0 0 10px ${color}14`,
               }}
             >

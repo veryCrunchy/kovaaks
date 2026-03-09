@@ -125,7 +125,6 @@ export function BridgeStateDebugHUD() {
       style={{
         background: C.glass,
         border: `1px solid ${C.accentBorder}`,
-        backdropFilter: "blur(16px) saturate(180%)",
         boxShadow: `0 8px 22px rgba(0,0,0,0.5), 0 0 0 1px ${C.accent}08`,
         color: C.text,
         fontFamily: "'JetBrains Mono', monospace",
