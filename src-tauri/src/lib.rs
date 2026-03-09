@@ -107,6 +107,83 @@ fn ue4ss_reload_runtime_flags(state: tauri::State<AppState>) -> Result<(), Strin
     bridge::request_runtime_flag_reload(&stats_dir)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+struct OverlayRuntimeNotice {
+    visible: bool,
+    kind: String,
+    title: String,
+    message: String,
+}
+
+fn hidden_overlay_runtime_notice() -> OverlayRuntimeNotice {
+    OverlayRuntimeNotice {
+        visible: false,
+        kind: "warning".to_string(),
+        title: String::new(),
+        message: String::new(),
+    }
+}
+
+fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
+    let Some(pid) = bridge::current_game_pid() else {
+        return hidden_overlay_runtime_notice();
+    };
+
+    let runtime_loaded = bridge::is_ue4ss_loaded_for_pid(pid);
+    if !runtime_loaded {
+        return hidden_overlay_runtime_notice();
+    }
+
+    if bridge::is_runtime_restart_required() {
+        return OverlayRuntimeNotice {
+            visible: true,
+            kind: "warning".to_string(),
+            title: "Restart KovaaK Required".to_string(),
+            message: "AimMod updated its in-game bridge. Restart KovaaK to load the new version."
+                .to_string(),
+        };
+    }
+
+    if !bridge::is_bridge_dll_connected() {
+        return OverlayRuntimeNotice {
+            visible: true,
+            kind: "warning".to_string(),
+            title: "Bridge Reconnect Failed".to_string(),
+            message:
+                "AimMod could not fully reconnect to the in-game bridge. Restart KovaaK if stats stay offline."
+                    .to_string(),
+        };
+    }
+
+    if bridge::is_bridge_stats_flow_stalled() {
+        return OverlayRuntimeNotice {
+            visible: true,
+            kind: "warning".to_string(),
+            title: "Stats Are Not Updating".to_string(),
+            message:
+                "AimMod reconnected, but live stats are stalled. Restart KovaaK if the HUD stays blank."
+                    .to_string(),
+        };
+    }
+
+    hidden_overlay_runtime_notice()
+}
+
+#[tauri::command]
+fn get_overlay_runtime_notice() -> OverlayRuntimeNotice {
+    current_overlay_runtime_notice()
+}
+
+#[tauri::command]
+fn get_is_debug_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[tauri::command]
+fn toggle_layout_huds(app: AppHandle) -> Result<(), String> {
+    app.emit("toggle-layout-huds", ()).map_err(|e| e.to_string())
+}
+
 fn deploy_and_inject_ue4ss(app: &AppHandle, stats_dir: &str) -> Result<(), String> {
     // UE4SS payload is shipped as a Tauri resource folder (see bundle.resources).
     let resource_dir = app
@@ -125,6 +202,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
             let reinject_cooldown = std::time::Duration::from_secs(8);
             let mut last_pid: Option<u32> = None;
             let mut last_attempt: Option<(u32, std::time::Instant)> = None;
+            let mut last_notice = hidden_overlay_runtime_notice();
 
             loop {
                 let current_pid = bridge::current_game_pid();
@@ -205,6 +283,12 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
                     None => {
                         last_attempt = None;
                     }
+                }
+
+                let next_notice = current_overlay_runtime_notice();
+                if next_notice != last_notice {
+                    let _ = app.emit("overlay-runtime-notice", &next_notice);
+                    last_notice = next_notice;
                 }
 
                 std::thread::sleep(poll_interval);
@@ -1453,6 +1537,9 @@ pub fn run() {
             ue4ss_get_runtime_flags,
             ue4ss_set_runtime_flag,
             ue4ss_reload_runtime_flags,
+            get_overlay_runtime_notice,
+            get_is_debug_build,
+            toggle_layout_huds,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
         ])

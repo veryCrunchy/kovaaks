@@ -403,8 +403,6 @@ fn capture_target_geometry(hwnd: HWND) -> anyhow::Result<CaptureTargetGeometry> 
 
 #[cfg(target_os = "windows")]
 fn dxgi_source_index_for_monitor(target_monitor_rect: RegionRect) -> anyhow::Result<usize> {
-    use windows::core::Interface;
-
     let factory: IDXGIFactory1 =
         unsafe { CreateDXGIFactory1() }.map_err(|e| anyhow::anyhow!("CreateDXGIFactory1: {e}"))?;
 

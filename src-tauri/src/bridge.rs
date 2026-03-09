@@ -747,7 +747,7 @@ mod imp {
         &CONNECTED
     }
 
-    fn runtime_restart_required_flag() -> &'static AtomicBool {
+    pub(crate) fn runtime_restart_required_flag() -> &'static AtomicBool {
         &RUNTIME_RESTART_REQUIRED
     }
 
@@ -2556,6 +2556,22 @@ mod imp {
         if is_pull_metric {
             state.last_pull_event_at = Some(now);
         }
+    }
+
+    pub(super) fn is_bridge_stats_flow_stalled() -> bool {
+        const STALL_AFTER: Duration = Duration::from_millis(1500);
+
+        let Ok(state) = bridge_session_state().lock() else {
+            return false;
+        };
+        if !state.session_active && !state.challenge_active {
+            return false;
+        }
+        let last_flow = state.last_pull_event_at.or(state.last_stats_flow_at);
+        let Some(last_flow) = last_flow else {
+            return true;
+        };
+        Instant::now().duration_since(last_flow) >= STALL_AFTER
     }
 
     include!("bridge/session_watchdog.rs");
@@ -6040,6 +6056,26 @@ pub fn is_bridge_dll_connected() -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_bridge_dll_connected() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_runtime_restart_required() -> bool {
+    imp::runtime_restart_required_flag().load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_runtime_restart_required() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_bridge_stats_flow_stalled() -> bool {
+    imp::is_bridge_stats_flow_stalled()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_bridge_stats_flow_stalled() -> bool {
     false
 }
 
