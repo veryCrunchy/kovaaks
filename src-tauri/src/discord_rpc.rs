@@ -226,6 +226,7 @@ mod imp {
     }
 
     fn build_activity(state: &BridgePresenceState) -> serde_json::Value {
+        let version_label = crate::app_version::display_version_label();
         let scenario_name = state
             .scenario_name
             .as_deref()
@@ -271,6 +272,8 @@ mod imp {
             }
         }
 
+        state_parts.push(version_label.clone());
+
         if let Some(kind) = family.clone() {
             state_parts.push(kind);
         }
@@ -300,7 +303,7 @@ mod imp {
             "assets".to_string(),
             json!({
                 "large_image": DISCORD_LARGE_IMAGE_KEY,
-                "large_text": "AimMod",
+                "large_text": crate::app_version::app_name_with_version(),
                 "small_image": DISCORD_SMALL_IMAGE_KEY,
                 "small_text": "KovaaK's Aim Trainer",
             }),

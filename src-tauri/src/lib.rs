@@ -217,6 +217,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
 
 mod bridge;
+mod app_version;
 mod discord_rpc;
 mod file_watcher;
 mod kovaaks_api;
@@ -1250,6 +1251,11 @@ fn set_mouse_passthrough(app: AppHandle, enabled: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_app_version_label() -> String {
+    app_version::display_version_label()
+}
+
 // ─── Single-instance helper ────────────────────────────────────────────────────
 
 /// Kills any previously running instance of the overlay.
@@ -1268,6 +1274,20 @@ fn focus_primary_window(app: &AppHandle) {
         let _ = window.unminimize();
         let _ = window.set_focus();
         break;
+    }
+}
+
+fn apply_window_titles(app: &AppHandle) {
+    let app_title = app_version::app_name_with_version();
+
+    if let Some(window) = app.get_webview_window("overlay") {
+        let _ = window.set_title(&app_title);
+    }
+    if let Some(window) = app.get_webview_window("logs") {
+        let _ = window.set_title(&format!("{app_title} — Logs"));
+    }
+    if let Some(window) = app.get_webview_window("stats") {
+        let _ = window.set_title(&format!("{app_title} — Session Stats"));
     }
 }
 
@@ -1339,6 +1359,7 @@ pub fn run() {
             get_monitors,
             set_overlay_monitor,
             get_cursor_pos,
+            get_app_version_label,
             open_speech_settings,
             open_natural_voices_store,
             search_scenarios,
@@ -1374,6 +1395,7 @@ pub fn run() {
                 "AimMod starting up — log file: {}",
                 logger::log_file_path().display()
             );
+            apply_window_titles(app.handle());
             discord_rpc::start();
             discord_rpc::update_presence_from_bridge(discord_rpc::BridgePresenceState {
                 game_state_code: 0,
@@ -1504,7 +1526,7 @@ fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error:
 
     let mut tray_builder = TrayIconBuilder::with_id("main")
         .menu(&menu)
-        .tooltip("AimMod");
+            .tooltip(app_version::app_name_with_version());
     if let Some(icon) = app.default_window_icon() {
         tray_builder = tray_builder.icon(icon.clone());
     }
