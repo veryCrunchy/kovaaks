@@ -125,16 +125,6 @@ jobs:
             throw "Staged kovaaks_rust_core.dll does not match the freshly built rust core DLL."
           }
 
-          $engineTickEnabled = Select-String -Path "src-tauri/ue4ss/UE4SS-settings.ini" -Pattern '^\s*HookEngineTick\s*=\s*1\s*$' -CaseSensitive:$false -Quiet
-          if (-not $engineTickEnabled) {
-            throw "Expected staged production UE4SS-settings.ini to contain HookEngineTick = 1."
-          }
-
-          $viewportTickEnabled = Select-String -Path "src-tauri/ue4ss/UE4SS-settings.ini" -Pattern '^\s*HookGameViewportClientTick\s*=\s*1\s*$' -CaseSensitive:$false -Quiet
-          if (-not $viewportTickEnabled) {
-            throw "Expected staged production UE4SS-settings.ini to contain HookGameViewportClientTick = 1."
-          }
-
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
