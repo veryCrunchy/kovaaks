@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.0](https://github.com/veryCrunchy/kovaaks/compare/v1.1.0...v1.2.0) (2026-03-09)
+
+
+### Features
+
+* add pause window tracking to run metrics and update related logic ([ecde9ca](https://github.com/veryCrunchy/kovaaks/commit/ecde9caf99cb0c817d3c5423b8a35df0c3b03935))
+* add settings tab and enhance settings component functionality ([ac3dd78](https://github.com/veryCrunchy/kovaaks/commit/ac3dd78767e2e5063d4ffa998b9eccb3627f2951))
+* enhance overlay notice logic and improve DraggableHUD position handling ([a27aea0](https://github.com/veryCrunchy/kovaaks/commit/a27aea02838ecaf6566d770bf9662084763a0f16))
+* enhance schema migration and improve code formatting ([c67abc2](https://github.com/veryCrunchy/kovaaks/commit/c67abc2b29cd532e6418a2af31fa35f52e46b2c8))
+* implement overlay runtime notice system and integrate with LiveFeedbackToast ([e84f8e0](https://github.com/veryCrunchy/kovaaks/commit/e84f8e0ecb6e0dd0735e01763e711a0a0f52984b))
+* remove smoothness tab and related components from settings ([108d07d](https://github.com/veryCrunchy/kovaaks/commit/108d07d24a12835f1fa263a917c59b86577aff30))
+
+
+### Bug Fixes
+
+* update log messages to include possessive form for KovaaK's ([6ade03e](https://github.com/veryCrunchy/kovaaks/commit/6ade03ec425a833ab8605710b18980b19c42ed89))
+* update screen recorder to capture at 24 fps and adjust frame storage logic ([c384808](https://github.com/veryCrunchy/kovaaks/commit/c384808b224f9d230b565bdf3757a22f68315e91))
+
 ## [1.1.0](https://github.com/veryCrunchy/kovaaks/compare/v1.0.1...v1.1.0) (2026-03-09)
 
 
