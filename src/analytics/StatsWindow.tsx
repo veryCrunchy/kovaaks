@@ -130,6 +130,7 @@ interface PracticeProfile {
   avgUniqueScenariosPerBlock: number;
   avgScenarioSwitchesPerBlock: number;
   switchRate: number;
+  topScenarios: { scenario: string; share: number; count: number }[];
 }
 
 interface BridgeParsedEvent {
@@ -225,6 +226,7 @@ const STATS_WINDOW_STORAGE_KEYS = {
   search: "stats-window:search",
   selectedScenario: "stats-window:selected-scenario",
   rootMode: "stats-window:root-mode",
+  sessionsPane: "stats-window:sessions-pane",
   scenarioTab: "stats-window:scenario-tab",
   sessionFilter: "stats-window:session-filter",
   scenarioSort: "stats-window:scenario-sort",
@@ -492,6 +494,38 @@ function formatTelemetryWindowLabel(startMs: number, endMs: number): string {
   return `${start}-${end}`;
 }
 
+function formatReplayMomentSourceLabel(source: "sql" | "derived"): string {
+  return source === "sql" ? "saved moment" : "estimated moment";
+}
+
+function formatReplayMomentPhaseLabel(phase: string | null | undefined): string | null {
+  if (!phase) return null;
+  switch (phase) {
+    case "opening":
+      return "start of run";
+    case "mid":
+      return "mid run";
+    case "closing":
+      return "end of run";
+    default:
+      return phase.replace(/_/g, " ");
+  }
+}
+
+function formatReplayMomentContextLabel(contextKind: string | null | undefined): string | null {
+  if (!contextKind) return null;
+  switch (contextKind) {
+    case "mixed_cluster":
+      return "mixed targets";
+    case "metric_shift":
+      return "pace shift";
+    case "target_focus":
+      return "single-target focus";
+    default:
+      return contextKind.replace(/_/g, " ");
+  }
+}
+
 function scenarioTypeSortRank(type: string | null | undefined) {
   if (!type || type === "Unknown") return "zzzz-unknown";
   return type.toLowerCase();
@@ -581,11 +615,20 @@ function startOfLocalDayMs(timestampMs: number): number {
   return d.getTime();
 }
 
+const PRACTICE_PROFILE_WINDOW_DAYS = 14;
+const PRACTICE_PROFILE_MIN_RECENT_SESSIONS = 12;
+const PRACTICE_PROFILE_FALLBACK_RUNS = 60;
+
 function buildPracticeProfile(sorted: AnalyticsSessionRecord[]): PracticeProfile | null {
   const reliable = sorted.filter((record) => record.isReliableForAnalysis);
   if (reliable.length < 5) return null;
 
-  const recent = reliable.slice(-Math.min(reliable.length, 30));
+  const latestTimestampMs = reliable[reliable.length - 1]?.timestampMs ?? 0;
+  const recentWindowStartMs = latestTimestampMs - PRACTICE_PROFILE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  const recentWindow = reliable.filter((record) => record.timestampMs >= recentWindowStartMs);
+  const recent = recentWindow.length >= PRACTICE_PROFILE_MIN_RECENT_SESSIONS
+    ? recentWindow
+    : reliable.slice(-Math.min(reliable.length, PRACTICE_PROFILE_FALLBACK_RUNS));
   const activeDays = new Set(recent.map((record) => startOfLocalDayMs(record.timestampMs))).size;
   const firstDayMs = startOfLocalDayMs(recent[0].timestampMs);
   const lastDayMs = startOfLocalDayMs(recent[recent.length - 1].timestampMs);
@@ -617,6 +660,14 @@ function buildPracticeProfile(sorted: AnalyticsSessionRecord[]): PracticeProfile
       dominantCount = count;
     }
   }
+  const topScenarios = [...scenarioCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 3)
+    .map(([scenario, count]) => ({
+      scenario,
+      count,
+      share: count / recent.length,
+    }));
 
   const blockUniqueScenarioCounts = blocks.map(
     (block) => new Set(block.sessions.map((session) => session.normalizedScenario)).size,
@@ -651,6 +702,7 @@ function buildPracticeProfile(sorted: AnalyticsSessionRecord[]): PracticeProfile
     avgUniqueScenariosPerBlock: mean(blockUniqueScenarioCounts),
     avgScenarioSwitchesPerBlock: mean(blockSwitchCounts),
     switchRate: totalAdjacentPairs > 0 ? totalSwitches / totalAdjacentPairs : 0,
+    topScenarios,
   };
 }
 
@@ -1094,6 +1146,23 @@ function groupIntoPlayBlocks<T extends SessionRecord>(sorted: T[]): PlayBlock<T>
   return blocks;
 }
 
+function describeWarmupSettleIn(avgWarmupSessions: number): string {
+  if (avgWarmupSessions <= 0.75) return "the first run";
+  if (avgWarmupSessions <= 1.5) return "about the first run";
+  if (avgWarmupSessions <= 2.5) return "about the first 2 runs";
+  return `about the first ${Math.ceil(avgWarmupSessions)} runs`;
+}
+
+function describeWarmupAction(avgWarmupSessions: number): string {
+  if (avgWarmupSessions <= 1) {
+    return "A short 2-3 minute primer on an easy tracking or large-target clicking scenario should be enough before serious attempts.";
+  }
+  if (avgWarmupSessions <= 2) {
+    return "Use a brief ramp before your main scenario: easy tracking, then medium flicks, then your main task once the cursor feels settled.";
+  }
+  return "Your warm-up window is longer than ideal. Start each block with a deliberate 2-3 scenario ramp that climbs toward your main task instead of opening cold on score attempts.";
+}
+
 /**
  * Returns a Set of session IDs classified as warmup runs.
  * A session is warmup if it sits in the early under-baseline portion of a play
@@ -1224,6 +1293,71 @@ function InfoTip({ text }: { text: string }) {
     >
       i
     </span>
+  );
+}
+
+function HoverInfoCard({
+  title,
+  summary,
+  detail,
+}: {
+  title: string;
+  summary: string;
+  detail: string;
+}) {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <div
+      style={{ position: "relative", display: "inline-flex" }}
+      onMouseEnter={() => setOpen(true)}
+      onMouseLeave={() => setOpen(false)}
+      onFocus={() => setOpen(true)}
+      onBlur={() => setOpen(false)}
+    >
+      <span
+        role="button"
+        tabIndex={0}
+        style={{
+          fontSize: 11,
+          color: "rgba(255,255,255,0.5)",
+          cursor: "help",
+          textDecoration: "underline dotted rgba(255,255,255,0.22)",
+          textUnderlineOffset: 3,
+          outline: "none",
+        }}
+      >
+        {title}
+      </span>
+      {open && (
+        <div
+          style={{
+            position: "absolute",
+            left: 0,
+            top: "calc(100% + 8px)",
+            width: 240,
+            zIndex: 30,
+            background: "rgba(5,8,18,0.96)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            borderRadius: 10,
+            padding: "10px 12px",
+            boxShadow: "0 16px 36px rgba(0,0,0,0.32)",
+            backdropFilter: "blur(10px)",
+            pointerEvents: "none",
+          }}
+        >
+          <div style={{ fontSize: 11, fontWeight: 700, color: "rgba(255,255,255,0.9)", marginBottom: 4 }}>
+            {title}
+          </div>
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.62)", lineHeight: 1.55 }}>
+            {summary}
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.4)", lineHeight: 1.55, marginTop: 6 }}>
+            {detail}
+          </div>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2077,7 +2211,7 @@ function MovementTab({
       <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
         No smoothness data recorded for this scenario.
         <br />
-        Make sure the mouse hook is active during play.
+        Make sure mouse tracking is turned on while you play.
       </div>
     );
   }
@@ -3198,27 +3332,24 @@ function ReplayTab({
   }, [shotTelemetrySummary]);
   const shotTelemetrySummaryLabel = useMemo(() => {
     if (shotTelemetryDisplayMode === "context") {
-      if (shotTelemetryContext.source === "sql") {
-        return `Showing ${shotTelemetryContext.rows.length.toLocaleString()} windows`;
-      }
-      return `Showing ${shotTelemetryContext.rows.length.toLocaleString()} fallback windows`;
+      return `Showing ${shotTelemetryContext.rows.length.toLocaleString()} moments`;
     }
     if (selectedContextRow) {
-      return `Showing ${visibleShotTelemetry.length.toLocaleString()} samples in window`;
+      return `Showing ${visibleShotTelemetry.length.toLocaleString()} shot records in this moment`;
     }
-    return `Showing ${shotTelemetry.length.toLocaleString()} samples`;
+    return `Showing ${shotTelemetry.length.toLocaleString()} shot records`;
   }, [selectedContextRow, shotTelemetry.length, shotTelemetryContext.rows.length, shotTelemetryContext.source, shotTelemetryDisplayMode, visibleShotTelemetry.length]);
   const shotTelemetrySummaryInfo = useMemo(() => {
     if (shotTelemetryDisplayMode === "context") {
       if (shotTelemetryContext.source === "sql") {
-        return `${shotTelemetryContext.rows.length.toLocaleString()} persisted context windows backed by SQL and derived from shot telemetry plus run timeline data.`;
+        return `${shotTelemetryContext.rows.length.toLocaleString()} saved moments were grouped from this run.`;
       }
-      return `${shotTelemetryContext.rows.length.toLocaleString()} fallback context windows built from ${shotTelemetry.length.toLocaleString()} persisted telemetry samples.`;
+      return `${shotTelemetryContext.rows.length.toLocaleString()} moments were rebuilt from ${shotTelemetry.length.toLocaleString()} saved shot records.`;
     }
     if (selectedContextRow) {
-      return `${visibleShotTelemetry.length.toLocaleString()} raw persisted telemetry samples inside the selected context window.`;
+      return `${visibleShotTelemetry.length.toLocaleString()} shot records fall inside the selected moment.`;
     }
-    return `All ${shotTelemetry.length.toLocaleString()} raw persisted telemetry samples for this run.`;
+    return `All ${shotTelemetry.length.toLocaleString()} saved shot records from this run.`;
   }, [selectedContextRow, shotTelemetry.length, shotTelemetryContext.rows.length, shotTelemetryContext.source, shotTelemetryDisplayMode, visibleShotTelemetry.length]);
   const shotTelemetrySampleRows = useMemo(() => {
     if (visibleShotTelemetry.length === 0) return [];
@@ -3342,7 +3473,7 @@ function ReplayTab({
       <div style={{ color: "rgba(255,255,255,0.3)", padding: 20, lineHeight: 1.7 }}>
         No replays saved yet.
         <br />
-        Replays are recorded automatically during sessions when the mouse hook is active.
+        Replays are recorded automatically during sessions when mouse tracking is active.
       </div>
     );
   }
@@ -3351,7 +3482,7 @@ function ReplayTab({
     <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
       {/* Session selector */}
       <div style={CHART_STYLE}>
-        <SectionTitle info="Pick any run to inspect the replay, shot telemetry, and exact run timeline.">Select session</SectionTitle>
+        <SectionTitle info="Pick any run to inspect the mouse replay, shot detail, and how the run changed over time.">Select session</SectionTitle>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
           <div />
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -3501,7 +3632,7 @@ function ReplayTab({
               </button>
               {!hasInGameTickStream && (
                 <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>
-                  This replay has no tick stream data for in-game playback.
+                  This replay cannot be played back in-game.
                 </span>
               )}
             </div>
@@ -3513,7 +3644,7 @@ function ReplayTab({
           </div> */}
 
           <div style={CHART_STYLE}>
-            <SectionTitle>Bridge run stats (persisted)</SectionTitle>
+            <SectionTitle>Run stats</SectionTitle>
             {bridgeRunStatCards.length > 0 && (
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 {bridgeRunStatCards.map((card) => (
@@ -3529,13 +3660,13 @@ function ReplayTab({
             )}
             {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
               <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
-                Per-second bridge timeline data is sparse for this run. Aggregate values above are shown from available session data.
+                This run has limited second-by-second detail, so the summary above uses the best saved data available.
               </div>
             )}
           </div>
 
           <div style={CHART_STYLE}>
-            <SectionTitle>Shot telemetry (persisted)</SectionTitle>
+            <SectionTitle>Shot detail</SectionTitle>
             {shotTelemetrySummary ? (
               <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
                 {shotTelemetrySummaryCards.length > 0 && (
@@ -3587,13 +3718,13 @@ function ReplayTab({
                   >
                     <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                       <div style={{ fontSize: 12, color: "rgba(255,255,255,0.82)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>Drilldown active: {selectedContextRow.label}</span>
-                        <InfoTip text="Target mix, raw samples, moment coaching, and mouse replay are filtered to this window." />
+                        <span>Focused moment: {selectedContextRow.label}</span>
+                        <InfoTip text="Target mix, shot detail, coaching notes, and the mouse replay below are all filtered to this moment." />
                       </div>
                       <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.5 }}>
                         {formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}
-                        {selectedContextRow.phase ? ` · phase ${selectedContextRow.phase}` : ""}
-                        {selectedContextRow.contextKind ? ` · ${selectedContextRow.contextKind}` : ""}
+                        {formatReplayMomentPhaseLabel(selectedContextRow.phase) ? ` · ${formatReplayMomentPhaseLabel(selectedContextRow.phase)}` : ""}
+                        {formatReplayMomentContextLabel(selectedContextRow.contextKind) ? ` · ${formatReplayMomentContextLabel(selectedContextRow.contextKind)}` : ""}
                       </div>
                     </div>
                     <button
@@ -3612,7 +3743,7 @@ function ReplayTab({
                         fontWeight: 700,
                       }}
                     >
-                      Clear drilldown
+                      Clear focus
                     </button>
                   </div>
                 )}
@@ -3690,8 +3821,9 @@ function ReplayTab({
                               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                                 <span>{row.label}</span>
                                 <span style={{ fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
-                                  {row.source === "sql" ? "persisted context" : "derived fallback"}
-                                  {row.phase ? ` · ${row.phase}` : ""}
+                                  {formatReplayMomentSourceLabel(row.source)}
+                                  {formatReplayMomentPhaseLabel(row.phase) ? ` · ${formatReplayMomentPhaseLabel(row.phase)}` : ""}
+                                  {formatReplayMomentContextLabel(row.contextKind) ? ` · ${formatReplayMomentContextLabel(row.contextKind)}` : ""}
                                 </span>
                               </div>
                             </td>
@@ -3778,14 +3910,14 @@ function ReplayTab({
               </div>
             ) : (
               <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
-                No stored shot telemetry was saved for this replay.
+                No shot detail was saved for this replay.
               </div>
             )}
           </div>
 
           {visibleReplayContextCoaching.length > 0 && (
             <div style={CHART_STYLE}>
-              <SectionTitle>Context coaching (persisted windows)</SectionTitle>
+              <SectionTitle>Coaching by moment</SectionTitle>
               <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                 {visibleReplayContextCoaching.map((signal) => {
                   const active = selectedContextKey === signal.contextKey;
@@ -3848,7 +3980,7 @@ function ReplayTab({
 
           {runChartData.length > 1 && hasRunTimelineSignal && (
             <div style={CHART_STYLE}>
-              <SectionTitle>Timeline by second (exact run windows)</SectionTitle>
+              <SectionTitle>Run timeline by second</SectionTitle>
               <ResponsiveContainer width="100%" height={200}>
                 <LineChart data={runChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
                   <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
@@ -3940,9 +4072,9 @@ function ReplayTab({
           {filteredRunMoments.length > 0 && (
             <div style={CHART_STYLE}>
               <SectionTitle
-                info={selectedContextRow ? `Showing only coaching callouts that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.` : undefined}
+                info={selectedContextRow ? `Showing only coaching notes that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.` : undefined}
               >
-                Moment coaching (time-specific)
+                Moment coaching
               </SectionTitle>
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                 {filteredRunMoments.map((moment) => (
@@ -3982,7 +4114,7 @@ function ReplayTab({
       )}
       {!loading && replayPayload && selectedRecord && !runSummary && (
         <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.42)", fontSize: 12, lineHeight: 1.6 }}>
-          This replay was saved before bridge timeline persistence was added, so only mouse path data is available.
+          This replay was saved before full timing detail was available, so only the mouse path can be shown.
         </div>
       )}
       {!loading && replayPayload && selectedRecord && (
@@ -4021,6 +4153,51 @@ interface AimFingerprint {
   axes: AimAxisProfile[];
 }
 
+interface AimAxisDefinition {
+  label: string;
+  what: string;
+  how: (tracking: boolean) => string;
+}
+
+const AIM_AXIS_DEFINITIONS: Record<AimAxisKey, AimAxisDefinition> = {
+  precision: {
+    label: "Precision",
+    what: "How cleanly and directly you move onto the target.",
+    how: () => "Higher scores come from straighter mouse paths and less small shake near the target.",
+  },
+  speed: {
+    label: "Speed",
+    what: "How quickly you move when a run is live.",
+    how: (tracking) =>
+      tracking
+        ? "This reflects your typical movement speed across recent tracking runs."
+        : "This reflects your typical movement speed across recent clicking runs.",
+  },
+  control: {
+    label: "Control",
+    what: "How well you stop cleanly and stay on line without wasting motion.",
+    how: () => "Higher scores come from fewer overshoots, fewer extra corrections, and cleaner paths into the target.",
+  },
+  consistency: {
+    label: "Consistency",
+    what: "How steady your movement pace stays from moment to moment.",
+    how: () => "Higher scores mean your movement speed stays more even instead of speeding up and braking all the time.",
+  },
+  decisiveness: {
+    label: "Decisiveness",
+    what: "How quickly you commit once you are on target.",
+    how: () => "Higher scores mean you spend less time in small follow-up corrections before finishing the shot or track.",
+  },
+  rhythm: {
+    label: "Rhythm",
+    what: "How stable your timing feels during a run.",
+    how: (tracking) =>
+      tracking
+        ? "For tracking, this becomes Flow and rewards smooth, even speed while staying connected to the target."
+        : "For clicking, this rewards even shot timing instead of rushed bursts and hesitant pauses.",
+  },
+};
+
 function dominantScenarioType(records: SessionRecord[]): string {
   const panelRecs = records.filter(
     (r) => r.stats_panel?.scenario_type && r.stats_panel.scenario_type !== "Unknown",
@@ -4036,6 +4213,17 @@ function dominantScenarioType(records: SessionRecord[]): string {
   return best;
 }
 
+function inverseRangeScore(value: number, good: number, bad: number): number {
+  return 100 - scaleToScore(value, good, bad);
+}
+
+function weightedAxisScore(parts: Array<[score: number, weight: number]>): number {
+  const totalWeight = parts.reduce((sum, [, weight]) => sum + weight, 0);
+  if (totalWeight <= 0) return 0;
+  const weighted = parts.reduce((sum, [score, weight]) => sum + score * weight, 0) / totalWeight;
+  return Math.round(clampNumber(weighted, 0, 100));
+}
+
 function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: string): AimFingerprint {
   const dist = (fn: (s: SmoothnessSnapshot) => number) =>
     metricDistribution(smoothRecords.map((r) => fn(r.smoothness!))) ?? { median: 0, p25: 0, p75: 0 };
@@ -4047,19 +4235,38 @@ function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: strin
   const pathEff = dist((s) => s.path_efficiency);
   const correction = dist((s) => s.correction_ratio);
   const clickCV = dist((s) => s.click_timing_cv);
+  const directionalBias = dist((s) => s.directional_bias);
 
   const tracking = isTrackingScenario(scenarioType);
 
-  const precision = Math.round(
-    clampNumber((pathEff.median * 0.7 + Math.max(0, 1 - jitter.p75 * 3.2) * 0.3) * 100, 0, 100),
-  );
-  const speed = Math.round(scaleToScore(avgSpeed.median, 120, 1750));
-  const control = Math.round(clampNumber((1 - Math.max(overshoot.median, overshoot.p75 * 0.8) * 2.1) * 100, 0, 100));
-  const consistency = Math.round(clampNumber((1 - Math.max(velStd.median, velStd.p75 * 0.85)) * 100, 0, 100));
-  const decisiveness = Math.round(clampNumber((1 - Math.max(correction.median, correction.p75 * 0.8) * 2.25) * 100, 0, 100));
+  const precision = weightedAxisScore([
+    [scaleToScore(pathEff.median, 0.86, 0.985), 0.65],
+    [inverseRangeScore(jitter.p75, 0.14, 0.45), 0.35],
+  ]);
+  const speed = Math.round(scaleToScore(avgSpeed.median, tracking ? 650 : 450, tracking ? 2600 : 2300));
+  const control = weightedAxisScore([
+    [inverseRangeScore(Math.max(overshoot.median, overshoot.p75 * 0.75), 0.00005, 0.0045), 0.4],
+    [inverseRangeScore(Math.max(correction.median, correction.p75 * 0.85), 0.10, 0.42), 0.4],
+    [scaleToScore(pathEff.median, 0.88, 0.98), 0.15],
+    [inverseRangeScore(Math.max(directionalBias.median, directionalBias.p75 * 0.8), 0.0, 0.08), 0.05],
+  ]);
+  const consistency = weightedAxisScore([
+    [inverseRangeScore(Math.max(velStd.median, velStd.p75 * 0.85), 0.18, 0.9), 0.8],
+    [inverseRangeScore(jitter.median, 0.12, 0.42), 0.2],
+  ]);
+  const decisiveness = weightedAxisScore([
+    [inverseRangeScore(Math.max(correction.median, correction.p75 * 0.8), 0.08, 0.38), 0.85],
+    [inverseRangeScore(Math.max(directionalBias.median, directionalBias.p75), 0.0, 0.08), 0.15],
+  ]);
   const rhythm = tracking
-    ? Math.round(clampNumber((1 - Math.max(velStd.median, velStd.p75 * 1.15)) * 100, 0, 100))
-    : Math.round(clampNumber((1 - Math.max(clickCV.median, clickCV.p75 * 0.9)) * 100, 0, 100));
+    ? weightedAxisScore([
+        [inverseRangeScore(Math.max(velStd.median, velStd.p75), 0.18, 0.95), 0.7],
+        [inverseRangeScore(jitter.median, 0.12, 0.42), 0.3],
+      ])
+    : weightedAxisScore([
+        [inverseRangeScore(Math.max(clickCV.median, clickCV.p75 * 0.9), 0.03, 0.28), 0.8],
+        [inverseRangeScore(Math.max(correction.median, correction.p75 * 0.85), 0.08, 0.4), 0.2],
+      ]);
 
   const axes: AimAxisProfile[] = [
     {
@@ -4075,7 +4282,13 @@ function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: strin
     {
       key: "control",
       label: "Control",
-      volatility: Math.round(scaleToVolatility(overshoot.p75 - overshoot.p25, 0.22)),
+      volatility: Math.round(
+        (
+          scaleToVolatility(overshoot.p75 - overshoot.p25, 0.0045)
+          + scaleToVolatility(correction.p75 - correction.p25, 0.22)
+          + scaleToVolatility(directionalBias.p75 - directionalBias.p25, 0.08)
+        ) / 3,
+      ),
     },
     {
       key: "consistency",
@@ -4085,7 +4298,12 @@ function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: strin
     {
       key: "decisiveness",
       label: "Decisiveness",
-      volatility: Math.round(scaleToVolatility(correction.p75 - correction.p25, 0.22)),
+      volatility: Math.round(
+        (
+          scaleToVolatility(correction.p75 - correction.p25, 0.22)
+          + scaleToVolatility(directionalBias.p75 - directionalBias.p25, 0.08)
+        ) / 2,
+      ),
     },
     {
       key: "rhythm",
@@ -4102,7 +4320,7 @@ function buildAimFingerprint(smoothRecords: SessionRecord[], scenarioType: strin
     decisiveness,
     rhythm,
     sessionCount: smoothRecords.length,
-    basisLabel: "Recent telemetry median with volatility weighting",
+    basisLabel: "Recent saved movement stats",
     axes,
   };
 }
@@ -4326,7 +4544,7 @@ function generateCoachingCards(
         title: "Massed Practice Pattern",
         badge: "Spacing Science",
         badgeColor: "#00b4ff",
-        body: `Your last ${practiceProfile.sessionCount} reliable runs are clustered into ${avgBlockMinutes.toFixed(0)}-minute play blocks across roughly ${daysPerWeek.toFixed(1)} active day${daysPerWeek >= 1.5 ? "s" : ""}/week. Reviews on motor practice schedules describe this as a setup where warm-up gains, short-term performance spikes, and fatigue get stacked together, which can feel productive in-session but hurts retention quality.`,
+        body: `Your last ${practiceProfile.sessionCount} reliable runs are clustered into ${avgBlockMinutes.toFixed(0)}-minute play blocks across roughly ${daysPerWeek.toFixed(1)} active day${daysPerWeek >= 1.5 ? "s" : ""}/week. Long grind blocks can feel productive in the moment, but they also stack warm-up gains and fatigue together, which makes true progress harder to read.`,
         tip: "Keep the volume, split the block. Converting one long grind into two 20–35 minute blocks on separate parts of the day or on adjacent days usually preserves effort while improving what actually sticks.",
       });
     } else if (distributedPattern) {
@@ -4342,7 +4560,7 @@ function generateCoachingCards(
         title: "Practice Distribution Matters",
         badge: "Spacing Science",
         badgeColor: "#00b4ff",
-        body: `Your recent schedule is mixed: about ${daysPerWeek.toFixed(1)} active days/week and ${avgBlockMinutes.toFixed(0)} minutes per play block. Motor learning models treat spacing as a balance between four forces: learning, forgetting, warm-up decrement, and fatigue. Your current pattern likely leaves some easy retention gains on the table.`,
+        body: `Your recent schedule is mixed: about ${daysPerWeek.toFixed(1)} active days/week and ${avgBlockMinutes.toFixed(0)} minutes per play block. There is probably some easy progress left on the table just from making your schedule a little more repeatable.`,
         tip: "Nudge toward consistency before adding more volume. Aim for repeatable 20–35 minute blocks on 3–5 days/week, then compare your median score and variance after a week instead of chasing one-day highs.",
       });
     }
@@ -4481,7 +4699,7 @@ function generateCoachingCards(
         title: "Active Improvement Phase",
         badge: "Motor Learning",
         badgeColor: "#00f5a0",
-        body: `You're gaining ~${Math.round(slope)} pts/session. The motor learning 'power law of practice' predicts improvement rates slow as skill increases — but you're still in a productive growth phase.`,
+        body: `You're gaining about ${Math.round(slope)} points per session. Improvement usually slows as skill rises, but right now you're still in a strong growth phase.`,
         tip: `At this rate you'd reach +10% of your current average in ~${sessionsToNext} more sessions. To sustain the pace, incrementally increase scenario difficulty rather than grinding at the same challenge level. Comfortable practice produces diminishing returns.`,
       });
   }
@@ -4498,7 +4716,7 @@ function generateCoachingCards(
         title: "Blocked Practice Bias",
         badge: "Skill Transfer",
         badgeColor: "#a78bfa",
-        body: `${dominantPct.toFixed(0)}% of your last ${practiceProfile.sessionCount} reliable runs were ${practiceProfile.dominantScenario}, and most play blocks contain only ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenario on average. Recent contextual-interference meta-analyses show this kind of blocked practice usually feels better during acquisition, but retention and transfer improve more when adults add harder, interleaved retrieval.`,
+        body: `${dominantPct.toFixed(0)}% of your last ${practiceProfile.sessionCount} reliable runs were ${practiceProfile.dominantScenario}, and most practice blocks stay on about ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenario. That usually feels smooth in the moment, but mixing in a contrast scenario tends to build stronger carryover.`,
         tip: isTracking
           ? "Keep your main tracking scenario, but after every 2–3 serious runs insert one contrasting clicking or precision scenario. Expect same-day scores to feel worse at first; the point is stronger retention when you come back."
           : "Keep your main click scenario, but after every 2–3 serious runs insert one smooth tracking scenario. That extra retrieval cost is the part that improves transfer, even if the session feels less comfortable.",
@@ -4508,8 +4726,8 @@ function generateCoachingCards(
         title: "Interleaving Is Working",
         badge: "Skill Transfer",
         badgeColor: "#00f5a0",
-        body: `Your recent blocks average ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenarios with a ${Math.round(practiceProfile.switchRate * 100)}% scenario-switch rate. That is enough contextual interference to challenge retrieval without turning practice into random noise.`,
-        tip: "Keep judging this by next-day quality and in-game carryover, not by whether every switch immediately produces a PB. Interleaving often depresses acquisition slightly while improving retention and transfer.",
+        body: `Your recent blocks average ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenarios, and you switch on about ${Math.round(practiceProfile.switchRate * 100)}% of runs inside a block. That is enough variety to challenge you without turning practice into chaos.`,
+        tip: "Judge this by next-day quality and in-game carryover, not only by whether every switch gives you an instant PB. A little variety often feels harder in the moment, but pays off later.",
       });
     } else {
       cards.push({
@@ -4530,6 +4748,119 @@ function generateCoachingCards(
       drills: drillRecommendationsForCard(card.title, scenarioType),
     }))
     .slice(0, 7);
+}
+
+function PracticeProfilePanel({ practiceProfile }: { practiceProfile: PracticeProfile }) {
+  return (
+    <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionTitle>Practice Profile</SectionTitle>
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))",
+          gap: 12,
+          alignItems: "start",
+        }}
+      >
+        <div
+          style={{
+            ...CARD_STYLE,
+            minWidth: 0,
+            minHeight: 112,
+            padding: "12px 16px",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "flex-start",
+            gap: 4,
+          }}
+        >
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+            Active cadence
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#00b4ff" }}>
+            {practiceProfile.daysPerWeek.toFixed(1)} days/wk
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+            {practiceProfile.activeDays} active day{practiceProfile.activeDays !== 1 ? "s" : ""} in the last {practiceProfile.spanDays} day{practiceProfile.spanDays !== 1 ? "s" : ""}
+          </div>
+        </div>
+        <div
+          style={{
+            ...CARD_STYLE,
+            minWidth: 0,
+            minHeight: 112,
+            padding: "12px 16px",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "flex-start",
+            gap: 4,
+          }}
+        >
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+            Block size
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#ffd700" }}>
+            {practiceProfile.avgBlockMinutes.toFixed(0)} min
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+            avg {practiceProfile.avgBlockRuns.toFixed(1)} runs/block, peak {practiceProfile.maxBlockMinutes.toFixed(0)} min
+          </div>
+        </div>
+        <div
+          style={{
+            ...CARD_STYLE,
+            minWidth: 0,
+            minHeight: 112,
+            padding: "12px 16px",
+            display: "flex",
+            flexDirection: "column",
+            justifyContent: "flex-start",
+            gap: 4,
+          }}
+        >
+          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
+            Scenario mix
+          </div>
+          <div style={{ fontSize: 20, fontWeight: 700, color: "#a78bfa" }}>
+            {Math.round(practiceProfile.dominantScenarioShare * 100)}% main
+          </div>
+          <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
+            {practiceProfile.scenarioDiversity} scenarios total, {practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} per block
+          </div>
+        </div>
+      </div>
+      {practiceProfile.topScenarios.length > 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginTop: -2 }}>
+          <span style={{ fontSize: 10, color: "rgba(255,255,255,0.34)", textTransform: "uppercase", letterSpacing: 0.8 }}>
+            Mix
+          </span>
+          {practiceProfile.topScenarios.map((entry) => (
+            <span
+              key={entry.scenario}
+              title={entry.scenario}
+              style={{
+                fontSize: 10,
+                padding: "3px 8px",
+                borderRadius: 999,
+                background: "rgba(167,139,250,0.10)",
+                border: "1px solid rgba(167,139,250,0.20)",
+                color: "rgba(255,255,255,0.72)",
+                maxWidth: 220,
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {Math.round(entry.share * 100)}% {entry.scenario}
+            </span>
+          ))}
+        </div>
+      )}
+      <p style={{ margin: "2px 0 0", fontSize: 12, color: "rgba(255,255,255,0.58)", lineHeight: 1.7 }}>
+        Recent overall practice is centered on {practiceProfile.dominantScenario} and averages {practiceProfile.sessionsPerActiveDay.toFixed(1)} run{practiceProfile.sessionsPerActiveDay >= 1.5 ? "s" : ""} per active day, with scenario changes on about {Math.round(practiceProfile.switchRate * 100)}% of runs inside each practice block.
+      </p>
+    </div>
+  );
 }
 
 function CoachingCard({
@@ -4774,12 +5105,14 @@ function ScoreDistributionChart({
 function CoachingTab({
   records,
   sorted,
+  practiceProfile,
   warmupIds,
   sessionFilter,
   onExploreDrill,
 }: {
   records: AnalyticsSessionRecord[];
   sorted: AnalyticsSessionRecord[];
+  practiceProfile: PracticeProfile | null;
   warmupIds: Set<string>;
   sessionFilter: SessionFilter;
   onExploreDrill: (query: string) => void;
@@ -4819,7 +5152,6 @@ function CoachingTab({
   const recent7      = scores.slice(-7);
   const recentCV     = mean(recent7) > 0 ? (stddev(recent7) / mean(recent7)) * 100 : 0;
   const isPlateau    = scores.length >= 8 && Math.abs(slopeNormPct) < 0.5 && recentCV < 8;
-  const practiceProfile = buildPracticeProfile(coachSorted);
 
   const scenarioType = dominantScenarioType(coachRecords);
   const isTracking   = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
@@ -4870,13 +5202,12 @@ function CoachingTab({
     const peakScores   = peakSorted.map((r) => r.score);
     const warmupAvg    = mean(warmupScores);
     const peakAvg      = peakScores.length > 0 ? mean(peakScores) : 0;
-    const dropPct      = peakAvg > 0 ? ((peakAvg - warmupAvg) / peakAvg) * 100 : 0;
+    const dropPct      = peakAvg > 0 ? Math.max(0, ((peakAvg - warmupAvg) / peakAvg) * 100) : 0;
 
-    // Count average warmup sessions per play block
+    // Count average warmup sessions across any block where a warmup effect was detected.
     const blocks = groupIntoPlayBlocks(sorted);
     const warmupBlocks = blocks.filter(
-      (b) => b.gapBeforeMs && b.gapBeforeMs >= WARMUP_GAP_MS &&
-             b.sessions.some((s) => warmupIds.has(s.id)),
+      (b) => b.sessions.some((s) => warmupIds.has(s.id)),
     );
     const avgWarmupSessions = warmupBlocks.length > 0
       ? warmupBlocks.reduce(
@@ -4884,171 +5215,24 @@ function CoachingTab({
         ) / warmupBlocks.length
       : 0;
 
-    return { warmupAvg, peakAvg, dropPct, avgWarmupSessions, blockCount: warmupBlocks.length };
+    return {
+      warmupAvg,
+      peakAvg,
+      dropPct,
+      avgWarmupSessions,
+      blockCount: warmupBlocks.length,
+      settleInLabel: describeWarmupSettleIn(avgWarmupSessions),
+      action: describeWarmupAction(avgWarmupSessions),
+    };
   })();
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
 
-      {/* ── Warmup section ───────────────────────────────────────────────── */}
-      {showWarmupSection && warmupStats && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-              paddingBottom: 10,
-              borderBottom: "1px solid rgba(255,180,0,0.15)",
-            }}
-          >
-            <div
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: "#ffb400",
-                flexShrink: 0,
-              }}
-            />
-            <span
-              style={{
-                fontSize: 12,
-                fontWeight: 700,
-                color: "#ffb400",
-                textTransform: "uppercase",
-                letterSpacing: 1,
-              }}
-            >
-              Warmup Phase
-            </span>
-            <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginLeft: 4 }}>
-              {warmupIds.size} session{warmupIds.size !== 1 ? "s" : ""} detected
-            </span>
-          </div>
-
-          {/* Warmup summary cards */}
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <div style={CARD_STYLE}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Warmup drop
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffb400" }}>
-                −{warmupStats.dropPct.toFixed(1)}%
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                vs your peak average
-              </div>
-            </div>
-            <div style={CARD_STYLE}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Avg warmup sessions
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffb400" }}>
-                {warmupStats.avgWarmupSessions.toFixed(1)}
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                per play block
-              </div>
-            </div>
-            <div style={CARD_STYLE}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Warmup avg score
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#fff" }}>
-                {fmtScore(warmupStats.warmupAvg)}
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                vs peak {fmtScore(warmupStats.peakAvg)}
-              </div>
-            </div>
-          </div>
-
-          {/* Warmup coaching card */}
-          <div
-            style={{
-              background: "rgba(255,180,0,0.06)",
-              border: "1px solid rgba(255,180,0,0.2)",
-              borderRadius: 10,
-              padding: "14px 16px",
-              display: "flex",
-              flexDirection: "column",
-              gap: 10,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span
-                style={{
-                  background: "rgba(255,180,0,0.2)",
-                  border: "1px solid rgba(255,180,0,0.4)",
-                  color: "#ffb400",
-                  borderRadius: 4,
-                  fontSize: 10,
-                  padding: "2px 7px",
-                  textTransform: "uppercase",
-                  letterSpacing: 0.8,
-                }}
-              >
-                Warmup Science
-              </span>
-              <span style={{ fontWeight: 700, fontSize: 13 }}>
-                Your warmup takes ~{Math.ceil(warmupStats.avgWarmupSessions)} session{Math.ceil(warmupStats.avgWarmupSessions) !== 1 ? "s" : ""}
-              </span>
-            </div>
-            <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.55)", lineHeight: 1.7 }}>
-              After a 6+ hour break you score ~{warmupStats.dropPct.toFixed(0)}% below your peak
-              during the first {Math.ceil(warmupStats.avgWarmupSessions)} run{Math.ceil(warmupStats.avgWarmupSessions) !== 1 ? "s" : ""}.
-              This is completely normal — your motor system needs to re-activate the neural pathways
-              for fine aim control. These sessions are excluded from your peak-performance analysis above.
-            </p>
-            <div
-              style={{
-                background: "rgba(255,180,0,0.1)",
-                borderLeft: "3px solid #ffb400",
-                padding: "8px 12px",
-                borderRadius: "0 6px 6px 0",
-              }}
-            >
-              <div style={{ fontSize: 10, color: "#ffb400", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 5 }}>
-                Action
-              </div>
-              <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.7)", lineHeight: 1.65 }}>
-                {warmupStats.avgWarmupSessions <= 1
-                  ? "You warm up quickly. A 3-minute easy tracking or large-target flicking routine before your first real run would likely eliminate the dip entirely."
-                  : warmupStats.avgWarmupSessions <= 2
-                  ? "Add a 5-minute structured warm-up routine (slow tracking → medium flicks → main scenario) before treating any run as a 'real' attempt. This pre-activates the motor patterns your main scenario needs."
-                  : "Your warm-up is longer than average. Consider starting each session with 2–3 easy scenarios that progressively increase in difficulty, ending just below your main scenario's intensity. This structured ramp will tighten your warmup to 1–2 runs."}
-              </p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Divider between sections when showing both */}
-      {showWarmupSection && showPeakSection && warmupStats && scores.length >= 3 && (
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            paddingBottom: 10,
-            borderBottom: "1px solid rgba(0,245,160,0.15)",
-          }}
-        >
-          <div style={{ width: 8, height: 8, borderRadius: "50%", background: "#00f5a0", flexShrink: 0 }} />
-          <span style={{ fontSize: 12, fontWeight: 700, color: "#00f5a0", textTransform: "uppercase", letterSpacing: 1 }}>
-            Peak Performance
-          </span>
-          <span style={{ fontSize: 11, color: "rgba(255,255,255,0.3)", marginLeft: 4 }}>
-            {coachSorted.length} session{coachSorted.length !== 1 ? "s" : ""} · warmup excluded
-          </span>
-        </div>
-      )}
-
       {/* ── Peak performance section ──────────────────────────────────────── */}
       {showPeakSection && scores.length < 3 && (
         <div style={{ color: "rgba(255,255,255,0.3)", padding: "10px 0", lineHeight: 1.7 }}>
-          Play at least 3 warmed-up sessions to unlock peak performance coaching.
+          Play at least 3 settled-in runs to unlock peak performance coaching.
         </div>
       )}
       {showPeakSection && scores.length >= 3 && (
@@ -5058,7 +5242,7 @@ function CoachingTab({
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={{ ...CHART_STYLE, flex: "1 1 280px", minWidth: 220 }}>
             <SectionTitle
-              info={`Built from ${fingerprint.sessionCount} recent telemetry snapshots using ${fingerprint.basisLabel.toLowerCase()} so one outlier run does not rewrite the whole profile.`}
+              info={`Built from ${fingerprint.sessionCount} recent runs using ${fingerprint.basisLabel.toLowerCase()}, so one unusual session does not rewrite the whole profile.`}
             >
               Aim Fingerprint
             </SectionTitle>
@@ -5116,6 +5300,19 @@ function CoachingTab({
                     Swingy: {axis.label}
                   </span>
                 ))}
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                {(Object.keys(AIM_AXIS_DEFINITIONS) as AimAxisKey[]).map((axisKey) => {
+                  const definition = AIM_AXIS_DEFINITIONS[axisKey];
+                  return (
+                    <HoverInfoCard
+                      key={`axis-definition-${axisKey}`}
+                      title={definition.label}
+                      summary={definition.what}
+                      detail={definition.how(isTracking)}
+                    />
+                  );
+                })}
               </div>
             </div>
           </div>
@@ -5193,50 +5390,6 @@ function CoachingTab({
         <StatCard label="Peak Zone"    value={fmtScore(p90)} sub="your top 10% of runs" accent="#00f5a0" />
       </div>
 
-      {practiceProfile && (
-        <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
-          <SectionTitle>Practice Profile</SectionTitle>
-          <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
-            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Active cadence
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#00b4ff" }}>
-                {practiceProfile.daysPerWeek.toFixed(1)} days/wk
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                {practiceProfile.activeDays} active day{practiceProfile.activeDays !== 1 ? "s" : ""} in the last {practiceProfile.spanDays} day{practiceProfile.spanDays !== 1 ? "s" : ""}
-              </div>
-            </div>
-            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Block size
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#ffd700" }}>
-                {practiceProfile.avgBlockMinutes.toFixed(0)} min
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                avg {practiceProfile.avgBlockRuns.toFixed(1)} runs/block, peak {practiceProfile.maxBlockMinutes.toFixed(0)} min
-              </div>
-            </div>
-            <div style={{ ...CARD_STYLE, minWidth: 160 }}>
-              <div style={{ fontSize: 11, color: "rgba(255,255,255,0.38)", textTransform: "uppercase", letterSpacing: 1, marginBottom: 6 }}>
-                Scenario mix
-              </div>
-              <div style={{ fontSize: 20, fontWeight: 700, color: "#a78bfa" }}>
-                {Math.round(practiceProfile.dominantScenarioShare * 100)}% main
-              </div>
-              <div style={{ fontSize: 10, color: "rgba(255,255,255,0.3)", marginTop: 3 }}>
-                {practiceProfile.scenarioDiversity} scenarios total, {practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} per block
-              </div>
-            </div>
-          </div>
-          <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.58)", lineHeight: 1.7 }}>
-            Recent reliable practice is centered on {practiceProfile.dominantScenario} and averages {practiceProfile.sessionsPerActiveDay.toFixed(1)} run{practiceProfile.sessionsPerActiveDay >= 1.5 ? "s" : ""} per active day with a {Math.round(practiceProfile.switchRate * 100)}% scenario-switch rate inside blocks. The coaching cards below now use this profile instead of generic advice.
-          </p>
-        </div>
-      )}
-
       {/* ── Distribution chart ── */}
       <ScoreDistributionChart scores={sortedScores} p10={p10} p50={p50} p90={p90} />
 
@@ -5249,8 +5402,193 @@ function CoachingTab({
           ))}
         </div>
       )}
+      {showWarmupSection && warmupStats && (
+        <div
+          style={{
+            ...CHART_STYLE,
+            display: "flex",
+            flexDirection: "column",
+            gap: 12,
+            borderColor: "rgba(255,180,0,0.18)",
+            background: "linear-gradient(180deg, rgba(255,180,0,0.05), rgba(255,180,0,0.02))",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span
+                style={{
+                  background: "rgba(255,180,0,0.16)",
+                  border: "1px solid rgba(255,180,0,0.26)",
+                  color: "#ffb400",
+                  borderRadius: 999,
+                  fontSize: 10,
+                  padding: "3px 9px",
+                  textTransform: "uppercase",
+                  letterSpacing: 0.8,
+                  fontWeight: 700,
+                }}
+              >
+                Warm-up Effect
+              </span>
+              <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.9)" }}>
+                You usually settle in by {warmupStats.settleInLabel}
+              </span>
+            </div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 11, color: "#ffb400" }}>
+                −{warmupStats.dropPct.toFixed(0)}% opening dip
+              </span>
+              <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                {warmupStats.blockCount} block{warmupStats.blockCount !== 1 ? "s" : ""} observed
+              </span>
+            </div>
+          </div>
+          <p style={{ margin: 0, fontSize: 12, color: "rgba(255,255,255,0.58)", lineHeight: 1.7 }}>
+            At the start of a new practice block your opening runs land about {warmupStats.dropPct.toFixed(0)}% below your settled-in level. That is normal, not lost skill. Your timing and feel just need a few runs to click back into place after a break. Those early runs are excluded from the peak-performance view above.
+          </p>
+          <div
+            style={{
+              background: "rgba(255,180,0,0.08)",
+              border: "1px solid rgba(255,180,0,0.14)",
+              borderRadius: 10,
+              padding: "10px 12px",
+              fontSize: 12,
+              color: "rgba(255,255,255,0.74)",
+              lineHeight: 1.65,
+            }}
+          >
+            <span style={{ color: "#ffb400", fontWeight: 700, textTransform: "uppercase", fontSize: 10, letterSpacing: 0.8 }}>
+              Action
+            </span>
+            <div style={{ marginTop: 6 }}>
+              {warmupStats.action}
+            </div>
+          </div>
+        </div>
+      )}
       </div>  /* end peak performance section */
       )}
+    </div>
+  );
+}
+
+function SessionsOverviewPanel({
+  records,
+  scenarioGroups,
+  practiceProfile,
+  compareScenario,
+  selectedScenario,
+  compareSummary,
+  selectedSummary,
+  onCompareScenarioChange,
+}: {
+  records: AnalyticsSessionRecord[];
+  scenarioGroups: Array<{
+    name: string;
+    bestReliable: number | null;
+    bestAny: number;
+    count: number;
+    reliableCount: number;
+    flaggedCount: number;
+    lastTs: string;
+    trend: "up" | "down" | "flat" | null;
+    scenarioType: string;
+  }>;
+  practiceProfile: PracticeProfile | null;
+  compareScenario: string | null;
+  selectedScenario: string | null;
+  compareSummary: ScenarioSummary | null;
+  selectedSummary: ScenarioSummary | null;
+  onCompareScenarioChange: (value: string | null) => void;
+}) {
+  const reliable = useMemo(
+    () => records.filter((record) => record.isReliableForAnalysis),
+    [records],
+  );
+  const totalSessions = records.length;
+  const totalScenarios = scenarioGroups.length;
+  const totalPlaySeconds = records.reduce((sum, record) => sum + (record.duration_secs ?? 0), 0);
+  const reliableScores = reliable.map((record) => record.score);
+  const medianScore = reliableScores.length > 0
+    ? percentileOf([...reliableScores].sort((a, b) => a - b), 50)
+    : 0;
+  const scenarioTypeCounts = scenarioGroups.reduce((acc, group) => {
+    acc.set(group.scenarioType, (acc.get(group.scenarioType) ?? 0) + group.count);
+    return acc;
+  }, new Map<string, number>());
+  const topScenarioTypes = [...scenarioTypeCounts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .slice(0, 4);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 16 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div>
+            <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+              Compare scenarios
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              Put any two scenarios next to each other to compare score ceiling, accuracy, and play volume.
+            </div>
+          </div>
+          <select
+            value={compareScenario ?? ""}
+            onChange={(event) => onCompareScenarioChange(event.target.value || null)}
+            className="am-input"
+            style={{ minWidth: 260, boxSizing: "border-box", padding: "7px 10px" }}
+          >
+            <option value="">No comparison</option>
+            {scenarioGroups
+              .filter((group) => group.name !== selectedScenario)
+              .map((group) => (
+                <option key={group.name} value={group.name}>
+                  {group.name}
+                </option>
+              ))}
+          </select>
+        </div>
+        {selectedSummary && compareSummary && compareScenario && selectedScenario && (
+          <ScenarioComparisonCard
+            leftLabel={selectedScenario}
+            left={selectedSummary}
+            rightLabel={compareScenario}
+            right={compareSummary}
+          />
+        )}
+      </div>
+      <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+        <SectionTitle>Overview</SectionTitle>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <StatCard label="Runs" value={totalSessions.toString()} />
+          <StatCard label="Scenarios" value={totalScenarios.toString()} accent="#a78bfa" />
+          <StatCard label="Play Time" value={formatPlayTime(totalPlaySeconds)} accent="#00b4ff" />
+          <StatCard label="Median Score" value={fmtScore(medianScore)} accent="#00f5a0" />
+        </div>
+        {topScenarioTypes.length > 0 && (
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontSize: 10, color: "rgba(255,255,255,0.34)", textTransform: "uppercase", letterSpacing: 0.8 }}>
+              Scenario families
+            </span>
+            {topScenarioTypes.map(([scenarioType, count]) => (
+              <span
+                key={scenarioType}
+                style={{
+                  fontSize: 10,
+                  padding: "3px 8px",
+                  borderRadius: 999,
+                  background: `${scenarioColor(scenarioType)}12`,
+                  border: `1px solid ${scenarioColor(scenarioType)}25`,
+                  color: "rgba(255,255,255,0.72)",
+                }}
+              >
+                {SCENARIO_LABELS[scenarioType] ?? scenarioType} · {count}
+              </span>
+            ))}
+          </div>
+        )}
+      </div>
+      {practiceProfile && <PracticeProfilePanel practiceProfile={practiceProfile} />}
     </div>
   );
 }
@@ -5259,10 +5597,12 @@ function CoachingTab({
 
 function ScenarioDetails({
   records,
+  practiceProfile,
   scenarioName,
   onExploreDrill,
 }: {
   records: AnalyticsSessionRecord[];
+  practiceProfile: PracticeProfile | null;
   scenarioName: string;
   onExploreDrill: (query: string) => void;
 }) {
@@ -5473,6 +5813,7 @@ function ScenarioDetails({
         <CoachingTab
           records={records}
           sorted={sorted}
+          practiceProfile={practiceProfile}
           warmupIds={warmupIds}
           sessionFilter={sessionFilter}
           onExploreDrill={onExploreDrill}
@@ -5498,6 +5839,7 @@ function ScenarioDetails({
 
 type RootMode = "sessions" | "leaderboards" | "debug";
 type ScenarioSortMode = "recent" | "plays" | "type";
+type SessionsPaneMode = "overview" | "scenario";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [records, setRecords] = useState<SessionRecord[]>([]);
@@ -5525,6 +5867,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [compareScenario, setCompareScenario] = useState<string | null>(
     () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.compareScenario),
   );
+  const [sessionsPane, setSessionsPane] = useState<SessionsPaneMode>(() => {
+    const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionsPane);
+    return stored === "scenario" ? "scenario" : "overview";
+  });
   const [helpOpen, setHelpOpen] = useState(false);
   const [pendingClear, setPendingClear] = useState<{ records: SessionRecord[]; selectedScenario: string | null } | null>(null);
   const [leaderboardSeedQuery, setLeaderboardSeedQuery] = useState<string | null>(null);
@@ -5652,6 +5998,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   useEffect(() => {
     writeStoredValue(STATS_WINDOW_STORAGE_KEYS.compareScenario, compareScenario);
   }, [compareScenario]);
+  useEffect(() => {
+    writeStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionsPane, sessionsPane);
+  }, [sessionsPane]);
 
   useEffect(() => {
     loadHistory(false);
@@ -5934,6 +6283,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     () => summarizeScenario(selectedRecords),
     [selectedRecords],
   );
+  const globalPracticeProfile = useMemo(
+    () => buildPracticeProfile(
+      [...analyticsRecords].sort((a, b) => a.timestampMs - b.timestampMs),
+    ),
+    [analyticsRecords],
+  );
 
   useEffect(() => {
     if (selectedScenario && scenarioGroups.some((group) => group.name === selectedScenario)) return;
@@ -6158,7 +6513,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               return (
                 <button
                   key={g.name}
-                  onClick={() => setSelectedScenario(g.name)}
+                  onClick={() => {
+                    setSelectedScenario(g.name);
+                    setSessionsPane("scenario");
+                  }}
                   style={{
                     display: "block",
                     width: "100%",
@@ -6299,11 +6657,60 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       </div>
 
       {/* ── Main panel ── */}
-      <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
-        {selectedScenario && selectedRecords.length > 0 ? (
-          <>
-            <div style={{ marginBottom: 20 }}>
-              <h2
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 2,
+              borderBottom: `1px solid ${C.border}`,
+              marginBottom: 20,
+            }}
+          >
+            {([
+              { id: "overview", label: "Overview" },
+              { id: "scenario", label: "Scenario" },
+            ] as Array<{ id: SessionsPaneMode; label: string }>).map((tab) => {
+              const active = sessionsPane === tab.id;
+              return (
+                <button
+                  key={tab.id}
+                  type="button"
+                  onClick={() => setSessionsPane(tab.id)}
+                  style={{
+                    background: "none",
+                    border: "none",
+                    borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent",
+                    padding: "8px 14px",
+                    marginBottom: -1,
+                    cursor: "pointer",
+                    color: active ? C.text : C.textMuted,
+                    fontFamily: "inherit",
+                    fontSize: 12,
+                    fontWeight: active ? 700 : 500,
+                    letterSpacing: "0.01em",
+                  }}
+                >
+                  {tab.label}
+                </button>
+              );
+            })}
+          </div>
+          {sessionsPane === "overview" ? (
+            <SessionsOverviewPanel
+              records={analyticsRecords}
+              scenarioGroups={scenarioGroups}
+              practiceProfile={globalPracticeProfile}
+              compareScenario={compareScenario}
+              selectedScenario={selectedScenario}
+              compareSummary={compareSummary}
+              selectedSummary={selectedSummary}
+              onCompareScenarioChange={setCompareScenario}
+            />
+          ) : selectedScenario && selectedRecords.length > 0 ? (
+            <>
+              <div style={{ marginBottom: 20 }}>
+                <h2
                 style={{ margin: "0 0 6px", fontSize: 15, fontWeight: 700, color: C.text, letterSpacing: "-0.01em" }}
               >
                 {selectedScenario}
@@ -6325,43 +6732,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                 </div>
               )}
             </div>
-            <div style={{ ...CHART_STYLE, marginBottom: 20 }}>
-              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                <div>
-                  <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
-                    Compare scenarios
-                  </div>
-                  <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
-                    Put your current scenario next to another one to compare score ceiling, accuracy, and play volume.
-                  </div>
-                </div>
-                <select
-                  value={compareScenario ?? ""}
-                  onChange={(event) => setCompareScenario(event.target.value || null)}
-                  className="am-input"
-                  style={{ minWidth: 260, boxSizing: "border-box", padding: "7px 10px" }}
-                >
-                  <option value="">No comparison</option>
-                  {scenarioGroups
-                    .filter((group) => group.name !== selectedScenario)
-                    .map((group) => (
-                      <option key={group.name} value={group.name}>
-                        {group.name}
-                      </option>
-                    ))}
-                </select>
-              </div>
-              {selectedSummary && compareSummary && compareScenario && (
-                <ScenarioComparisonCard
-                  leftLabel={selectedScenario}
-                  left={selectedSummary}
-                  rightLabel={compareScenario}
-                  right={compareSummary}
-                />
-              )}
-            </div>
             <ScenarioDetails
               records={selectedRecords}
+              practiceProfile={globalPracticeProfile}
               scenarioName={selectedScenario!}
               onExploreDrill={(query) => {
                 setLeaderboardSeedQuery(query);
@@ -6369,13 +6742,13 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               }}
             />
           </>
-        ) : (
-          <div
-            style={{
-              height: "100%",
-              display: "flex",
-              flexDirection: "column",
-              alignItems: "center",
+          ) : (
+            <div
+              style={{
+                height: "calc(100% - 46px)",
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
               justifyContent: "center",
               color: C.textFaint,
               gap: 12,
@@ -6455,7 +6828,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
                 }}
               >
                 <div style={{ fontSize: 11, marginBottom: 6, color: C.accent, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>
-                  Live AimMod metrics (not persisted yet)
+                  Live AimMod metrics (current run only)
                 </div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "4px 10px", fontSize: 11 }}>
                   {[
