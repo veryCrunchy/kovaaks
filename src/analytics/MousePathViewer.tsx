@@ -460,7 +460,7 @@ export function MousePathViewer({
   const [playbackMs,   setPlaybackMs]   = useState(0);
   const [speed,        setSpeed]        = useState(1);
   const [showFull,     setShowFull]     = useState(false);
-  const [trailFadeMs,  setTrailFadeMs]  = useState(0);
+  const [trailFadeMs,  setTrailFadeMs]  = useState(5000);
   const [bgOpacity,    setBgOpacity]    = useState(0.5);
   const [viewportW,    setViewportW]    = useState(960);
 
