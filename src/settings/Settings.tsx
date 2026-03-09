@@ -37,6 +37,7 @@ const LOADING_PLACEHOLDER = (
 export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loadedSettings, setLoadedSettings] = useState<AppSettings | null>(null);
+  const [appVersionLabel, setAppVersionLabel] = useState("");
   const [activeTab, setActiveTab] = useState<Tab>("general");
   const [saving, setSaving]       = useState(false);
   const [saved, setSaved]         = useState(false);
@@ -52,6 +53,10 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
         setLoadedSettings(loaded);
       })
       .catch((e) => setError(String(e)));
+
+    invoke<string>("get_app_version_label")
+      .then(setAppVersionLabel)
+      .catch(() => setAppVersionLabel(""));
   }, []);
 
   const dirty = useMemo(() => {
@@ -136,9 +141,16 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
       >
         {/* Logo + close */}
         <div className="flex items-center justify-between px-2 mb-4">
-          <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.18em", color: C.accent }}>
-            AIMMOD
-          </span>
+          <div className="flex flex-col gap-0.5">
+            <span style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.18em", color: C.accent }}>
+              AIMMOD
+            </span>
+            {appVersionLabel && (
+              <span style={{ fontSize: 9, letterSpacing: "0.08em", color: C.textDisabled }}>
+                {`AimMod • ${appVersionLabel}`}
+              </span>
+            )}
+          </div>
           <button
             onClick={onClose}
             title="Close (F8)"
