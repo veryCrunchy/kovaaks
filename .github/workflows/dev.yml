@@ -64,10 +64,18 @@ jobs:
             throw "Could not read version from src-tauri/tauri.conf.json"
           }
 
-          $preTag = "v$baseVersion-pre.${{ github.run_number }}.${{ github.run_attempt }}"
+          $preVersion = "$baseVersion-pre.${{ github.run_number }}.${{ github.run_attempt }}"
+          $preTag = "v$preVersion"
+          $tauriConfigOverridePath = Join-Path $env:RUNNER_TEMP "tauri-prerelease-config.json"
+
+          @{ version = $preVersion } |
+            ConvertTo-Json -Compress |
+            Set-Content -Path $tauriConfigOverridePath -Encoding utf8NoBOM
 
           "base_version=$baseVersion" >> $env:GITHUB_OUTPUT
+          "pre_version=$preVersion" >> $env:GITHUB_OUTPUT
           "pre_tag=$preTag" >> $env:GITHUB_OUTPUT
+          "tauri_config_override=$tauriConfigOverridePath" >> $env:GITHUB_OUTPUT
 
       - name: Stage stripped production AimMod runtime payload
         shell: pwsh
@@ -150,8 +158,8 @@ jobs:
           generateReleaseNotes: false
           # Do not overwrite the stable updater JSON with main pre-releases
           includeUpdaterJson: false
-          assetNamePattern: '[name]-pre-[version]-[platform]-[arch][setup][ext]'
-          args: --target x86_64-pc-windows-msvc
+          assetNamePattern: '[name]-[version]-[platform]-[arch][setup][ext]'
+          args: --target x86_64-pc-windows-msvc --config "${{ steps.prerelease_meta.outputs.tauri_config_override }}"
 
       - name: Log built prod bundle hashes
         shell: pwsh
@@ -246,8 +254,8 @@ jobs:
           generateReleaseNotes: true
           # Do not overwrite the stable updater JSON with dev builds
           includeUpdaterJson: false
-          assetNamePattern: '[name]-pre-debug-[version]-[platform]-[arch][setup][ext]'
-          args: --target x86_64-pc-windows-msvc
+          assetNamePattern: '[name]-debug-[version]-[platform]-[arch][setup][ext]'
+          args: --target x86_64-pc-windows-msvc --config "${{ steps.prerelease_meta.outputs.tauri_config_override }}"
 
       - name: Log built dev bundle hashes
         shell: pwsh

@@ -125,11 +125,33 @@ jobs:
             throw "Staged kovaaks_rust_core.dll does not match the freshly built rust core DLL."
           }
 
+      - name: Compute release version metadata
+        id: release_meta
+        shell: pwsh
+        run: |
+          $tagName = "${{ inputs.tag_name || github.ref_name }}"
+          if ([string]::IsNullOrWhiteSpace($tagName)) {
+            throw "Could not resolve release tag name"
+          }
+
+          $releaseVersion = $tagName -replace '^[vV]', ''
+          if ([string]::IsNullOrWhiteSpace($releaseVersion)) {
+            throw "Could not derive release version from tag '$tagName'"
+          }
+
+          $tauriConfigOverridePath = Join-Path $env:RUNNER_TEMP "tauri-release-config.json"
+          @{ version = $releaseVersion } |
+            ConvertTo-Json -Compress |
+            Set-Content -Path $tauriConfigOverridePath -Encoding utf8NoBOM
+
+          "release_version=$releaseVersion" >> $env:GITHUB_OUTPUT
+          "tauri_config_override=$tauriConfigOverridePath" >> $env:GITHUB_OUTPUT
+
       - name: Build and publish release
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AIMMOD_DISPLAY_VERSION: ${{ inputs.tag_name || github.ref_name }}
+          AIMMOD_DISPLAY_VERSION: ${{ steps.release_meta.outputs.release_version }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
@@ -139,5 +161,6 @@ jobs:
           # tauri-action will find it by tag and upload the build artifacts.
           releaseDraft: false
           prerelease: false
-          args: --target x86_64-pc-windows-msvc
+          assetNamePattern: '[name]-[version]-[platform]-[arch][setup][ext]'
+          args: --target x86_64-pc-windows-msvc --config "${{ steps.release_meta.outputs.tauri_config_override }}"
           updaterJsonPreferNsis: true
