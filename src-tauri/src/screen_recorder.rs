@@ -5,8 +5,8 @@ use std::sync::Mutex;
 ///
 /// Performs capture on Windows using GDI/PrintWindow.
 ///
-/// Storage: 15 fps × 640×(aspect) px × JPEG quality 65 ≈ 15–25 KB/frame.
-/// A 60-second session produces ~900 frames ≈ 15–22 MB in RAM — kept only until
+/// Storage: 24 fps × 640×(aspect) px × JPEG quality 65 ≈ 15–25 KB/frame.
+/// A 60-second session produces ~1,440 frames ≈ 22–35 MB in RAM — kept only until
 /// the frontend fetches and drains the buffer after the session ends.
 ///
 /// Capture region: 50% of the game monitor's width and height centred on the
@@ -39,9 +39,9 @@ struct CompletedFrameCapture {
 
 // ─── Config ─────────────────────────────────────────────────────────────────────
 
-const FPS: u64 = 15;
-/// Cap at 2 700 frames ≈ 3-minute session at 15 fps.
-const MAX_FRAMES: usize = 2_700;
+const FPS: u64 = 24;
+/// Cap at 4 320 frames ≈ 3-minute session at 24 fps.
+const MAX_FRAMES: usize = 4_320;
 /// Keep a short queue of completed session frame buffers so a fast restart does
 /// not erase frames before the file-watcher persists the previous run.
 const MAX_COMPLETED_SESSIONS: usize = 8;
@@ -143,15 +143,15 @@ pub fn get_frames() -> Vec<ScreenFrame> {
 
 /// Drain frames and return a replay-quality subset for persistent storage.
 ///
-/// Drains the frame buffer and returns every 3rd frame (15 fps → 5 fps) for
+/// Drains the frame buffer and returns every 2nd frame (24 fps → 12 fps) for
 /// replay storage.  Frames are already encoded at OUT_W (480 px) and
 /// JPEG_QUALITY during recording, so no re-encoding is required here.
-/// A typical 60-second session produces ~300 frames ≈ 3 MB on disk.
+/// A typical 60-second session produces ~720 frames ≈ 7-9 MB on disk.
 pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
     drain_frames()
         .into_iter()
         .enumerate()
-        .filter(|(i, _)| i % 3 == 0)
+        .filter(|(i, _)| i % 2 == 0)
         .map(|(_, f)| f)
         .collect()
 }
@@ -176,7 +176,7 @@ pub fn take_frames_for_run(
             return merge_frame_captures(matched, snapshot)
                 .into_iter()
                 .enumerate()
-                .filter(|(i, _)| i % 3 == 0)
+                .filter(|(i, _)| i % 2 == 0)
                 .map(|(_, frame)| frame)
                 .collect();
         }
@@ -190,7 +190,7 @@ pub fn take_frames_for_run(
                 .frames
                 .into_iter()
                 .enumerate()
-                .filter(|(i, _)| i % 3 == 0)
+                .filter(|(i, _)| i % 2 == 0)
                 .map(|(_, frame)| frame)
                 .collect()
         })

@@ -67,7 +67,8 @@ pub struct MetricPoint {
 }
 
 /// A single raw cursor position sample recorded during a session.
-/// Downsampled to ≈30 fps; click events are inserted with `is_click = true`.
+/// Downsampled for replay at a high enough rate to keep path playback smooth;
+/// click events are inserted with `is_click = true`.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RawPositionPoint {
     /// Integrated X position in mouse-delta space.  Starts at 0.0 at session
@@ -174,6 +175,9 @@ static COMPLETED_CAPTURES: Lazy<Mutex<VecDeque<CompletedReplayCapture>>> =
 
 pub const EVENT_MOUSE_METRICS: &str = "mouse-metrics";
 const MAX_COMPLETED_CAPTURES: usize = 12;
+const RAW_REPLAY_SAMPLE_INTERVAL_MS: u64 = 8;
+const MAX_RAW_REPLAY_POINTS: usize = 60_000;
+const RAW_REPLAY_TRIM_POINTS: usize = 10_000;
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
@@ -722,7 +726,8 @@ unsafe extern "system" fn raw_input_wnd_proc(
                                 let sample = match s.last_raw_sample {
                                     None => true,
                                     Some(last) => {
-                                        now.duration_since(last) >= Duration::from_millis(16)
+                                        now.duration_since(last)
+                                            >= Duration::from_millis(RAW_REPLAY_SAMPLE_INTERVAL_MS)
                                     }
                                 };
                                 if sample {
@@ -737,8 +742,8 @@ unsafe extern "system" fn raw_input_wnd_proc(
                                         is_click: false,
                                     });
                                     s.last_raw_sample = Some(now);
-                                    if s.raw_positions.len() > 30_000 {
-                                        s.raw_positions.drain(..5_000);
+                                    if s.raw_positions.len() > MAX_RAW_REPLAY_POINTS {
+                                        s.raw_positions.drain(..RAW_REPLAY_TRIM_POINTS);
                                     }
                                 }
                             }
