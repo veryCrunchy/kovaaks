@@ -1122,7 +1122,9 @@ fn open_logs_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn open_stats_window(app: AppHandle) -> Result<(), String> {
     if let Some(win) = app.get_webview_window("stats") {
+        let _ = win.unminimize();
         win.show().map_err(|e| e.to_string())?;
+        let _ = win.maximize();
         win.set_focus().map_err(|e| e.to_string())?;
     } else {
         log::error!("stats window not found — check tauri.conf.json");

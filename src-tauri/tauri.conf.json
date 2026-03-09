@@ -41,8 +41,7 @@
         "decorations": true,
         "alwaysOnTop": false,
         "resizable": true,
-        "width": 1100,
-        "height": 720,
+        "maximized": true,
         "minWidth": 800,
         "minHeight": 500,
         "visible": true
