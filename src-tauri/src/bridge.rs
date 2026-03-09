@@ -2572,12 +2572,37 @@ mod imp {
     pub(super) fn is_bridge_stats_flow_stalled() -> bool {
         const STALL_AFTER: Duration = Duration::from_millis(1500);
 
+        if !bridge_dll_connected_flag().load(Ordering::SeqCst) {
+            return false;
+        }
+
+        if !has_recent_state_snapshot_ack(Duration::from_secs(5)) {
+            return false;
+        }
+
+        let expects_live_stats = {
+            let Ok(compat) = bridge_compat_state().lock() else {
+                return false;
+            };
+            let stats = &compat.stats;
+            let in_active_challenge =
+                stats.game_state_code == 4 || stats.is_in_challenge == Some(true);
+            let paused = stats.scenario_is_paused == Some(true) || stats.game_state_code == 5;
+            let menu_like = matches!(stats.game_state_code, 0 | 1 | 2 | 3);
+            in_active_challenge && !paused && !menu_like
+        };
+
+        if !expects_live_stats {
+            return false;
+        }
+
         let Ok(state) = bridge_session_state().lock() else {
             return false;
         };
         if !state.session_active && !state.challenge_active {
             return false;
         }
+
         let last_flow = state.last_pull_event_at.or(state.last_stats_flow_at);
         let Some(last_flow) = last_flow else {
             return true;
