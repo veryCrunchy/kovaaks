@@ -3673,6 +3673,9 @@ function ReplayTab({
                 position: "sticky",
                 top: 0,
                 alignSelf: "start",
+                maxHeight: "calc(100vh - 72px)",
+                overflowY: "auto",
+                paddingRight: 4,
               }}
             >
               <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
@@ -3851,11 +3854,11 @@ function ReplayTab({
                     <button
                       key={signal.id}
                       type="button"
-                      onClick={() => setSelectedContextKey(signal.contextKey)}
+                      onClick={() => setSelectedContextKey((current) => current === signal.contextKey ? null : signal.contextKey)}
                       style={{
                         textAlign: "left",
-                        background: "rgba(255,255,255,0.03)",
-                        border: "1px solid rgba(255,255,255,0.08)",
+                        background: selectedContextKey === signal.contextKey ? `${signal.badgeColor}12` : "rgba(255,255,255,0.03)",
+                        border: `1px solid ${selectedContextKey === signal.contextKey ? `${signal.badgeColor}45` : "rgba(255,255,255,0.08)"}`,
                         borderLeft: `3px solid ${signal.badgeColor}`,
                         borderRadius: 10,
                         padding: "10px 12px",
