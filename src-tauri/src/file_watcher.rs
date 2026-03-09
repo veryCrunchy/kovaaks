@@ -243,11 +243,14 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                     result.scenario
                                 );
                             }
-                            // Drain path + metric + video buffers for replay persistence
-                            let raw_positions = crate::mouse_hook::drain_raw_positions();
-                            let metric_points = crate::mouse_hook::drain_session_buffer();
-                            let screen_frames = crate::screen_recorder::drain_frames_for_replay();
                             let run_snapshot = crate::bridge::take_run_snapshot();
+                            // Drain path + metric + video buffers using the finalized
+                            // run timing so split capture segments from recovery/restarts
+                            // are matched back to the correct run before persistence.
+                            let mouse_capture =
+                                crate::mouse_hook::take_replay_capture_for_run(run_snapshot.as_ref());
+                            let screen_frames =
+                                crate::screen_recorder::take_frames_for_run(run_snapshot.as_ref());
                             let shot_timing = run_snapshot.as_ref().map(|snap| {
                                 crate::session_store::ShotTimingSnapshot {
                                     paired_shot_hits: snap.paired_shot_hits,
@@ -307,8 +310,8 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 app,
                                 &session_id,
                                 crate::replay_store::ReplayData {
-                                    positions: raw_positions,
-                                    metrics: metric_points,
+                                    positions: mouse_capture.positions,
+                                    metrics: mouse_capture.metrics,
                                     frames: screen_frames,
                                     run_snapshot: run_snapshot.clone(),
                                 },

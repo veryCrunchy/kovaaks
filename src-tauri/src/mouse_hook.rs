@@ -11,7 +11,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
 use rdev::{Event, EventType, Key, listen};
@@ -84,6 +84,20 @@ pub struct RawPositionPoint {
     pub is_click: bool,
 }
 
+#[derive(Debug, Clone)]
+struct CompletedReplayCapture {
+    started_at_unix_ms: Option<u64>,
+    ended_at_unix_ms: Option<u64>,
+    positions: Vec<RawPositionPoint>,
+    metrics: Vec<MetricPoint>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReplayCaptureData {
+    pub positions: Vec<RawPositionPoint>,
+    pub metrics: Vec<MetricPoint>,
+}
+
 /// A live coaching notification emitted during an active session.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LiveFeedback {
@@ -123,6 +137,7 @@ struct SharedState {
     events: Vec<RawMouseEvent>,
     session_metrics: Vec<MetricPoint>,
     session_start: Instant,
+    session_start_unix_ms: Option<u64>,
     /// Recent left-click timestamps for click_timing_cv computation.
     click_times: VecDeque<Instant>,
     /// Timestamp of the most recent LMB-down event (None if button is up).
@@ -144,6 +159,7 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         events: Vec::with_capacity(10_000),
         session_metrics: Vec::with_capacity(3_600),
         session_start: Instant::now(),
+        session_start_unix_ms: None,
         click_times: VecDeque::with_capacity(200),
         lmb_down_at: None,
         hold_durations: VecDeque::with_capacity(500),
@@ -153,8 +169,11 @@ static STATE: Lazy<Mutex<SharedState>> = Lazy::new(|| {
         cursor_y: 0.0,
     })
 });
+static COMPLETED_CAPTURES: Lazy<Mutex<VecDeque<CompletedReplayCapture>>> =
+    Lazy::new(|| Mutex::new(VecDeque::new()));
 
 pub const EVENT_MOUSE_METRICS: &str = "mouse-metrics";
+const MAX_COMPLETED_CAPTURES: usize = 12;
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
@@ -213,11 +232,16 @@ pub fn stop() {
 /// `screen_recorder`) that need to share the exact same time base.
 pub fn start_session_tracking() -> Instant {
     let session_start = Instant::now();
+    let start_unix_ms = unix_now_ms();
     {
         let mut s = STATE.lock().unwrap();
+        if TRACKING_ACTIVE.load(Ordering::Relaxed) {
+            recycle_live_capture_locked(&mut s, start_unix_ms, "restart");
+        }
         s.events.clear();
         s.session_metrics.clear();
         s.session_start = session_start;
+        s.session_start_unix_ms = Some(start_unix_ms);
         s.click_times.clear();
         s.raw_positions.clear();
         s.last_raw_sample = None;
@@ -231,8 +255,12 @@ pub fn start_session_tracking() -> Instant {
 
 /// Stop recording metrics (session ended). Data is retained for post-session report.
 pub fn stop_session_tracking() {
-    TRACKING_ACTIVE.store(false, Ordering::SeqCst);
-    log::info!("Smoothness tracking stopped");
+    if TRACKING_ACTIVE.swap(false, Ordering::SeqCst) {
+        if let Ok(mut s) = STATE.lock() {
+            queue_completed_capture_locked(&mut s, unix_now_ms(), "stop");
+        }
+        log::info!("Smoothness tracking stopped");
+    }
 }
 
 /// Drain session metric buffer for post-session analysis.
@@ -255,11 +283,194 @@ pub fn drain_raw_positions() -> Vec<RawPositionPoint> {
     std::mem::take(&mut s.raw_positions)
 }
 
+pub fn take_replay_capture_for_run(
+    run_snapshot: Option<&crate::bridge::BridgeRunSnapshot>,
+) -> ReplayCaptureData {
+    let mut completed = COMPLETED_CAPTURES.lock().unwrap();
+    if completed.is_empty() {
+        drop(completed);
+        return ReplayCaptureData {
+            positions: drain_raw_positions(),
+            metrics: drain_session_buffer(),
+        };
+    }
+
+    if let Some(snapshot) = run_snapshot {
+        let (matched, remaining) = partition_matching_captures(
+            std::mem::take(&mut *completed),
+            snapshot,
+        );
+        *completed = remaining;
+        if !matched.is_empty() {
+            drop(completed);
+            return merge_replay_captures(matched, snapshot);
+        }
+    }
+
+    let fallback = completed.pop_back();
+    drop(completed);
+    fallback
+        .map(|capture| ReplayCaptureData {
+            positions: capture.positions,
+            metrics: capture.metrics,
+        })
+        .unwrap_or_default()
+}
+
 /// Return raw cursor positions for the last session without removing them.
 /// The buffer is cleared automatically when the next session starts.
 pub fn get_raw_positions() -> Vec<RawPositionPoint> {
     let s = STATE.lock().unwrap();
     s.raw_positions.clone()
+}
+
+fn unix_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn recycle_live_capture_locked(state: &mut SharedState, ended_at_unix_ms: u64, reason: &str) {
+    if state.raw_positions.is_empty() && state.session_metrics.is_empty() {
+        return;
+    }
+    queue_completed_capture_locked(state, ended_at_unix_ms, reason);
+}
+
+fn queue_completed_capture_locked(state: &mut SharedState, ended_at_unix_ms: u64, reason: &str) {
+    if state.raw_positions.is_empty() && state.session_metrics.is_empty() {
+        state.session_start_unix_ms = None;
+        return;
+    }
+
+    let positions = std::mem::take(&mut state.raw_positions);
+    let metrics = std::mem::take(&mut state.session_metrics);
+    let started_at_unix_ms = state.session_start_unix_ms.take();
+
+    let pos_count = positions.len();
+    let metric_count = metrics.len();
+
+    let capture = CompletedReplayCapture {
+        started_at_unix_ms,
+        ended_at_unix_ms: Some(ended_at_unix_ms),
+        positions,
+        metrics,
+    };
+
+    let mut completed = COMPLETED_CAPTURES.lock().unwrap();
+    completed.push_back(capture);
+    while completed.len() > MAX_COMPLETED_CAPTURES {
+        let _ = completed.pop_front();
+    }
+    log::info!(
+        "mouse_hook: queued replay capture ({reason}) positions={} metrics={} queued_sessions={}",
+        pos_count,
+        metric_count,
+        completed.len()
+    );
+}
+
+fn partition_matching_captures(
+    mut captures: VecDeque<CompletedReplayCapture>,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> (Vec<CompletedReplayCapture>, VecDeque<CompletedReplayCapture>) {
+    let mut matched = Vec::new();
+    let mut remaining = VecDeque::new();
+    while let Some(capture) = captures.pop_front() {
+        if capture_matches_run(&capture, snapshot) {
+            matched.push(capture);
+        } else {
+            remaining.push_back(capture);
+        }
+    }
+    (matched, remaining)
+}
+
+fn capture_matches_run(
+    capture: &CompletedReplayCapture,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> bool {
+    let capture_duration_ms = capture
+        .positions
+        .last()
+        .map(|p| p.timestamp_ms)
+        .or_else(|| capture.metrics.last().map(|p| p.timestamp_ms))
+        .unwrap_or(0);
+    let run_duration_ms = snapshot
+        .duration_secs
+        .map(|secs| (secs.max(0.0) * 1000.0).round() as u64)
+        .unwrap_or(0);
+
+    match (
+        capture.started_at_unix_ms,
+        capture.ended_at_unix_ms,
+        snapshot.started_at_unix_ms,
+        snapshot.ended_at_unix_ms,
+    ) {
+        (Some(c_start), Some(c_end), Some(r_start), Some(r_end)) => {
+            let overlap_start = c_start.max(r_start);
+            let overlap_end = c_end.min(r_end);
+            overlap_end > overlap_start
+                || c_start.abs_diff(r_start) <= 2_500
+                || c_end.abs_diff(r_end) <= 2_500
+        }
+        _ if run_duration_ms > 0 && capture_duration_ms > 0 => {
+            capture_duration_ms.abs_diff(run_duration_ms) <= 5_000
+        }
+        _ => false,
+    }
+}
+
+fn merge_replay_captures(
+    mut captures: Vec<CompletedReplayCapture>,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> ReplayCaptureData {
+    captures.sort_by_key(|capture| capture.started_at_unix_ms.unwrap_or(u64::MAX));
+    let capture_count = captures.len();
+    let base_start_ms = snapshot
+        .started_at_unix_ms
+        .or_else(|| captures.iter().filter_map(|c| c.started_at_unix_ms).min())
+        .unwrap_or(0);
+    let run_duration_ms = snapshot
+        .duration_secs
+        .map(|secs| (secs.max(0.0) * 1000.0).round() as u64);
+
+    let mut positions = Vec::new();
+    let mut metrics = Vec::new();
+
+    for capture in captures {
+        let offset_ms = capture
+            .started_at_unix_ms
+            .map(|start_ms| start_ms.saturating_sub(base_start_ms))
+            .unwrap_or(0);
+
+        positions.extend(capture.positions.into_iter().map(|mut point| {
+            point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
+            point
+        }));
+        metrics.extend(capture.metrics.into_iter().map(|mut point| {
+            point.timestamp_ms = point.timestamp_ms.saturating_add(offset_ms);
+            point
+        }));
+    }
+
+    positions.sort_by_key(|point| point.timestamp_ms);
+    metrics.sort_by_key(|point| point.timestamp_ms);
+
+    if let Some(limit_ms) = run_duration_ms.map(|ms| ms.saturating_add(1_500)) {
+        positions.retain(|point| point.timestamp_ms <= limit_ms);
+        metrics.retain(|point| point.timestamp_ms <= limit_ms);
+    }
+
+    log::info!(
+        "mouse_hook: merged replay capture segments={} positions={} metrics={}",
+        capture_count,
+        positions.len(),
+        metrics.len()
+    );
+
+    ReplayCaptureData { positions, metrics }
 }
 
 /// Return the most-recent metric snapshot without consuming the buffer.

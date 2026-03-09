@@ -30,6 +30,13 @@ pub struct ScreenFrame {
     pub jpeg_b64: String,
 }
 
+#[derive(Debug, Clone)]
+struct CompletedFrameCapture {
+    started_at_unix_ms: Option<u64>,
+    ended_at_unix_ms: Option<u64>,
+    frames: Vec<ScreenFrame>,
+}
+
 // ─── Config ─────────────────────────────────────────────────────────────────────
 
 const FPS: u64 = 15;
@@ -55,9 +62,10 @@ static PAUSED: AtomicBool = AtomicBool::new(false);
 /// that only one recording thread is ever active at a time.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static FRAMES: Lazy<Mutex<Vec<ScreenFrame>>> = Lazy::new(|| Mutex::new(Vec::new()));
-static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<Vec<ScreenFrame>>>> =
+static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<CompletedFrameCapture>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
 static SESSION_START: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static SESSION_START_UNIX_MS: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static LAST_CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Public API ────────────────────────────────────────────────────────────────
@@ -82,10 +90,11 @@ pub fn update_monitor_rect(_monitor: &RegionRect) {
 pub fn start(session_start: Instant) {
     // Bump generation first so any running thread exits on its next loop check.
     let generation = GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
-    {
-        FRAMES.lock().unwrap().clear();
-        *SESSION_START.lock().unwrap() = Some(session_start);
-    }
+    let start_unix_ms = unix_now_ms();
+    let _ = queue_completed_frames(start_unix_ms, "restart");
+    FRAMES.lock().unwrap().clear();
+    *SESSION_START.lock().unwrap() = Some(session_start);
+    *SESSION_START_UNIX_MS.lock().unwrap() = Some(start_unix_ms);
     PAUSED.store(false, Ordering::SeqCst);
     RECORDING.store(true, Ordering::SeqCst);
     std::thread::Builder::new()
@@ -99,17 +108,8 @@ pub fn start(session_start: Instant) {
 pub fn stop() {
     PAUSED.store(false, Ordering::SeqCst);
     if RECORDING.swap(false, Ordering::SeqCst) {
-        let drained = std::mem::take(&mut *FRAMES.lock().unwrap());
-        let captured_frames = drained.len();
-        let mut queued_sessions = 0usize;
-        if !drained.is_empty() {
-            let mut completed = COMPLETED_FRAMES.lock().unwrap();
-            completed.push_back(drained);
-            while completed.len() > MAX_COMPLETED_SESSIONS {
-                let _ = completed.pop_front();
-            }
-            queued_sessions = completed.len();
-        }
+        let captured_frames = queue_completed_frames(unix_now_ms(), "stop");
+        let queued_sessions = COMPLETED_FRAMES.lock().unwrap().len();
         log::info!(
             "Screen recorder stopped (frames={}, queued_sessions={})",
             captured_frames,
@@ -120,8 +120,8 @@ pub fn stop() {
 
 /// Drain all recorded frames and clear the internal buffer.
 pub fn drain_frames() -> Vec<ScreenFrame> {
-    if let Some(frames) = COMPLETED_FRAMES.lock().unwrap().pop_front() {
-        return frames;
+    if let Some(capture) = COMPLETED_FRAMES.lock().unwrap().pop_front() {
+        return capture.frames;
     }
     std::mem::take(&mut *FRAMES.lock().unwrap())
 }
@@ -137,7 +137,7 @@ pub fn get_frames() -> Vec<ScreenFrame> {
         .lock()
         .unwrap()
         .back()
-        .cloned()
+        .map(|capture| capture.frames.clone())
         .unwrap_or_default()
 }
 
@@ -154,6 +154,47 @@ pub fn drain_frames_for_replay() -> Vec<ScreenFrame> {
         .filter(|(i, _)| i % 3 == 0)
         .map(|(_, f)| f)
         .collect()
+}
+
+pub fn take_frames_for_run(
+    run_snapshot: Option<&crate::bridge::BridgeRunSnapshot>,
+) -> Vec<ScreenFrame> {
+    let mut completed = COMPLETED_FRAMES.lock().unwrap();
+    if completed.is_empty() {
+        drop(completed);
+        return drain_frames_for_replay();
+    }
+
+    if let Some(snapshot) = run_snapshot {
+        let (matched, remaining) = partition_matching_frame_captures(
+            std::mem::take(&mut *completed),
+            snapshot,
+        );
+        *completed = remaining;
+        if !matched.is_empty() {
+            drop(completed);
+            return merge_frame_captures(matched, snapshot)
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 == 0)
+                .map(|(_, frame)| frame)
+                .collect();
+        }
+    }
+
+    let fallback = completed.pop_back();
+    drop(completed);
+    fallback
+        .map(|capture| {
+            capture
+                .frames
+                .into_iter()
+                .enumerate()
+                .filter(|(i, _)| i % 3 == 0)
+                .map(|(_, frame)| frame)
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Re-encode a frame at a lower resolution and JPEG quality.
@@ -246,6 +287,123 @@ fn record_loop(my_gen: u64) {
         }
     }
     log::debug!("Screen recorder thread exited (gen {my_gen})");
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn queue_completed_frames(ended_at_unix_ms: u64, reason: &str) -> usize {
+    let frames = std::mem::take(&mut *FRAMES.lock().unwrap());
+    let frame_count = frames.len();
+    let started_at_unix_ms = SESSION_START_UNIX_MS.lock().unwrap().take();
+    if frames.is_empty() {
+        return 0;
+    }
+
+    let capture = CompletedFrameCapture {
+        started_at_unix_ms,
+        ended_at_unix_ms: Some(ended_at_unix_ms),
+        frames,
+    };
+    let mut completed = COMPLETED_FRAMES.lock().unwrap();
+    completed.push_back(capture);
+    while completed.len() > MAX_COMPLETED_SESSIONS {
+        let _ = completed.pop_front();
+    }
+    log::info!(
+        "screen_recorder: queued replay frames ({reason}) frames={} queued_sessions={}",
+        frame_count,
+        completed.len()
+    );
+    frame_count
+}
+
+fn partition_matching_frame_captures(
+    mut captures: VecDeque<CompletedFrameCapture>,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> (Vec<CompletedFrameCapture>, VecDeque<CompletedFrameCapture>) {
+    let mut matched = Vec::new();
+    let mut remaining = VecDeque::new();
+    while let Some(capture) = captures.pop_front() {
+        if frame_capture_matches_run(&capture, snapshot) {
+            matched.push(capture);
+        } else {
+            remaining.push_back(capture);
+        }
+    }
+    (matched, remaining)
+}
+
+fn frame_capture_matches_run(
+    capture: &CompletedFrameCapture,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> bool {
+    let capture_duration_ms = capture.frames.last().map(|f| f.timestamp_ms).unwrap_or(0);
+    let run_duration_ms = snapshot
+        .duration_secs
+        .map(|secs| (secs.max(0.0) * 1000.0).round() as u64)
+        .unwrap_or(0);
+
+    match (
+        capture.started_at_unix_ms,
+        capture.ended_at_unix_ms,
+        snapshot.started_at_unix_ms,
+        snapshot.ended_at_unix_ms,
+    ) {
+        (Some(c_start), Some(c_end), Some(r_start), Some(r_end)) => {
+            let overlap_start = c_start.max(r_start);
+            let overlap_end = c_end.min(r_end);
+            overlap_end > overlap_start
+                || c_start.abs_diff(r_start) <= 2_500
+                || c_end.abs_diff(r_end) <= 2_500
+        }
+        _ if run_duration_ms > 0 && capture_duration_ms > 0 => {
+            capture_duration_ms.abs_diff(run_duration_ms) <= 5_000
+        }
+        _ => false,
+    }
+}
+
+fn merge_frame_captures(
+    mut captures: Vec<CompletedFrameCapture>,
+    snapshot: &crate::bridge::BridgeRunSnapshot,
+) -> Vec<ScreenFrame> {
+    captures.sort_by_key(|capture| capture.started_at_unix_ms.unwrap_or(u64::MAX));
+    let capture_count = captures.len();
+    let base_start_ms = snapshot
+        .started_at_unix_ms
+        .or_else(|| captures.iter().filter_map(|c| c.started_at_unix_ms).min())
+        .unwrap_or(0);
+    let run_duration_ms = snapshot
+        .duration_secs
+        .map(|secs| (secs.max(0.0) * 1000.0).round() as u64);
+
+    let mut frames = Vec::new();
+    for capture in captures {
+        let offset_ms = capture
+            .started_at_unix_ms
+            .map(|start_ms| start_ms.saturating_sub(base_start_ms))
+            .unwrap_or(0);
+        frames.extend(capture.frames.into_iter().map(|mut frame| {
+            frame.timestamp_ms = frame.timestamp_ms.saturating_add(offset_ms);
+            frame
+        }));
+    }
+
+    frames.sort_by_key(|frame| frame.timestamp_ms);
+    if let Some(limit_ms) = run_duration_ms.map(|ms| ms.saturating_add(1_500)) {
+        frames.retain(|frame| frame.timestamp_ms <= limit_ms);
+    }
+    log::info!(
+        "screen_recorder: merged replay frame segments={} frames={}",
+        capture_count,
+        frames.len()
+    );
+    frames
 }
 
 #[cfg(target_os = "windows")]
