@@ -573,6 +573,14 @@ resolve_ue4ss_sdk_dir() {
     "$REPO_ROOT/external/UE4SSCPPTemplate/RE-UE4SS/UE4SS"
   )
 
+  local is_ci=0
+  if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+    is_ci=1
+  fi
+  if [[ "$is_ci" -eq 1 && -d "$REPO_ROOT/external/UE4SSCPPTemplate/RE-UE4SS/UE4SS" ]]; then
+    maybe_init_template_submodules >&2
+  fi
+
   local c=""
   for c in "${candidates[@]}"; do
     if [[ -d "$c" ]] && sdk_headers_present "$c"; then
@@ -909,7 +917,8 @@ if [[ "$SKIP_MOD_BUILD" -eq 0 ]]; then
         printf 'step=ue4ss-mod\n'
         printf 'builder=msvc-via-powershell\n'
         printf 'mod_config=%s\n' "$MOD_CONFIGURATION"
-        printf 'sdk=%s\n' "$UE4SS_SDK_DIR"
+        printf 'sdk_path=%s\n' "$UE4SS_SDK_DIR"
+        printf 'sdk_hash=%s\n' "$(hash_paths "$UE4SS_SDK_DIR")"
         printf 'stripped_mod=%s\n' "$STRIPPED_MOD_BUILD"
         printf 'runtime=%s\n' "$runtime_hash_for_mod"
         printf 'src=%s\n' "$(hash_paths "$REPO_ROOT/ue4ss-mod/CMakeLists.txt" "$REPO_ROOT/ue4ss-mod/src" "$REPO_ROOT/ue4ss-mod/mod.json")"
@@ -930,7 +939,8 @@ if [[ "$SKIP_MOD_BUILD" -eq 0 ]]; then
         printf 'step=ue4ss-mod\n'
         printf 'builder=mingw\n'
         printf 'mod_config=%s\n' "$MOD_CONFIGURATION"
-        printf 'sdk=%s\n' "$UE4SS_SDK_DIR"
+        printf 'sdk_path=%s\n' "$UE4SS_SDK_DIR"
+        printf 'sdk_hash=%s\n' "$(hash_paths "$UE4SS_SDK_DIR")"
         printf 'stripped_mod=%s\n' "$STRIPPED_MOD_BUILD"
         printf 'runtime=%s\n' "$runtime_hash_for_mod"
         printf 'cmake=%s\n' "$(cmake --version | head -n 1)"

@@ -48,7 +48,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: external/UE4SSCPPTemplate
-          key: ${{ runner.os }}-ue4ss-template-v1
+          key: ${{ runner.os }}-ue4ss-template-${{ hashFiles('scripts/dev-pipeline.ps1', 'scripts/dev-pipeline.sh') }}
 
       - name: Cache payload pipeline artifacts
         uses: actions/cache@v4
@@ -80,6 +80,7 @@ jobs:
       - name: Verify staged AimMod runtime payload
         shell: pwsh
         run: |
+          $builtRustCore = "ue4ss-rust-core/target/x86_64-pc-windows-msvc/release/ue4ss_rust_core.dll"
           $requiredFiles = @(
             "src-tauri/ue4ss/kovaaks_rust_core.dll",
             "src-tauri/ue4ss/Mods/KovaaksBridgeMod/mod.json",
@@ -112,6 +113,26 @@ jobs:
           $settingsProfile = (Get-Content "src-tauri/ue4ss/.kovaaks_overlay_settings_profile" -Raw).Trim()
           if ($settingsProfile -ne "production") {
             throw "Expected settings profile 'production' but found '$settingsProfile'."
+          }
+
+          if (-not (Test-Path $builtRustCore -PathType Leaf)) {
+            throw "Missing built rust core DLL: $builtRustCore"
+          }
+
+          $builtRustCoreHash = (Get-FileHash $builtRustCore -Algorithm SHA256).Hash.ToLowerInvariant()
+          $stagedRustCoreHash = (Get-FileHash "src-tauri/ue4ss/kovaaks_rust_core.dll" -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($builtRustCoreHash -ne $stagedRustCoreHash) {
+            throw "Staged kovaaks_rust_core.dll does not match the freshly built rust core DLL."
+          }
+
+          $engineTickEnabled = Select-String -Path "src-tauri/ue4ss/UE4SS-settings.ini" -Pattern '^\s*HookEngineTick\s*=\s*1\s*$' -CaseSensitive:$false -Quiet
+          if (-not $engineTickEnabled) {
+            throw "Expected staged production UE4SS-settings.ini to contain HookEngineTick = 1."
+          }
+
+          $viewportTickEnabled = Select-String -Path "src-tauri/ue4ss/UE4SS-settings.ini" -Pattern '^\s*HookGameViewportClientTick\s*=\s*1\s*$' -CaseSensitive:$false -Quiet
+          if (-not $viewportTickEnabled) {
+            throw "Expected staged production UE4SS-settings.ini to contain HookGameViewportClientTick = 1."
           }
 
       - name: Build and publish release

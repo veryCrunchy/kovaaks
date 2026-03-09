@@ -699,6 +699,12 @@ function Resolve-Ue4ssSdkDir([string]$ExplicitSdkDir, [string]$RepoRoot) {
     (Join-Path $RepoRoot "external/UE4SSCPPTemplate/RE-UE4SS/UE4SS")
   )
 
+  $isCi = ($env:CI -eq "true") -or ($env:GITHUB_ACTIONS -eq "true")
+  $templateSdkCandidate = Join-Path $RepoRoot "external/UE4SSCPPTemplate/RE-UE4SS/UE4SS"
+  if ($isCi -and (Test-Path $templateSdkCandidate -PathType Container)) {
+    Initialize-TemplateSubmodules -RepoRoot $RepoRoot | Out-Host
+  }
+
   foreach ($c in $candidates) {
     if ((Test-Path $c -PathType Container) -and (Test-SdkHeaders $c)) {
       return (Resolve-NativePath $c)
@@ -1082,7 +1088,8 @@ if (-not $SkipModBuild) {
     "step=ue4ss-mod",
     "mod_config=$ModConfiguration",
     "stripped_mod=$StrippedModBuild",
-    "sdk=$Ue4ssSdkDir",
+    "sdk_path=$Ue4ssSdkDir",
+    "sdk_hash=$(Get-PathsHash @($Ue4ssSdkDir))",
     "runtime=$runtimeHashForMod",
     "cmake=$(Get-CommandVersion -Name 'cmake' -Args @('--version'))",
     "src=$(Get-PathsHash @((Join-Path $repoRoot 'ue4ss-mod/CMakeLists.txt'), (Join-Path $repoRoot 'ue4ss-mod/src'), (Join-Path $repoRoot 'ue4ss-mod/mod.json')))"
