@@ -184,7 +184,7 @@ interface AimAxisProfile {
   volatility: number;
 }
 
-type Tab = "overview" | "movement" | "performance" | "coaching" | "replay" | "leaderboard";
+type Tab = "summary" | "mechanics" | "coaching" | "replay" | "leaderboard";
 type DateRangePreset = "all" | "30d" | "90d" | "365d";
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
@@ -2816,6 +2816,50 @@ function PerformanceTab({
   );
 }
 
+function MechanicsTab({
+  records,
+  sorted,
+}: {
+  records: SessionRecord[];
+  sorted: SessionRecord[];
+}) {
+  const hasSmooth = records.some((record) => record.smoothness != null);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+            Game Performance
+          </div>
+          <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+            Score pace, accuracy, kill speed, and how this scenario performs across runs.
+          </div>
+        </div>
+        <PerformanceTab records={records} sorted={sorted} />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        <div>
+          <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+            Mouse Control
+          </div>
+          <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+            Smoothness, wobble, overshoot, path quality, and how your mouse movement holds up over time.
+          </div>
+        </div>
+        {hasSmooth ? (
+          <MovementTab records={records} sorted={sorted} />
+        ) : (
+          <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.45)", lineHeight: 1.7 }}>
+            Mouse movement detail is not available for this scenario yet. Play a run with mouse tracking enabled to unlock it.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Replay tab ───────────────────────────────────────────────────────────────
 
 function ReplayTab({
@@ -3388,6 +3432,26 @@ function ReplayTab({
       rangesOverlap(moment.startSec * 1000, moment.endSec * 1000, selectedContextRow.startMs, selectedContextRow.endMs),
     );
   }, [runMoments, selectedContextRow]);
+  const focusMomentRows = shotTelemetryContext.rows;
+  const selectedContextIndex = selectedContextRow
+    ? focusMomentRows.findIndex((row) => row.key === selectedContextRow.key)
+    : -1;
+  const canFocusPrev = selectedContextIndex > 0;
+  const canFocusNext = selectedContextIndex >= 0 && selectedContextIndex < focusMomentRows.length - 1;
+  const activeFocusTitle = selectedContextRow ? selectedContextRow.label : "Full run";
+  const activeFocusDetail = selectedContextRow
+    ? [
+        formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs),
+        formatReplayMomentPhaseLabel(selectedContextRow.phase),
+        formatReplayMomentContextLabel(selectedContextRow.contextKind),
+      ].filter(Boolean).join(" · ")
+    : "Showing the full replay with all saved moments.";
+  const jumpFocusedMoment = (direction: -1 | 1) => {
+    if (selectedContextIndex < 0) return;
+    const nextRow = focusMomentRows[selectedContextIndex + direction];
+    if (!nextRow) return;
+    setSelectedContextKey(nextRow.key);
+  };
   const replaySelectionRange = useMemo(() => {
     if (!selectedContextRow) return null;
     return {
@@ -3588,145 +3652,43 @@ function ReplayTab({
         </div>
       </div>
 
-      {/* Mouse path viewer */}
       {loading && (
         <div style={{ color: "rgba(255,255,255,0.3)", fontSize: 12 }}>Loading replay…</div>
       )}
-      {!loading && runSnapshot && selectedRecord && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {/* In-Game Replay UI hidden for development. */}
-          {/* <div style={CHART_STYLE}>
-            <SectionTitle>In-Game Replay</SectionTitle>
-            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <button
-                type="button"
-                onClick={handlePlayInGameReplay}
-                disabled={inGameReplayBusy || !hasInGameTickStream}
-                style={{
-                  background: hasInGameTickStream ? "rgba(0,245,160,0.15)" : "rgba(255,255,255,0.06)",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  color: hasInGameTickStream ? "#00f5a0" : "rgba(255,255,255,0.45)",
-                  borderRadius: 8,
-                  padding: "8px 12px",
-                  fontSize: 12,
-                  cursor: inGameReplayBusy || !hasInGameTickStream ? "not-allowed" : "pointer",
-                }}
-              >
-                Play In Game
-              </button>
-              <button
-                type="button"
-                onClick={handleStopInGameReplay}
-                disabled={inGameReplayBusy}
-                style={{
-                  background: "rgba(255,255,255,0.06)",
-                  border: "1px solid rgba(255,255,255,0.2)",
-                  color: "rgba(255,255,255,0.8)",
-                  borderRadius: 8,
-                  padding: "8px 12px",
-                  fontSize: 12,
-                  cursor: inGameReplayBusy ? "not-allowed" : "pointer",
-                }}
-              >
-                Stop
-              </button>
-              {!hasInGameTickStream && (
-                <span style={{ color: "rgba(255,255,255,0.5)", fontSize: 11 }}>
-                  This replay cannot be played back in-game.
-                </span>
-              )}
-            </div>
-            {inGameReplayStatus && (
-              <div style={{ marginTop: 8, fontSize: 11, color: "rgba(255,255,255,0.62)" }}>
-                {inGameReplayStatus}
-              </div>
-            )}
-          </div> */}
-
-          <div style={CHART_STYLE}>
-            <SectionTitle>Run stats</SectionTitle>
-            {bridgeRunStatCards.length > 0 && (
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                {bridgeRunStatCards.map((card) => (
-                  <StatCard
-                    key={card.label}
-                    label={card.label}
-                    value={card.value}
-                    sub={card.sub}
-                    accent={card.accent}
-                  />
-                ))}
-              </div>
-            )}
-            {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
-              <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
-                This run has limited second-by-second detail, so the summary above uses the best saved data available.
-              </div>
-            )}
-          </div>
-
-          <div style={CHART_STYLE}>
-            <SectionTitle>Shot detail</SectionTitle>
-            {shotTelemetrySummary ? (
-              <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-                {shotTelemetrySummaryCards.length > 0 && (
-                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-                    {shotTelemetrySummaryCards.map((card) => (
-                      <StatCard
-                        key={card.label}
-                        label={card.label}
-                        value={card.value}
-                        sub={card.sub}
-                        accent={card.accent}
-                      />
-                    ))}
-                  </div>
-                )}
-                {shotTelemetrySummary.topProfiles.length > 0 && (
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <span style={{ fontSize: 11, color: "rgba(255,255,255,0.42)" }}>Nearest target mix</span>
-                    {shotTelemetrySummary.topProfiles.map(([profile, count]) => (
-                      <span
-                        key={profile}
-                        style={{
-                          fontSize: 11,
-                          padding: "4px 8px",
-                          borderRadius: 999,
-                          background: "rgba(255,255,255,0.05)",
-                          border: "1px solid rgba(255,255,255,0.08)",
-                          color: "rgba(255,255,255,0.72)",
-                        }}
-                      >
-                        {profile} · {count}
-                      </span>
-                    ))}
-                  </div>
-                )}
-                {selectedContextRow && (
-                  <div
-                    style={{
-                      display: "flex",
-                      justifyContent: "space-between",
-                      alignItems: "flex-start",
-                      gap: 12,
-                      flexWrap: "wrap",
-                      padding: "10px 12px",
-                      borderRadius: 10,
-                      background: selectedContextRow.source === "sql" ? "rgba(0,245,160,0.08)" : "rgba(255,209,102,0.08)",
-                      border: `1px solid ${selectedContextRow.source === "sql" ? "rgba(0,245,160,0.22)" : "rgba(255,209,102,0.22)"}`,
-                    }}
-                  >
-                    <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.82)", fontWeight: 700, display: "flex", alignItems: "center", gap: 6 }}>
-                        <span>Focused moment: {selectedContextRow.label}</span>
-                        <InfoTip text="Target mix, shot detail, coaching notes, and the mouse replay below are all filtered to this moment." />
-                      </div>
-                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.55)", lineHeight: 1.5 }}>
-                        {formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}
-                        {formatReplayMomentPhaseLabel(selectedContextRow.phase) ? ` · ${formatReplayMomentPhaseLabel(selectedContextRow.phase)}` : ""}
-                        {formatReplayMomentContextLabel(selectedContextRow.contextKind) ? ` · ${formatReplayMomentContextLabel(selectedContextRow.contextKind)}` : ""}
-                      </div>
+      {!loading && replayPayload && selectedRecord && (
+        runSnapshot ? (
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns: "minmax(280px, 340px) minmax(0, 1fr)",
+              gap: 20,
+              alignItems: "start",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: 14,
+                position: "sticky",
+                top: 0,
+                alignSelf: "start",
+              }}
+            >
+              <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+                  <div>
+                    <div style={{ fontSize: 11, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+                      Replay Focus
                     </div>
+                    <div style={{ marginTop: 6, fontSize: 16, color: C.text, fontWeight: 700 }}>
+                      {activeFocusTitle}
+                    </div>
+                    <div style={{ marginTop: 6, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+                      {activeFocusDetail}
+                    </div>
+                  </div>
+                  {selectedContextRow && (
                     <button
                       type="button"
                       onClick={() => setSelectedContextKey(null)}
@@ -3741,21 +3703,57 @@ function ReplayTab({
                         textTransform: "uppercase",
                         letterSpacing: "0.06em",
                         fontWeight: 700,
+                        whiteSpace: "nowrap",
                       }}
                     >
-                      Clear focus
+                      Show Full Run
                     </button>
-                  </div>
-                )}
-                <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
-                    <span>{shotTelemetrySummaryLabel}</span>
-                    <InfoTip text={shotTelemetrySummaryInfo} />
-                  </div>
-                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                  )}
+                </div>
+
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <button
+                    type="button"
+                    onClick={() => jumpFocusedMoment(-1)}
+                    disabled={!canFocusPrev}
+                    style={{
+                      background: canFocusPrev ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.02)",
+                      border: `1px solid ${canFocusPrev ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.08)"}`,
+                      borderRadius: 999,
+                      color: canFocusPrev ? C.textSub : C.textFaint,
+                      cursor: canFocusPrev ? "pointer" : "not-allowed",
+                      fontSize: 10,
+                      padding: "5px 10px",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.06em",
+                      fontWeight: 700,
+                    }}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => jumpFocusedMoment(1)}
+                    disabled={!canFocusNext}
+                    style={{
+                      background: canFocusNext ? "rgba(255,255,255,0.05)" : "rgba(255,255,255,0.02)",
+                      border: `1px solid ${canFocusNext ? "rgba(255,255,255,0.14)" : "rgba(255,255,255,0.08)"}`,
+                      borderRadius: 999,
+                      color: canFocusNext ? C.textSub : C.textFaint,
+                      cursor: canFocusNext ? "pointer" : "not-allowed",
+                      fontSize: 10,
+                      padding: "5px 10px",
+                      textTransform: "uppercase",
+                      letterSpacing: "0.06em",
+                      fontWeight: 700,
+                    }}
+                  >
+                    Next
+                  </button>
+                  <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
                     {([
-                      { key: "context", label: "Context" },
-                      { key: "samples", label: "Samples" },
+                      { key: "context", label: "Moments" },
+                      { key: "samples", label: "Shots" },
                     ] as const).map((option) => {
                       const active = shotTelemetryDisplayMode === option.key;
                       return (
@@ -3783,357 +3781,409 @@ function ReplayTab({
                     })}
                   </div>
                 </div>
-                <div style={{ overflowX: "auto" }}>
-                  {shotTelemetryDisplayMode === "context" ? (
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                      <thead>
-                        <tr style={{ color: "rgba(255,255,255,0.35)" }}>
-                          {["Window", "Context", "Fired", "Hit", "Acc", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
-                            <th
-                              key={heading}
-                              style={{
-                                padding: "0 0 6px",
-                                textAlign: "left",
-                                fontWeight: 500,
-                                borderBottom: "1px solid rgba(255,255,255,0.07)",
-                              }}
-                            >
-                              {heading}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {shotTelemetryContext.rows.map((row) => (
-                          <tr
-                            key={row.key}
-                            onClick={() => setSelectedContextKey((current) => current === row.key ? null : row.key)}
-                            style={{
-                              borderBottom: "1px solid rgba(255,255,255,0.04)",
-                              cursor: "pointer",
-                              background: selectedContextKey === row.key ? "rgba(0,245,160,0.08)" : "transparent",
-                            }}
-                          >
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {formatTelemetryWindowLabel(row.startMs, row.endMs)}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-                                <span>{row.label}</span>
-                                <span style={{ fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
-                                  {formatReplayMomentSourceLabel(row.source)}
-                                  {formatReplayMomentPhaseLabel(row.phase) ? ` · ${formatReplayMomentPhaseLabel(row.phase)}` : ""}
-                                  {formatReplayMomentContextLabel(row.contextKind) ? ` · ${formatReplayMomentContextLabel(row.contextKind)}` : ""}
-                                </span>
-                              </div>
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>
-                              {row.firedCount.toLocaleString()}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "#00f5a0" }}>
-                              {row.hitCount.toLocaleString()}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.accuracyPct != null ? `${row.accuracyPct.toFixed(1)}%` : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.avgBotCount != null ? row.avgBotCount.toFixed(1) : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.nearestLabel}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  ) : (
-                    <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
-                      <thead>
-                        <tr style={{ color: "rgba(255,255,255,0.35)" }}>
-                          {["T", "Event", "Total", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
-                            <th
-                              key={heading}
-                              style={{
-                                padding: "0 0 6px",
-                                textAlign: "left",
-                                fontWeight: 500,
-                                borderBottom: "1px solid rgba(255,255,255,0.07)",
-                              }}
-                            >
-                              {heading}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {shotTelemetrySampleRows.map((row) => (
-                          <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {formatTelemetryOffset(row.offsetMs)}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: row.eventLabel === "Hit" ? "#00f5a0" : "#ffd166" }}>
-                              {row.count > 1 ? `${row.eventLabel} ×${row.count}` : row.eventLabel}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.total ?? "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.botCount || "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
-                              {row.nearestLabel}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}
-                            </td>
-                            <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
-                              {row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  )}
+
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
+                  <span>{shotTelemetrySummaryLabel}</span>
+                  <InfoTip text={shotTelemetrySummaryInfo} />
                 </div>
               </div>
-            ) : (
-              <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
-                No shot detail was saved for this replay.
-              </div>
-            )}
-          </div>
 
-          {visibleReplayContextCoaching.length > 0 && (
-            <div style={CHART_STYLE}>
-              <SectionTitle>Coaching by moment</SectionTitle>
-              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                {visibleReplayContextCoaching.map((signal) => {
-                  const active = selectedContextKey === signal.contextKey;
-                  return (
+              <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                  <SectionTitle>Focus moments</SectionTitle>
+                  <span style={{ fontSize: 11, color: C.textFaint }}>
+                    {focusMomentRows.length.toLocaleString()}
+                  </span>
+                </div>
+                {focusMomentRows.length > 0 ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: 420, overflowY: "auto", paddingRight: 4 }}>
+                    {focusMomentRows.map((row) => {
+                      const active = row.key === selectedContextKey;
+                      return (
+                        <button
+                          key={row.key}
+                          type="button"
+                          onClick={() => setSelectedContextKey((current) => current === row.key ? null : row.key)}
+                          style={{
+                            textAlign: "left",
+                            background: active ? "rgba(0,245,160,0.08)" : "rgba(255,255,255,0.03)",
+                            border: `1px solid ${active ? "rgba(0,245,160,0.28)" : "rgba(255,255,255,0.08)"}`,
+                            borderLeft: `3px solid ${active ? "#00f5a0" : "rgba(255,255,255,0.16)"}`,
+                            borderRadius: 10,
+                            padding: "10px 12px",
+                            cursor: "pointer",
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: 6,
+                          }}
+                        >
+                          <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                            <span style={{ fontSize: 12, fontWeight: 700, color: active ? C.text : C.textSub }}>
+                              {row.label}
+                            </span>
+                            <span style={{ fontSize: 10, color: C.textFaint }}>
+                              {formatTelemetryWindowLabel(row.startMs, row.endMs)}
+                            </span>
+                          </div>
+                          <div style={{ fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}>
+                            {[formatReplayMomentPhaseLabel(row.phase), formatReplayMomentContextLabel(row.contextKind)].filter(Boolean).join(" · ") || "Saved moment"}
+                          </div>
+                          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 11, color: "rgba(255,255,255,0.62)" }}>
+                            <span style={{ color: "#ffd166" }}>{row.firedCount.toLocaleString()} fired</span>
+                            <span style={{ color: "#00f5a0" }}>{row.hitCount.toLocaleString()} hit</span>
+                            <span>{row.accuracyPct != null ? `${row.accuracyPct.toFixed(1)}% acc` : "—"}</span>
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
+                    No saved moments are available for this replay yet.
+                  </div>
+                )}
+              </div>
+
+              {visibleReplayContextCoaching.length > 0 && (
+                <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 10 }}>
+                  <SectionTitle>Quick notes</SectionTitle>
+                  {visibleReplayContextCoaching.slice(0, selectedContextRow ? 4 : 3).map((signal) => (
                     <button
                       key={signal.id}
                       type="button"
                       onClick={() => setSelectedContextKey(signal.contextKey)}
                       style={{
-                        background: active ? `${signal.badgeColor}12` : "rgba(255,255,255,0.03)",
-                        border: `1px solid ${active ? `${signal.badgeColor}50` : "rgba(255,255,255,0.08)"}`,
+                        textAlign: "left",
+                        background: "rgba(255,255,255,0.03)",
+                        border: "1px solid rgba(255,255,255,0.08)",
                         borderLeft: `3px solid ${signal.badgeColor}`,
                         borderRadius: 10,
-                        padding: "12px 14px",
-                        textAlign: "left",
+                        padding: "10px 12px",
                         cursor: "pointer",
                         display: "flex",
                         flexDirection: "column",
-                        gap: 7,
+                        gap: 4,
                       }}
                     >
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center", flexWrap: "wrap" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                        <span style={{ fontSize: 12, fontWeight: 700, color: "rgba(255,255,255,0.84)" }}>{signal.title}</span>
+                        <span style={{ fontSize: 10, color: C.textFaint }}>{formatTelemetryWindowLabel(signal.startMs, signal.endMs)}</span>
+                      </div>
+                      <div style={{ fontSize: 11, color: C.textSub, lineHeight: 1.5 }}>{signal.detail}</div>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+              <div style={CHART_STYLE}>
+                <SectionTitle>
+                  Mouse path —{" "}
+                  <span style={{ color: "#00f5a0", fontWeight: 700 }}>{fmtScore(selectedRecord.score)}</span>{" "}
+                  pts · {formatDateTime(selectedRecord.timestamp)}
+                </SectionTitle>
+                <MousePathViewer
+                  rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
+                  metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
+                  screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
+                  segmentLabel={selectedContextRow?.label ?? null}
+                  segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
+                  timelineMarkers={replayTimelineMarkers}
+                  timelineWindows={replayTimelineWindows}
+                />
+              </div>
+
+              {runChartData.length > 1 && hasRunTimelineSignal && (
+                <div style={CHART_STYLE}>
+                  <SectionTitle>Run timeline by second</SectionTitle>
+                  <ResponsiveContainer width="100%" height={200}>
+                    <LineChart data={runChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+                      <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                      <XAxis
+                        dataKey="tSec"
+                        tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        label={{ value: "seconds", position: "insideBottomRight", offset: -5, fill: "rgba(255,255,255,0.35)", fontSize: 10 }}
+                      />
+                      <YAxis
+                        yAxisId="pace"
+                        tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        width={42}
+                      />
+                      <YAxis
+                        yAxisId="pct"
+                        orientation="right"
+                        tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                        width={42}
+                        domain={[0, 100]}
+                      />
+                      <Tooltip content={<MiniTooltip />} />
+                      {runMoments.map((moment) => (
+                        <ReferenceArea
+                          key={moment.id}
+                          x1={moment.startSec}
+                          x2={moment.endSec}
+                          fill={moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166"}
+                          fillOpacity={0.08}
+                          strokeOpacity={0}
+                        />
+                      ))}
+                      {selectedContextRow && (
+                        <ReferenceArea
+                          x1={selectedContextRow.startMs / 1000}
+                          x2={selectedContextRow.endMs / 1000}
+                          fill={selectedContextRow.source === "sql" ? "#00f5a0" : "#ffd166"}
+                          fillOpacity={0.14}
+                          strokeOpacity={0}
+                        />
+                      )}
+                      <Line yAxisId="pace" type="monotone" dataKey="spm" name="SPM" stroke="#00f5a0" strokeWidth={2} dot={false} connectNulls />
+                      <Line yAxisId="pace" type="monotone" dataKey="kps" name="KPS" stroke="#00b4ff" strokeWidth={1.7} strokeDasharray="4 3" dot={false} connectNulls />
+                      <Line yAxisId="pct" type="monotone" dataKey="acc" name="Accuracy %" stroke="#ffd700" strokeWidth={1.8} dot={false} connectNulls />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+
+              <div style={CHART_STYLE}>
+                <SectionTitle>{selectedContextRow ? "Focused moment detail" : "Run stats"}</SectionTitle>
+                {bridgeRunStatCards.length > 0 && (
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    {bridgeRunStatCards.map((card) => (
+                      <StatCard
+                        key={card.label}
+                        label={card.label}
+                        value={card.value}
+                        sub={card.sub}
+                        accent={card.accent}
+                      />
+                    ))}
+                  </div>
+                )}
+                {(runChartData.length <= 1 || !hasRunTimelineSignal) && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: "rgba(255,255,255,0.42)", lineHeight: 1.5 }}>
+                    This run has limited second-by-second detail, so the summary above uses the best saved data available.
+                  </div>
+                )}
+              </div>
+
+              <div style={CHART_STYLE}>
+                <SectionTitle>{selectedContextRow ? "Shot detail in this moment" : "Shot detail across the run"}</SectionTitle>
+                {shotTelemetrySummary ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {shotTelemetrySummaryCards.length > 0 && (
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        {shotTelemetrySummaryCards.map((card) => (
+                          <StatCard
+                            key={card.label}
+                            label={card.label}
+                            value={card.value}
+                            sub={card.sub}
+                            accent={card.accent}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    {shotTelemetrySummary.topProfiles.length > 0 && (
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.42)" }}>Nearest target mix</span>
+                        {shotTelemetrySummary.topProfiles.map(([profile, count]) => (
                           <span
+                            key={profile}
                             style={{
-                              background: `${signal.badgeColor}20`,
-                              border: `1px solid ${signal.badgeColor}45`,
-                              color: signal.badgeColor,
-                              borderRadius: 4,
-                              fontSize: 10,
-                              padding: "2px 7px",
-                              textTransform: "uppercase",
-                              letterSpacing: 0.8,
-                              whiteSpace: "nowrap",
+                              fontSize: 11,
+                              padding: "4px 8px",
+                              borderRadius: 999,
+                              background: "rgba(255,255,255,0.05)",
+                              border: "1px solid rgba(255,255,255,0.08)",
+                              color: "rgba(255,255,255,0.72)",
                             }}
                           >
-                            {signal.badge}
+                            {profile} · {count}
                           </span>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: "rgba(255,255,255,0.84)" }}>
-                            {signal.title}
-                          </span>
-                        </div>
-                        <span style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
-                          {formatTelemetryWindowLabel(signal.startMs, signal.endMs)}
-                        </span>
+                        ))}
                       </div>
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.6 }}>
-                        {signal.detail}
-                      </div>
-                      <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.6 }}>
-                        <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
-                        {signal.action}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {runChartData.length > 1 && hasRunTimelineSignal && (
-            <div style={CHART_STYLE}>
-              <SectionTitle>Run timeline by second</SectionTitle>
-              <ResponsiveContainer width="100%" height={200}>
-                <LineChart data={runChartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                  <XAxis
-                    dataKey="tSec"
-                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    label={{ value: "seconds", position: "insideBottomRight", offset: -5, fill: "rgba(255,255,255,0.35)", fontSize: 10 }}
-                  />
-                  <YAxis
-                    yAxisId="pace"
-                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    width={42}
-                  />
-                  <YAxis
-                    yAxisId="pct"
-                    orientation="right"
-                    tick={{ fill: "rgba(255,255,255,0.3)", fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                    width={42}
-                    domain={[0, 100]}
-                  />
-                  <Tooltip content={<MiniTooltip />} />
-                  {runMoments.map((moment) => (
-                    <ReferenceArea
-                      key={moment.id}
-                      x1={moment.startSec}
-                      x2={moment.endSec}
-                      fill={moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166"}
-                      fillOpacity={0.08}
-                      strokeOpacity={0}
-                    />
-                  ))}
-                  {selectedContextRow && (
-                    <ReferenceArea
-                      x1={selectedContextRow.startMs / 1000}
-                      x2={selectedContextRow.endMs / 1000}
-                      fill={selectedContextRow.source === "sql" ? "#00f5a0" : "#ffd166"}
-                      fillOpacity={0.14}
-                      strokeOpacity={0}
-                    />
-                  )}
-                  <Line
-                    yAxisId="pace"
-                    type="monotone"
-                    dataKey="spm"
-                    name="SPM"
-                    stroke="#00f5a0"
-                    strokeWidth={2}
-                    dot={false}
-                    connectNulls
-                  />
-                  <Line
-                    yAxisId="pace"
-                    type="monotone"
-                    dataKey="kps"
-                    name="KPS"
-                    stroke="#00b4ff"
-                    strokeWidth={1.7}
-                    strokeDasharray="4 3"
-                    dot={false}
-                    connectNulls
-                  />
-                  <Line
-                    yAxisId="pct"
-                    type="monotone"
-                    dataKey="acc"
-                    name="Accuracy %"
-                    stroke="#ffd700"
-                    strokeWidth={1.8}
-                    dot={false}
-                    connectNulls
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
-
-          {(replayPayload?.frames?.length ?? 0) === 0 && (
-            <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.52)", fontSize: 12, lineHeight: 1.6 }}>
-              No video frames were saved for this replay.
-            </div>
-          )}
-
-          {filteredRunMoments.length > 0 && (
-            <div style={CHART_STYLE}>
-              <SectionTitle
-                info={selectedContextRow ? `Showing only coaching notes that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.` : undefined}
-              >
-                Moment coaching
-              </SectionTitle>
-              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {filteredRunMoments.map((moment) => (
-                  <div
-                    key={moment.id}
-                    style={{
-                      background: "rgba(255,255,255,0.03)",
-                      border: "1px solid rgba(255,255,255,0.08)",
-                      borderRadius: 8,
-                      padding: "10px 12px",
-                      display: "flex",
-                      flexDirection: "column",
-                      gap: 6,
-                    }}
-                  >
-                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
-                      <div style={{ fontWeight: 700, color: moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166" }}>
-                        {moment.title}
-                      </div>
-                      <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
-                        {formatRunWindow(moment.startSec, moment.endSec)}
-                      </div>
-                    </div>
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.55 }}>
-                      {moment.detail}
-                    </div>
-                    <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.55 }}>
-                      <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
-                      {runMomentAction(moment)}
+                    )}
+                    <div style={{ overflowX: "auto" }}>
+                      {shotTelemetryDisplayMode === "context" ? (
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                              {["Moment", "Context", "Fired", "Hit", "Acc", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                                <th
+                                  key={heading}
+                                  style={{
+                                    padding: "0 0 6px",
+                                    textAlign: "left",
+                                    fontWeight: 500,
+                                    borderBottom: "1px solid rgba(255,255,255,0.07)",
+                                  }}
+                                >
+                                  {heading}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {shotTelemetryContext.rows.map((row) => (
+                              <tr
+                                key={row.key}
+                                onClick={() => setSelectedContextKey((current) => current === row.key ? null : row.key)}
+                                style={{
+                                  borderBottom: "1px solid rgba(255,255,255,0.04)",
+                                  cursor: "pointer",
+                                  background: selectedContextKey === row.key ? "rgba(0,245,160,0.08)" : "transparent",
+                                }}
+                              >
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                                  {formatTelemetryWindowLabel(row.startMs, row.endMs)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                                  <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+                                    <span>{row.label}</span>
+                                    <span style={{ fontSize: 10, color: "rgba(255,255,255,0.42)" }}>
+                                      {formatReplayMomentSourceLabel(row.source)}
+                                      {formatReplayMomentPhaseLabel(row.phase) ? ` · ${formatReplayMomentPhaseLabel(row.phase)}` : ""}
+                                      {formatReplayMomentContextLabel(row.contextKind) ? ` · ${formatReplayMomentContextLabel(row.contextKind)}` : ""}
+                                    </span>
+                                  </div>
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>{row.firedCount.toLocaleString()}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "#00f5a0" }}>{row.hitCount.toLocaleString()}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.accuracyPct != null ? `${row.accuracyPct.toFixed(1)}%` : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.avgBotCount != null ? row.avgBotCount.toFixed(1) : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.nearestLabel}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                              {["T", "Event", "Total", "Bots", "Nearest", "Range", "Yaw", "Pitch"].map((heading) => (
+                                <th
+                                  key={heading}
+                                  style={{
+                                    padding: "0 0 6px",
+                                    textAlign: "left",
+                                    fontWeight: 500,
+                                    borderBottom: "1px solid rgba(255,255,255,0.07)",
+                                  }}
+                                >
+                                  {heading}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {shotTelemetrySampleRows.map((row) => (
+                              <tr key={row.key} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{formatTelemetryOffset(row.offsetMs)}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: row.eventLabel === "Hit" ? "#00f5a0" : "#ffd166" }}>
+                                  {row.count > 1 ? `${row.eventLabel} ×${row.count}` : row.eventLabel}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.total ?? "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.botCount || "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>{row.nearestLabel}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.nearestDistance != null ? row.nearestDistance.toFixed(0) : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.yawError != null ? `${row.yawError.toFixed(1)}°` : "—"}</td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>{row.pitchError != null ? `${row.pitchError.toFixed(1)}°` : "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
                     </div>
                   </div>
-                ))}
+                ) : (
+                  <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
+                    No shot detail was saved for this replay.
+                  </div>
+                )}
               </div>
+
+              {filteredRunMoments.length > 0 && (
+                <div style={CHART_STYLE}>
+                  <SectionTitle
+                    info={selectedContextRow ? `Showing only coaching notes that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.` : undefined}
+                  >
+                    Moment coaching
+                  </SectionTitle>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                    {filteredRunMoments.map((moment) => (
+                      <div
+                        key={moment.id}
+                        style={{
+                          background: "rgba(255,255,255,0.03)",
+                          border: "1px solid rgba(255,255,255,0.08)",
+                          borderRadius: 8,
+                          padding: "10px 12px",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: 6,
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div style={{ fontWeight: 700, color: moment.level === "warning" ? "#ff6b6b" : moment.level === "good" ? "#00f5a0" : "#ffd166" }}>
+                            {moment.title}
+                          </div>
+                          <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
+                            {formatRunWindow(moment.startSec, moment.endSec)}
+                          </div>
+                        </div>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.55 }}>
+                          {moment.detail}
+                        </div>
+                        <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.55 }}>
+                          <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
+                          {runMomentAction(moment)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {(replayPayload?.frames?.length ?? 0) === 0 && (
+                <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.52)", fontSize: 12, lineHeight: 1.6 }}>
+                  No video frames were saved for this replay.
+                </div>
+              )}
             </div>
-          )}
-        </div>
-      )}
-      {!loading && replayPayload && selectedRecord && !runSummary && (
-        <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.42)", fontSize: 12, lineHeight: 1.6 }}>
-          This replay was saved before full timing detail was available, so only the mouse path can be shown.
-        </div>
-      )}
-      {!loading && replayPayload && selectedRecord && (
-        <div style={CHART_STYLE}>
-          <SectionTitle>
-            Mouse path —{" "}
-            <span style={{ color: "#00f5a0", fontWeight: 700 }}>{fmtScore(selectedRecord.score)}</span>{" "}
-            pts · {formatDateTime(selectedRecord.timestamp)}
-          </SectionTitle>
-          <MousePathViewer
-            rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
-            metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
-            screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
-            segmentLabel={selectedContextRow?.label ?? null}
-            segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
-            timelineMarkers={replayTimelineMarkers}
-            timelineWindows={replayTimelineWindows}
-          />
-        </div>
+          </div>
+        ) : (
+          <>
+            <div style={{ ...CHART_STYLE, color: "rgba(255,255,255,0.42)", fontSize: 12, lineHeight: 1.6 }}>
+              This replay was saved before full timing detail was available, so only the mouse path can be shown.
+            </div>
+            <div style={CHART_STYLE}>
+              <SectionTitle>
+                Mouse path —{" "}
+                <span style={{ color: "#00f5a0", fontWeight: 700 }}>{fmtScore(selectedRecord.score)}</span>{" "}
+                pts · {formatDateTime(selectedRecord.timestamp)}
+              </SectionTitle>
+              <MousePathViewer
+                rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
+                metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
+                screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
+                segmentLabel={selectedContextRow?.label ?? null}
+                segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
+                timelineMarkers={replayTimelineMarkers}
+                timelineWindows={replayTimelineWindows}
+              />
+            </div>
+          </>
+        )
       )}
     </div>
   );
@@ -5608,13 +5658,12 @@ function ScenarioDetails({
 }) {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
-    return stored === "movement"
-      || stored === "performance"
+    return stored === "mechanics"
       || stored === "coaching"
       || stored === "replay"
       || stored === "leaderboard"
       ? stored
-      : "overview";
+      : "summary";
   });
   const [sessionFilter, setSessionFilter] = useState<SessionFilter>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionFilter);
@@ -5674,12 +5723,10 @@ function ScenarioDetails({
   }, [rawSorted, warmupIds, sessionFilter]);
 
   const best = Math.max(...filteredRecords.map((r) => r.score), 0);
-  const hasSmooth = analysisRecords.some((r) => r.smoothness != null);
 
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
-    { id: "overview", label: "Overview" },
-    { id: "movement", label: "Movement", hidden: !hasSmooth },
-    { id: "performance", label: "Performance" },
+    { id: "summary", label: "Summary" },
+    { id: "mechanics", label: "Mechanics" },
     { id: "coaching", label: "Coaching" },
     { id: "replay", label: "Replay" },
     { id: "leaderboard", label: "Leaderboard" },
@@ -5689,7 +5736,7 @@ function ScenarioDetails({
     if (tabs.some((tab) => !tab.hidden && tab.id === activeTab)) {
       return;
     }
-    setActiveTab("overview");
+    setActiveTab("summary");
   }, [activeTab, tabs]);
 
   useEffect(() => {
@@ -5793,7 +5840,7 @@ function ScenarioDetails({
         )}
       </div>
 
-      {activeTab === "overview" && (
+      {activeTab === "summary" && (
         <OverviewTab
           records={filteredRecords}
           sorted={filteredSorted}
@@ -5805,9 +5852,8 @@ function ScenarioDetails({
           }}
         />
       )}
-      {activeTab === "movement" && <MovementTab records={filteredRecords} sorted={filteredSorted} />}
-      {activeTab === "performance" && (
-        <PerformanceTab records={filteredRecords} sorted={filteredSorted} />
+      {activeTab === "mechanics" && (
+        <MechanicsTab records={filteredRecords} sorted={filteredSorted} />
       )}
       {activeTab === "coaching" && (
         <CoachingTab
