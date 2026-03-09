@@ -174,12 +174,10 @@ mod imp {
             .unwrap_or(false);
 
         if game_pid.is_some() {
-            let game_state = if bridge_connected {
-                "KovaaK Running".to_string()
-            } else if runtime_loaded {
+            let game_state = if !bridge_connected && runtime_loaded {
                 "Bridge Reconnecting".to_string()
             } else {
-                "KovaaK Running".to_string()
+                "Idling".to_string()
             };
 
             BridgePresenceState {
@@ -198,7 +196,7 @@ mod imp {
         } else {
             BridgePresenceState {
                 game_state_code: 0,
-                game_state: "AimMod Running".to_string(),
+                game_state: "Idling".to_string(),
                 scenario_name: None,
                 scenario_type: None,
                 scenario_subtype: None,
@@ -226,7 +224,6 @@ mod imp {
     }
 
     fn build_activity(state: &BridgePresenceState) -> serde_json::Value {
-        let version_label = crate::app_version::display_version_label();
         let scenario_name = state
             .scenario_name
             .as_deref()
@@ -271,8 +268,6 @@ mod imp {
                 });
             }
         }
-
-        state_parts.push(version_label.clone());
 
         if let Some(kind) = family.clone() {
             state_parts.push(kind);
