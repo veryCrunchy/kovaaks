@@ -12,6 +12,7 @@ use tauri::AppHandle;
 const LEGACY_STORE_PATH: &str = "sessions.json";
 const LEGACY_STORE_KEY: &str = "history";
 const DEFAULT_PAGE_LIMIT: usize = 500;
+const REPO_SQL_AUDIT_REFRESH_INTERVAL_MS: i64 = 12 * 60 * 60 * 1000;
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -242,30 +243,49 @@ pub fn clear_sessions(app: &AppHandle) {
 
 fn try_initialize(app: &AppHandle) -> anyhow::Result<SessionStoreInitReport> {
     let db_path = crate::stats_db::initialize(app)?;
-    let merge = load_legacy_sessions(app)
-        .map(|records| try_merge_sessions(app, records))
-        .transpose()?
-        .unwrap_or_default();
-    try_backfill_session_snapshots(app)?;
-    try_migrate_session_names(app)?;
-    match crate::stats_db::refresh_repo_sql_audit(app, Some(25)) {
-        Ok(summary) => {
-            if summary.incomplete_sessions > 0 {
-                log::warn!(
-                    "session_store: integrity audit flagged {} incomplete session(s) across {} audited ids",
-                    summary.incomplete_sessions,
-                    summary.audited_session_ids,
-                );
-            } else {
-                log::info!(
-                    "session_store: integrity audit ok across {} audited ids",
-                    summary.audited_session_ids,
-                );
+    let conn = crate::stats_db::connect(app)?;
+    let existing_sessions = count_sessions(&conn)?;
+    let merge = if existing_sessions == 0 {
+        load_legacy_sessions(app)
+            .map(|records| try_merge_sessions(app, records))
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        SessionMergeResult {
+            total_after: existing_sessions,
+            ..SessionMergeResult::default()
+        }
+    };
+
+    if has_legacy_snapshot_backfill_work(&conn)? {
+        try_backfill_session_snapshots(app)?;
+    }
+    if has_legacy_scenario_name_work(&conn)? {
+        try_migrate_session_names(app)?;
+    }
+
+    if should_refresh_repo_sql_audit(&conn)? {
+        match crate::stats_db::refresh_repo_sql_audit(app, Some(25)) {
+            Ok(summary) => {
+                if summary.incomplete_sessions > 0 {
+                    log::warn!(
+                        "session_store: integrity audit flagged {} incomplete session(s) across {} audited ids",
+                        summary.incomplete_sessions,
+                        summary.audited_session_ids,
+                    );
+                } else {
+                    log::info!(
+                        "session_store: integrity audit ok across {} audited ids",
+                        summary.audited_session_ids,
+                    );
+                }
+            }
+            Err(error) => {
+                log::warn!("session_store: integrity audit refresh failed: {error:?}");
             }
         }
-        Err(error) => {
-            log::warn!("session_store: integrity audit refresh failed: {error:?}");
-        }
+    } else {
+        log::debug!("session_store: skipping repo sql audit refresh on startup (recently audited)");
     }
     log::info!("session_store: using stats db at {}", db_path.display());
     Ok(SessionStoreInitReport {
@@ -509,6 +529,80 @@ fn load_legacy_sessions(app: &AppHandle) -> Option<Vec<SessionRecord>> {
 fn count_sessions(conn: &Connection) -> anyhow::Result<usize> {
     conn.query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
         .context("could not count sessions")
+}
+
+fn has_legacy_snapshot_backfill_work(conn: &Connection) -> anyhow::Result<bool> {
+    conn.query_row(
+        "
+        SELECT EXISTS(
+            SELECT 1
+            FROM sessions
+            WHERE smoothness_json IS NOT NULL
+               OR stats_panel_json IS NOT NULL
+               OR shot_timing_json IS NOT NULL
+            LIMIT 1
+        )
+        ",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .context("could not check for legacy snapshot backfill work")
+}
+
+fn has_legacy_scenario_name_work(conn: &Connection) -> anyhow::Result<bool> {
+    conn.query_row(
+        "
+        SELECT EXISTS(
+            SELECT 1
+            FROM sessions
+            WHERE instr(scenario, ' - Challenge') > 0
+            LIMIT 1
+        )
+        ",
+        [],
+        |row| row.get::<_, bool>(0),
+    )
+    .context("could not check for legacy scenario-name migration work")
+}
+
+fn should_refresh_repo_sql_audit(conn: &Connection) -> anyhow::Result<bool> {
+    let session_count = count_sessions(conn)? as i64;
+    if session_count == 0 {
+        return Ok(false);
+    }
+
+    let unknown_count: i64 = conn
+        .query_row(
+            "
+            SELECT COUNT(*)
+            FROM sessions
+            WHERE integrity_checked_at_unix_ms IS NULL
+               OR integrity_status = 'unknown'
+            ",
+            [],
+            |row| row.get(0),
+        )
+        .context("could not count unknown integrity rows")?;
+    if unknown_count > 0 {
+        return Ok(true);
+    }
+
+    let latest_checked_ms: Option<i64> = conn
+        .query_row(
+            "SELECT MAX(integrity_checked_at_unix_ms) FROM sessions",
+            [],
+            |row| row.get(0),
+        )
+        .context("could not read latest integrity audit timestamp")?;
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+
+    Ok(match latest_checked_ms {
+        Some(ts) => now_ms.saturating_sub(ts) >= REPO_SQL_AUDIT_REFRESH_INTERVAL_MS,
+        None => true,
+    })
 }
 
 fn query_sessions(
