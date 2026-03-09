@@ -54,38 +54,19 @@ static PAUSED: AtomicBool = AtomicBool::new(false);
 /// generation ID and exits as soon as it sees a newer generation — guaranteeing
 /// that only one recording thread is ever active at a time.
 static GENERATION: AtomicU64 = AtomicU64::new(0);
-static CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
 static FRAMES: Lazy<Mutex<Vec<ScreenFrame>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<Vec<ScreenFrame>>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
 static SESSION_START: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
+static LAST_CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
 
 // ─── Public API ────────────────────────────────────────────────────────────────
 
-/// Compute and store the centre-crop capture rect for the given monitor rect.
-///
-/// Captures 50% of the monitor's width and height centred on the screen — large
-/// enough to show where targets are appearing while avoiding static UI chrome at
-/// the edges.  Call this whenever the user changes monitor in Settings.
-pub fn update_monitor_rect(monitor: &RegionRect) {
-    let cap_w = (monitor.width / 2).max(320);
-    let cap_h = (monitor.height / 2).max(180);
-    let cap_x = monitor.x + (monitor.width as i32 - cap_w as i32) / 2;
-    let cap_y = monitor.y + (monitor.height as i32 - cap_h as i32) / 2;
-    let rect = RegionRect {
-        x: cap_x,
-        y: cap_y,
-        width: cap_w,
-        height: cap_h,
-    };
-    log::info!(
-        "screen_recorder: capture rect ({},{}) {}×{}",
-        rect.x,
-        rect.y,
-        rect.width,
-        rect.height,
-    );
-    *CAPTURE_RECT.lock().unwrap() = Some(rect);
+/// The recorder now derives its crop from the live KovaaK client area, not the
+/// selected overlay monitor. This hook remains so monitor changes can clear the
+/// last logged rect and force a fresh capture-rect log on the next session.
+pub fn update_monitor_rect(_monitor: &RegionRect) {
+    *LAST_CAPTURE_RECT.lock().unwrap() = None;
 }
 
 /// Start frame capture for a new session.  Always restarts fresh — clears any
@@ -269,11 +250,34 @@ fn record_loop(my_gen: u64) {
 
 #[cfg(target_os = "windows")]
 fn capture_one_frame() {
-    let rect = match *CAPTURE_RECT.lock().unwrap() {
-        Some(r) => r,
+    let hwnd = match crate::window_tracker::get_game_hwnd() {
+        Some(hwnd) => hwnd,
         None => return,
     };
-    match capture_and_encode(&rect) {
+    let bounds = match get_game_client_rect_screen(hwnd) {
+        Ok(bounds) => bounds,
+        Err(e) => {
+            log::trace!("screen_recorder: game bounds unavailable: {e}");
+            return;
+        }
+    };
+    let rect = compute_center_capture_rect(&bounds);
+    {
+        let mut last = LAST_CAPTURE_RECT.lock().unwrap();
+        if *last != Some(rect) {
+            log::info!(
+                "screen_recorder: capture rect ({},{}) {}×{} within game {}×{}",
+                rect.x,
+                rect.y,
+                rect.width,
+                rect.height,
+                bounds.width,
+                bounds.height,
+            );
+            *last = Some(rect);
+        }
+    }
+    match capture_and_encode(hwnd, &rect) {
         Ok(jpeg_b64) => {
             let ts_ms = SESSION_START
                 .lock()
@@ -294,16 +298,15 @@ fn capture_one_frame() {
 // ─── Capture + encode ─────────────────────────────────────────────────────────
 
 #[cfg(target_os = "windows")]
-fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
+fn capture_and_encode(
+    hwnd: windows::Win32::Foundation::HWND,
+    rect: &RegionRect,
+) -> anyhow::Result<String> {
     use image::codecs::jpeg::JpegEncoder;
 
     // Use PrintWindow on the game HWND so the capture contains only game pixels.
     // The DWM compositor is bypassed — our overlay and any other on-top windows
     // are absent.  External tools (OBS, streaming) are unaffected.
-    // If the HWND isn't known yet, return Err so capture_one_frame skips this
-    // frame silently rather than recording composited screen content.
-    let hwnd = crate::window_tracker::get_game_hwnd()
-        .ok_or_else(|| anyhow::anyhow!("game HWND not yet detected — skipping frame"))?;
     let (bgra, w, h) = capture_game_window_region(hwnd, rect)?;
 
     // BGRA → RGB (PrintWindow gives BGRA; image::Rgb expects RGB)
@@ -332,6 +335,47 @@ fn capture_and_encode(rect: &RegionRect) -> anyhow::Result<String> {
         .encode_image(&image::DynamicImage::ImageRgb8(resized))?;
 
     Ok(base64_encode(&buf))
+}
+
+fn compute_center_capture_rect(bounds: &RegionRect) -> RegionRect {
+    let cap_w = (bounds.width / 2).max(320).min(bounds.width);
+    let cap_h = (bounds.height / 2).max(180).min(bounds.height);
+    let cap_x = bounds.x + (bounds.width as i32 - cap_w as i32) / 2;
+    let cap_y = bounds.y + (bounds.height as i32 - cap_h as i32) / 2;
+    RegionRect {
+        x: cap_x,
+        y: cap_y,
+        width: cap_w,
+        height: cap_h,
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn get_game_client_rect_screen(
+    hwnd: windows::Win32::Foundation::HWND,
+) -> anyhow::Result<RegionRect> {
+    use windows::Win32::Foundation::{POINT, RECT};
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
+
+    unsafe {
+        let mut client_rect = RECT::default();
+        GetClientRect(hwnd, &mut client_rect).map_err(|e| anyhow::anyhow!("GetClientRect: {e}"))?;
+
+        let width = (client_rect.right - client_rect.left).max(0) as u32;
+        let height = (client_rect.bottom - client_rect.top).max(0) as u32;
+        anyhow::ensure!(width > 0 && height > 0, "game client area is empty");
+
+        let mut origin = POINT { x: 0, y: 0 };
+        let _ = ClientToScreen(hwnd, &mut origin);
+
+        Ok(RegionRect {
+            x: origin.x,
+            y: origin.y,
+            width,
+            height,
+        })
+    }
 }
 
 /// Capture a subregion of the game window using PrintWindow.

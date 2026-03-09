@@ -5,7 +5,7 @@ const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
 
 /// A rectangle defining an on-screen region.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct RegionRect {
     pub x: i32,
     pub y: i32,
