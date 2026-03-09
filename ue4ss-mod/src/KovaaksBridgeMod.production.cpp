@@ -2357,6 +2357,7 @@ private:
             now,
             current_is_in_challenge,
             current_is_in_scenario,
+            current_scenario_is_paused,
             current_shots_fired,
             current_shots_hit,
             current_seconds,
@@ -2380,6 +2381,19 @@ private:
             && (!std::isfinite(last_time_remaining_) || last_time_remaining_ <= 0.0001f)
             && (!std::isfinite(last_queue_time_remaining_) || last_queue_time_remaining_ <= 0.0001f)
             && (last_lifecycle_signal_ms_ == 0 || safe_elapsed_ms(now, last_lifecycle_signal_ms_) > 1200);
+        const bool stale_paused_postrun_flags =
+            !kmod_replay::replay_ingame_playback_is_active()
+            && paused_runtime_context
+            && last_is_in_challenge_ != 1
+            && (last_is_in_scenario_ == 1 || current_is_in_scenario == 1)
+            && safe_elapsed_ms(now, last_runtime_progress_ms_) > 2200
+            && std::isfinite(last_time_remaining_)
+            && last_time_remaining_ > 0.0001f
+            && last_time_remaining_ <= 1.25f
+            && std::isfinite(last_queue_time_remaining_)
+            && last_queue_time_remaining_ >= 0.99f
+            && last_queue_time_remaining_ <= 1.01f
+            && (last_lifecycle_signal_ms_ == 0 || safe_elapsed_ms(now, last_lifecycle_signal_ms_) > 1200);
         if (stale_active_flags) {
             EmitTagScope stale_scope(*this, "state_guard", "state_inferred");
             emit_state_i32("pull_is_in_challenge", last_is_in_challenge_, 0, now);
@@ -2393,6 +2407,27 @@ private:
             if (verbose_logs_) {
                 RC::Output::send<RC::LogLevel::Warning>(
                     STR("[kmod-prod] cleared stale active state after runtime-progress timeout\n")
+                );
+            }
+        }
+        if (stale_paused_postrun_flags) {
+            EmitTagScope stale_scope(*this, "state_guard", "paused_results_timeout");
+            emit_state_i32("pull_is_in_scenario", last_is_in_scenario_, 0, now);
+            emit_state_i32("pull_scenario_is_paused", last_scenario_is_paused_, 0, now);
+            current_is_in_scenario = 0;
+            current_scenario_is_paused = 0;
+            current_time_remaining = 0.0f;
+            current_queue_time_remaining = 0.0f;
+            last_in_scenario_true_ms_ = 0;
+            pending_in_scenario_false_ms_ = 0;
+            last_runtime_progress_ms_ = now;
+            last_true_start_transition_ms_ = 0;
+            lifecycle_active_ = false;
+            lifecycle_queued_ = false;
+            pending_lifecycle_end_ms_ = 0;
+            if (verbose_logs_) {
+                RC::Output::send<RC::LogLevel::Warning>(
+                    STR("[kmod-prod] cleared stale paused post-run state before next lifecycle start\n")
                 );
             }
         }
@@ -2560,7 +2595,9 @@ private:
             replay_input.scalars.score_total_derived = last_score_total_derived_;
             replay_input.scalars.score_source = std::string{};
 
-            if (!kmod_replay::replay_ingame_playback_is_active()) {
+            const bool should_emit_live_replay_tick =
+                effective_active_now || (paused_runtime_context && lifecycle_active_);
+            if (!kmod_replay::replay_ingame_playback_is_active() && should_emit_live_replay_tick) {
                 (void)replay_tick_safe(now, replay_input);
             }
         }
@@ -3062,6 +3099,7 @@ private:
         uint64_t now,
         int32_t is_in_challenge,
         int32_t is_in_scenario,
+        int32_t scenario_is_paused,
         int32_t shots_fired,
         int32_t shots_hit,
         float seconds_total,
@@ -3100,11 +3138,14 @@ private:
             has_positive_float(score_per_minute) ||
             has_positive_float(damage_done) ||
             has_positive_float(damage_possible);
+        const bool paused_signal = scenario_is_paused > 0;
         const bool queue_signal = has_positive_float(queue_time_remaining);
         const bool recent_stream_activity =
             last_state_change_emit_ms_ > 0 && safe_elapsed_ms(now, last_state_change_emit_ms_) < 1200;
         const bool runtime_active_hint =
-            (progress_signal || has_positive_float(time_remaining)) && recent_stream_activity;
+            !paused_signal
+            && (progress_signal || has_positive_float(time_remaining))
+            && recent_stream_activity;
         const bool known_in_challenge = is_in_challenge >= 0;
         const bool known_in_scenario = is_in_scenario >= 0;
         const bool challenge_active_signal = known_in_challenge && (is_in_challenge != 0);
@@ -3147,6 +3188,13 @@ private:
             if (progress_signal) {
                 lifecycle_seen_progress_ = true;
             }
+            last_lifecycle_signal_ms_ = now;
+            pending_lifecycle_end_ms_ = 0;
+            return;
+        }
+
+        if (paused_signal && lifecycle_active_) {
+            // Pausing mid-run is still part of the same scenario lifecycle.
             last_lifecycle_signal_ms_ = now;
             pending_lifecycle_end_ms_ = 0;
             return;

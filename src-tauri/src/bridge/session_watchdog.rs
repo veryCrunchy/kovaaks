@@ -45,35 +45,6 @@ fn request_state_sync_if_flow_stalled() {
     }
 }
 
-fn pause_tracking_if_stats_idle() {
-    let should_pause = {
-        let mut state = bridge_session_state().lock().unwrap();
-        if !state.session_active || state.tracking_paused_by_idle {
-            return;
-        }
-        if state.challenge_active {
-            return;
-        }
-
-        let Some(last_flow) = state.last_stats_flow_at else {
-            return;
-        };
-
-        if Instant::now().duration_since(last_flow) < SESSION_IDLE_PAUSE_AFTER {
-            return;
-        }
-
-        state.tracking_paused_by_idle = true;
-        true
-    };
-
-    if should_pause {
-        crate::mouse_hook::pause_session_tracking();
-        crate::screen_recorder::pause();
-        log::info!("bridge: paused tracking due to stats-flow silence");
-    }
-}
-
 fn start_session_idle_watchdog() {
     if SESSION_IDLE_WATCHDOG_STARTED.swap(true, Ordering::SeqCst) {
         return;
@@ -82,7 +53,6 @@ fn start_session_idle_watchdog() {
     std::thread::Builder::new()
         .name("bridge-session-idle-watchdog".into())
         .spawn(move || loop {
-            pause_tracking_if_stats_idle();
             request_state_sync_if_flow_stalled();
             std::thread::sleep(SESSION_IDLE_WATCHDOG_TICK);
         })

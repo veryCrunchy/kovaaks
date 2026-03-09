@@ -137,20 +137,6 @@ pub fn stop() {
     }
 }
 
-/// Pause frame capture mid-session without clearing buffered frames.
-pub fn pause() {
-    if RECORDING.load(Ordering::SeqCst) && !PAUSED.swap(true, Ordering::SeqCst) {
-        log::info!("Screen recorder paused");
-    }
-}
-
-/// Resume frame capture after a mid-session pause.
-pub fn resume() {
-    if RECORDING.load(Ordering::SeqCst) && PAUSED.swap(false, Ordering::SeqCst) {
-        log::info!("Screen recorder resumed");
-    }
-}
-
 /// Drain all recorded frames and clear the internal buffer.
 pub fn drain_frames() -> Vec<ScreenFrame> {
     if let Some(frames) = COMPLETED_FRAMES.lock().unwrap().pop_front() {

@@ -235,22 +235,6 @@ pub fn stop_session_tracking() {
     log::info!("Smoothness tracking stopped");
 }
 
-/// Pause recording mid-session without discarding accumulated data.
-/// Called when the stats panel is frozen or OCR consistently fails,
-/// indicating the player is idle (paused, at results screen, or at menu).
-pub fn pause_session_tracking() {
-    if TRACKING_ACTIVE.swap(false, Ordering::SeqCst) {
-        log::info!("Smoothness tracking paused (player idle)");
-    }
-}
-
-/// Resume recording after a mid-session pause. Does not reset accumulated data.
-pub fn resume_session_tracking() {
-    if !TRACKING_ACTIVE.swap(true, Ordering::SeqCst) {
-        log::info!("Smoothness tracking resumed (player active)");
-    }
-}
-
 /// Drain session metric buffer for post-session analysis.
 pub fn drain_session_buffer() -> Vec<MetricPoint> {
     let mut s = STATE.lock().unwrap();

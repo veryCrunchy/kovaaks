@@ -662,7 +662,6 @@ mod imp {
     const COMMAND_PIPE_NAME: &str = "\\\\.\\pipe\\kovaaks-bridge-cmd";
     const LOG_RING_CAPACITY: usize = 1200;
     const MAX_BRIDGE_COMMAND_QUEUE: usize = 8192;
-    const SESSION_IDLE_PAUSE_AFTER: Duration = Duration::from_millis(1800);
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(8);
@@ -964,7 +963,6 @@ mod imp {
         session_started_at: Option<Instant>,
         recovery_start_streak: u8,
         persistence_finalize_pending: bool,
-        tracking_paused_by_idle: bool,
         last_stats_flow_at: Option<Instant>,
         last_pull_event_at: Option<Instant>,
         last_state_resync_request_at: Option<Instant>,
@@ -1938,7 +1936,6 @@ mod imp {
             }
             state.session_started_at = Some(now);
             state.recovery_start_streak = 0;
-            state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = Some(now);
             state.last_pull_event_at = Some(now);
             state.last_state_resync_request_at = None;
@@ -2362,7 +2359,6 @@ mod imp {
             let mut emit_challenge = false;
             state.last_stats_flow_at = Some(now);
             state.last_pull_event_at = Some(now);
-            state.tracking_paused_by_idle = false;
             state.last_state_resync_request_at = None;
             state.state_resync_pending = false;
             if challenge_active && !state.challenge_active {
@@ -2437,7 +2433,6 @@ mod imp {
             state.session_active = false;
             state.session_started_at = None;
             state.recovery_start_streak = 0;
-            state.tracking_paused_by_idle = false;
             state.last_stats_flow_at = None;
             state.last_pull_event_at = None;
             state.last_state_resync_request_at = None;
@@ -2459,29 +2454,17 @@ mod imp {
         }
     }
 
-    fn mark_stats_flow_activity(source: &str, is_pull_metric: bool) {
-        let should_resume = {
-            let mut state = bridge_session_state().lock().unwrap();
-            if !state.session_active {
-                return;
-            }
-            let now = Instant::now();
-            state.last_stats_flow_at = Some(now);
-            if is_pull_metric {
-                state.last_pull_event_at = Some(now);
-            }
-            if state.tracking_paused_by_idle {
-                state.tracking_paused_by_idle = false;
-                true
-            } else {
-                false
-            }
+    fn mark_stats_flow_activity(_source: &str, is_pull_metric: bool) {
+        let Ok(mut state) = bridge_session_state().lock() else {
+            return;
         };
-
-        if should_resume {
-            crate::mouse_hook::resume_session_tracking();
-            crate::screen_recorder::resume();
-            log::info!("bridge: resumed tracking after stats flow resumed ({source})");
+        if !state.session_active {
+            return;
+        }
+        let now = Instant::now();
+        state.last_stats_flow_at = Some(now);
+        if is_pull_metric {
+            state.last_pull_event_at = Some(now);
         }
     }
 
@@ -2724,6 +2707,19 @@ mod imp {
                 None
             },
         }
+    }
+
+    fn has_authoritative_recovery_progress(stats: &BridgeStatsPanelEvent) -> bool {
+        stats.accuracy_shots.map_or(false, |v| v > 0)
+            || stats.kills.map_or(false, |v| v > 0)
+            || stats.damage_dealt.map_or(false, |v| v > 0.0)
+            || stats
+                .challenge_tick_count_total
+                .map_or(false, |v| v > 0)
+            || stats.challenge_seconds_total.map_or(false, |v| v > 1.0)
+            || stats.session_time_secs.map_or(false, |v| v > 1.0)
+            || stats.score_total.map_or(false, |v| v > 0.0)
+            || stats.score_total_derived.map_or(false, |v| v > 0.0)
     }
 
     fn current_shot_telemetry_summary() -> ShotTelemetrySummary {
@@ -3771,11 +3767,9 @@ mod imp {
                         .challenge_seconds_total
                         .map_or(false, |v| v > 0.25)
                         || state.stats.time_remaining.map_or(false, |v| v > 0.25)));
-            let progress_metrics = state.stats.accuracy_shots.map_or(false, |v| v > 0)
-                || state.stats.kills.map_or(false, |v| v > 0)
-                || state.stats.damage_dealt.map_or(false, |v| v > 0.0);
+            let progress_metrics = has_authoritative_recovery_progress(&state.stats);
             let has_active_session_metrics =
-                challenge_context || (!paused && !queued && progress_metrics);
+                progress_metrics || (!paused && challenge_context && next_game_state_code == 4);
             let recovery_challenge_active = challenge_context;
             let authoritative_active_state = next_game_state_code == 4;
             recovery_signal = Some((
@@ -3785,7 +3779,7 @@ mod imp {
             ));
         }
 
-        if let Some((_has_active_metrics, challenge_active_hint, authoritative_active_state)) =
+        if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) =
             recovery_signal
         {
             let should_start_from_recovery = {
@@ -3799,7 +3793,7 @@ mod imp {
                 } else if state.session_active {
                     state.recovery_start_streak = 0;
                     false
-                } else if authoritative_active_state {
+                } else if authoritative_active_state && has_active_metrics {
                     state.recovery_start_streak = 0;
                     true
                 } else {
