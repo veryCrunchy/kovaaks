@@ -648,6 +648,7 @@ mod imp {
     static COMMAND_PIPE_STARTED: AtomicBool = AtomicBool::new(false);
     static LOG_TAILER_STARTED: AtomicBool = AtomicBool::new(false);
     static SESSION_IDLE_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
+    static RUNTIME_RESTART_REQUIRED: AtomicBool = AtomicBool::new(false);
     static LOG_APP_HANDLE: OnceLock<AppHandle> = OnceLock::new();
     const GAME_EXE: &str = "FPSAimTrainer-Win64-Shipping.exe";
     const UE4SS_DLL: &str = "UE4SS.dll";
@@ -737,6 +738,10 @@ mod imp {
     pub(super) fn bridge_dll_connected_flag() -> &'static AtomicBool {
         static CONNECTED: AtomicBool = AtomicBool::new(false);
         &CONNECTED
+    }
+
+    fn runtime_restart_required_flag() -> &'static AtomicBool {
+        &RUNTIME_RESTART_REQUIRED
     }
 
     fn mark_bridge_dll_connected(connected: bool) {
@@ -864,6 +869,13 @@ mod imp {
 
     fn request_mod_state_sync(reason: &str) -> bool {
         let reason = sanitize_state_request_reason(reason);
+        if runtime_restart_required_flag().load(Ordering::SeqCst) {
+            log::warn!(
+                "bridge: suppressing mod state sync ({}) because the loaded runtime differs from the staged payload; restart KovaaK to apply the new bridge",
+                reason
+            );
+            return false;
+        }
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis())
@@ -3778,7 +3790,10 @@ mod imp {
         {
             let should_start_from_recovery = {
                 let mut state = bridge_session_state().lock().unwrap();
-                if state.persistence_finalize_pending {
+                if runtime_restart_required_flag().load(Ordering::SeqCst) {
+                    state.recovery_start_streak = 0;
+                    false
+                } else if state.persistence_finalize_pending {
                     state.recovery_start_streak = 0;
                     false
                 } else if state.session_active {
@@ -3971,7 +3986,13 @@ mod imp {
 
             mark_bridge_dll_connected(true);
             log::info!("bridge: DLL connected — reading events");
-            let _ = request_mod_state_sync("bridge_connected");
+            if runtime_restart_required_flag().load(Ordering::SeqCst) {
+                log::warn!(
+                    "bridge: connected runtime differs from staged native payload; suppressing bridge_connected sync until KovaaK is restarted"
+                );
+            } else {
+                let _ = request_mod_state_sync("bridge_connected");
+            }
             read_events(pipe, &app);
             mark_bridge_dll_connected(false);
             log::info!("bridge: pipe disconnected — waiting for next connection");
@@ -4225,6 +4246,9 @@ mod imp {
         }
         let flags_after_sync = read_runtime_flags_for_dir(&game_bin_dir);
         let runtime_flags_restart_required = flags_after_sync != flags_before_sync;
+        let restart_required = already_loaded
+            && (native_runtime_restart_required || runtime_flags_restart_required);
+        runtime_restart_required_flag().store(restart_required, Ordering::SeqCst);
         if runtime_flags_restart_required {
             log::warn!(
                 "bridge: runtime flags changed by sync before={:?} after={:?}",
