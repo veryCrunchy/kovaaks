@@ -7,14 +7,11 @@ import { useUpdater } from "../hooks/useUpdater";
 import { Btn, FieldGroup, GlassCard, Toggle } from "../design/ui";
 import { C } from "../design/tokens";
 
-const SmoothnessReport = lazy(() =>
-  import("../analytics/SmoothnessReport").then(m => ({ default: m.SmoothnessReport }))
-);
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
 
-type Tab = "general" | "friends" | "smoothness" | "stats";
+type Tab = "general" | "friends" | "stats";
 
 interface SettingsProps {
   onClose: () => void;
@@ -24,7 +21,6 @@ interface SettingsProps {
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "general",    label: "General",       icon: "⚙" },
   { id: "friends",    label: "Friends",        icon: "◎" },
-  { id: "smoothness", label: "Smoothness",     icon: "〜" },
   { id: "stats",      label: "Session Stats",  icon: "▦" },
 ];
 
@@ -284,11 +280,6 @@ export function Settings({ onClose, onLayoutHUDs }: SettingsProps) {
           />
         )}
         {activeTab === "friends" && <FriendManager settings={settings} onChange={setSettings} />}
-        {activeTab === "smoothness" && (
-          <Suspense fallback={LOADING_PLACEHOLDER}>
-            <SmoothnessReport />
-          </Suspense>
-        )}
         {activeTab === "stats" && (
           <Suspense fallback={LOADING_PLACEHOLDER}>
             <div style={{ height: "100%", overflow: "hidden" }}>
