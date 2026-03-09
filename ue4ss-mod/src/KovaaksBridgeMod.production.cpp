@@ -3014,8 +3014,17 @@ private:
         last_lifecycle_signal_ms_ = now;
         pending_lifecycle_end_ms_ = 0;
         next_receiver_resolve_ms_ = 0;
+        next_scenario_state_resolve_ms_ = 0;
+        next_scenario_paused_read_ms_ = 0;
+        next_scenario_resolve_ms_ = 0;
+        cached_scenario_is_paused_ = 0;
+        last_scenario_is_paused_ = 0;
+        s_last_pull_scenario_is_paused = 0;
         last_observed_seconds_value_ = std::numeric_limits<float>::quiet_NaN();
         last_observed_challenge_tick_count_ = std::numeric_limits<int32_t>::min();
+        last_observed_queue_time_remaining_ = std::numeric_limits<float>::quiet_NaN();
+        last_observed_time_remaining_ = std::numeric_limits<float>::quiet_NaN();
+        last_raw_queue_time_remaining_ = std::numeric_limits<float>::quiet_NaN();
         last_true_start_transition_ms_ = now;
         live_metric_receiver_hint_ = nullptr;
         live_metric_receiver_hint_ms_ = 0;
