@@ -889,7 +889,7 @@ mod imp {
         let reason = sanitize_state_request_reason(reason);
         if runtime_restart_required_flag().load(Ordering::SeqCst) {
             log::warn!(
-                "bridge: suppressing mod state sync ({}) because the loaded runtime differs from the staged payload; restart KovaaK to apply the new bridge",
+                "bridge: suppressing mod state sync ({}) because the loaded runtime differs from the staged payload; restart KovaaK's to apply the new bridge",
                 reason
             );
             return false;
@@ -4106,7 +4106,7 @@ mod imp {
             log::info!("bridge: DLL connected — reading events");
             if runtime_restart_required_flag().load(Ordering::SeqCst) {
                 log::warn!(
-                    "bridge: connected runtime differs from staged native payload; suppressing bridge_connected sync until KovaaK is restarted"
+                    "bridge: connected runtime differs from staged native payload; suppressing bridge_connected sync until KovaaK's is restarted"
                 );
             } else {
                 let _ = request_mod_state_sync("bridge_connected");
@@ -4435,7 +4435,7 @@ mod imp {
                 }
             } else if payload_files_written > 0 {
                 log::warn!(
-                    "bridge: skipping UE4SS hot reload because native/runtime changes are not safely reloadable; restart KovaaK to apply"
+                    "bridge: skipping UE4SS hot reload because native/runtime changes are not safely reloadable; restart KovaaK's to apply"
                 );
             } else {
                 log::info!(
@@ -4672,7 +4672,7 @@ mod imp {
             }
             std::thread::sleep(Duration::from_millis(40));
         } else {
-            log::warn!("bridge: could not find KovaaK window for hot reload keybind");
+            log::warn!("bridge: could not find KovaaK's window for hot reload keybind");
         }
 
         if find_loaded_module(pid, UE4SS_DLL).is_none() {

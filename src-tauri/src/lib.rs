@@ -169,9 +169,9 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),
-            title: "Restart KovaaK Required".to_string(),
+            title: "Restart KovaaK's Required".to_string(),
             message:
-                "AimMod could not restore its in-game bridge. Restart KovaaK if the HUD stays offline."
+                "AimMod could not restore its in-game bridge. Restart KovaaK's if the HUD stays offline."
                     .to_string(),
         };
     }
@@ -180,8 +180,8 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),
-            title: "Restart KovaaK Required".to_string(),
-            message: "AimMod updated its in-game bridge. Restart KovaaK to load the new version."
+            title: "Restart KovaaK's Required".to_string(),
+            message: "AimMod updated its in-game bridge. Restart KovaaK's to load the new version."
                 .to_string(),
         };
     }
@@ -195,7 +195,7 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
             kind: "warning".to_string(),
             title: "Bridge Reconnect Failed".to_string(),
             message:
-                "AimMod could not fully reconnect to the in-game bridge. Restart KovaaK if stats stay offline."
+                "AimMod could not fully reconnect to the in-game bridge. Restart KovaaK's if stats stay offline."
                     .to_string(),
         };
     }
@@ -207,9 +207,9 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),
-            title: "Restart KovaaK Required".to_string(),
+            title: "Restart KovaaK's Required".to_string(),
             message:
-                "AimMod is connected, but the in-game state never came back. Restart KovaaK if the HUD stays blank."
+                "AimMod is connected, but the in-game state never came back. Restart KovaaK's if the HUD stays blank."
                     .to_string(),
         };
     }
@@ -220,7 +220,7 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
             kind: "warning".to_string(),
             title: "Stats Are Not Updating".to_string(),
             message:
-                "AimMod reconnected, but live stats are stalled. Restart KovaaK if the HUD stays blank."
+                "AimMod reconnected, but live stats are stalled. Restart KovaaK's if the HUD stays blank."
                     .to_string(),
         };
     }
@@ -269,15 +269,15 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
                 if current_pid != last_pid {
                     match (last_pid, current_pid) {
                         (None, Some(pid)) => {
-                            log::info!("Detected {pid} for KovaaK process; monitoring UE4SS load state");
+                            log::info!("Detected {pid} for KovaaK's process; monitoring UE4SS load state");
                         }
                         (Some(old), Some(new)) if old != new => {
                             log::warn!(
-                                "Detected KovaaK restart (pid {old} -> {new}); scheduling UE4SS reinjection"
+                                "Detected KovaaK's restart (pid {old} -> {new}); scheduling UE4SS reinjection"
                             );
                         }
                         (Some(old), None) => {
-                            log::info!("KovaaK process exited (pid {old})");
+                            log::info!("KovaaK's process exited (pid {old})");
                         }
                         _ => {}
                     }
@@ -301,7 +301,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 
                             if can_attempt {
                                 log::warn!(
-                                    "UE4SS is loaded for KovaaK pid {pid} but the bridge pipe is disconnected; waiting for mod-side reconnect"
+                                    "UE4SS is loaded for KovaaK's pid {pid} but the bridge pipe is disconnected; waiting for mod-side reconnect"
                                 );
                                 last_attempt = Some((pid, std::time::Instant::now()));
                             }
@@ -315,22 +315,22 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 
                             if can_attempt {
                                 log::warn!(
-                                    "UE4SS not loaded for KovaaK pid {pid}; attempting deploy/inject"
+                                    "UE4SS not loaded for KovaaK's pid {pid}; attempting deploy/inject"
                                 );
                                 match deploy_and_inject_ue4ss(&app, &stats_dir) {
                                     Ok(()) => {
                                         log::info!(
-                                            "UE4SS deploy/inject attempt finished for KovaaK pid {pid}"
+                                            "UE4SS deploy/inject attempt finished for KovaaK's pid {pid}"
                                         );
                                     }
                                     Err(e) => {
                                         if bridge::is_injection_deferred_error(&e) {
                                             log::info!(
-                                                "UE4SS deploy/inject deferred for KovaaK pid {pid}: {e}"
+                                                "UE4SS deploy/inject deferred for KovaaK's pid {pid}: {e}"
                                             );
                                         } else {
                                             log::warn!(
-                                                "UE4SS deploy/inject attempt failed for KovaaK pid {pid}: {e}"
+                                                "UE4SS deploy/inject attempt failed for KovaaK's pid {pid}: {e}"
                                             );
                                         }
                                     }
