@@ -124,14 +124,56 @@ fn hidden_overlay_runtime_notice() -> OverlayRuntimeNotice {
     }
 }
 
+fn overlay_notice_pid_tracker() -> &'static Mutex<Option<(u32, Instant)>> {
+    static PID_TRACKER: OnceLock<Mutex<Option<(u32, Instant)>>> = OnceLock::new();
+    PID_TRACKER.get_or_init(|| Mutex::new(None))
+}
+
+fn overlay_notice_game_pid_age(pid: u32) -> Duration {
+    let tracker = overlay_notice_pid_tracker();
+    let now = Instant::now();
+    let Ok(mut state) = tracker.lock() else {
+        return Duration::from_secs(0);
+    };
+
+    match *state {
+        Some((tracked_pid, seen_at)) if tracked_pid == pid => now.duration_since(seen_at),
+        _ => {
+            *state = Some((pid, now));
+            Duration::from_secs(0)
+        }
+    }
+}
+
+fn clear_overlay_notice_game_pid() {
+    let tracker = overlay_notice_pid_tracker();
+    if let Ok(mut state) = tracker.lock() {
+        *state = None;
+    }
+}
+
 fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
     let Some(pid) = bridge::current_game_pid() else {
+        clear_overlay_notice_game_pid();
         return hidden_overlay_runtime_notice();
     };
 
+    let pid_age = overlay_notice_game_pid_age(pid);
+    let startup_grace = Duration::from_secs(6);
+
     let runtime_loaded = bridge::is_ue4ss_loaded_for_pid(pid);
     if !runtime_loaded {
-        return hidden_overlay_runtime_notice();
+        if pid_age < startup_grace {
+            return hidden_overlay_runtime_notice();
+        }
+        return OverlayRuntimeNotice {
+            visible: true,
+            kind: "warning".to_string(),
+            title: "Restart KovaaK Required".to_string(),
+            message:
+                "AimMod could not restore its in-game bridge. Restart KovaaK if the HUD stays offline."
+                    .to_string(),
+        };
     }
 
     if bridge::is_runtime_restart_required() {
@@ -145,12 +187,29 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
     }
 
     if !bridge::is_bridge_dll_connected() {
+        if pid_age < startup_grace {
+            return hidden_overlay_runtime_notice();
+        }
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),
             title: "Bridge Reconnect Failed".to_string(),
             message:
                 "AimMod could not fully reconnect to the in-game bridge. Restart KovaaK if stats stay offline."
+                    .to_string(),
+        };
+    }
+
+    if !bridge::has_recent_state_snapshot_ack() {
+        if pid_age < startup_grace {
+            return hidden_overlay_runtime_notice();
+        }
+        return OverlayRuntimeNotice {
+            visible: true,
+            kind: "warning".to_string(),
+            title: "Restart KovaaK Required".to_string(),
+            message:
+                "AimMod is connected, but the in-game state never came back. Restart KovaaK if the HUD stays blank."
                     .to_string(),
         };
     }
@@ -318,7 +377,8 @@ mod steam_api;
 mod steam_integration;
 mod window_tracker;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tauri::{
     AppHandle, Emitter, Manager, Runtime,
     menu::{Menu, MenuItem},

@@ -488,7 +488,6 @@ export function DraggableHUD({
 
   useEffect(() => {
     const rafId = window.requestAnimationFrame(() => {
-      anchorPosRef.current = pos;
       lastSizeRef.current = getCurrentSize();
     });
 
@@ -499,6 +498,15 @@ export function DraggableHUD({
 
   useEffect(() => {
     const onResize = () => {
+      if (!layoutMode) {
+        setPos((prev) => {
+          const normalized = normalizePos(anchorPosRef.current);
+          return samePos(prev, normalized) ? prev : normalized;
+        });
+        lastSizeRef.current = getCurrentSize();
+        return;
+      }
+
       setPos((prev) => {
         const normalized = normalizePos(prev);
         if (samePos(prev, normalized)) return prev;
@@ -529,6 +537,14 @@ export function DraggableHUD({
       const previousSize = lastSizeRef.current;
       lastSizeRef.current = currentSize;
       if (!previousSize) return;
+
+      if (!layoutMode) {
+        setPos((prev) => {
+          const normalized = normalizePos(anchorPosRef.current);
+          return samePos(prev, normalized) ? prev : normalized;
+        });
+        return;
+      }
 
       const heightDelta = currentSize.height - previousSize.height;
       if (Math.abs(heightDelta) < HUD_RESIZE_DELTA_EPSILON) return;

@@ -722,6 +722,17 @@ mod imp {
         }
     }
 
+    pub(super) fn has_recent_state_snapshot_ack(within: Duration) -> bool {
+        let (lock, _) = state_snapshot_ack();
+        let Ok(state) = lock.lock() else {
+            return false;
+        };
+        state
+            .last_seen_at
+            .map(|seen_at| Instant::now().duration_since(seen_at) <= within)
+            .unwrap_or(false)
+    }
+
     fn bridge_command_queue() -> &'static Mutex<VecDeque<String>> {
         static QUEUE: OnceLock<Mutex<VecDeque<String>>> = OnceLock::new();
         QUEUE.get_or_init(|| Mutex::new(VecDeque::with_capacity(MAX_BRIDGE_COMMAND_QUEUE)))
@@ -6076,6 +6087,16 @@ pub fn is_bridge_stats_flow_stalled() -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_bridge_stats_flow_stalled() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn has_recent_state_snapshot_ack() -> bool {
+    imp::has_recent_state_snapshot_ack(std::time::Duration::from_secs(5))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn has_recent_state_snapshot_ack() -> bool {
     false
 }
 
