@@ -1549,18 +1549,6 @@ pub fn run() {
                 // compositor does not tint or dim the game colours underneath.
                 let _ = win.set_background_color(Some(tauri::window::Color(0, 0, 0, 0)));
                 configure_overlay_window(&win);
-                #[cfg(target_os = "windows")]
-                if let Ok(hwnd) = win.hwnd() {
-                    use windows::Win32::UI::WindowsAndMessaging::{
-                        SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE,
-                    };
-                    let _ = unsafe {
-                        SetWindowDisplayAffinity(
-                            windows::Win32::Foundation::HWND(hwnd.0 as _),
-                            WDA_EXCLUDEFROMCAPTURE,
-                        )
-                    };
-                }
                 let _ = win.show();
             }
             // Ensure monitor placement + screen recorder capture rect are initialized
