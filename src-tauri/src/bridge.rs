@@ -1169,6 +1169,11 @@ mod imp {
             Some(started_at) => {
                 let elapsed_secs = now.duration_since(started_at).as_secs_f64();
                 if (elapsed_secs - hint_secs).abs() > RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS {
+                    // Once we have started collecting run data, keep timeline time monotonic.
+                    // Later explicit duration hints will still drive point timestamps directly.
+                    if run_capture_has_data(state) {
+                        return;
+                    }
                     state.started_at = Some(hinted_start);
                     state.started_at_unix_ms = Some(hinted_start_ms);
                 }
@@ -1259,22 +1264,31 @@ mod imp {
             shots_hit: state.metrics.shots_hit,
         };
 
-        if let Some(last) = state.timeline.last_mut() {
-            if last.t_sec == t_sec {
-                last.score_per_minute = next.score_per_minute.or(last.score_per_minute);
-                last.kills_per_second = next.kills_per_second.or(last.kills_per_second);
-                last.accuracy_pct = next.accuracy_pct.or(last.accuracy_pct);
-                last.damage_efficiency = next.damage_efficiency.or(last.damage_efficiency);
-                last.score_total = next.score_total.or(last.score_total);
-                last.score_total_derived = next.score_total_derived.or(last.score_total_derived);
-                last.kills = next.kills.or(last.kills);
-                last.shots_fired = next.shots_fired.or(last.shots_fired);
-                last.shots_hit = next.shots_hit.or(last.shots_hit);
-                return;
-            }
+        fn merge_timeline_point(
+            current: &mut super::BridgeRunTimelinePoint,
+            next: &super::BridgeRunTimelinePoint,
+        ) {
+            current.score_per_minute = next.score_per_minute.or(current.score_per_minute);
+            current.kills_per_second = next.kills_per_second.or(current.kills_per_second);
+            current.accuracy_pct = next.accuracy_pct.or(current.accuracy_pct);
+            current.damage_efficiency = next.damage_efficiency.or(current.damage_efficiency);
+            current.score_total = next.score_total.or(current.score_total);
+            current.score_total_derived = next.score_total_derived.or(current.score_total_derived);
+            current.kills = next.kills.or(current.kills);
+            current.shots_fired = next.shots_fired.or(current.shots_fired);
+            current.shots_hit = next.shots_hit.or(current.shots_hit);
         }
 
-        state.timeline.push(next);
+        if let Some(existing) = state.timeline.iter_mut().find(|point| point.t_sec == t_sec) {
+            merge_timeline_point(existing, &next);
+            return;
+        }
+
+        if let Some(insert_at) = state.timeline.iter().position(|point| point.t_sec > t_sec) {
+            state.timeline.insert(insert_at, next);
+        } else {
+            state.timeline.push(next);
+        }
         if state.timeline.len() > MAX_RUN_TIMELINE_POINTS {
             let trim = state.timeline.len() - MAX_RUN_TIMELINE_POINTS;
             state.timeline.drain(0..trim);

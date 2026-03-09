@@ -1527,6 +1527,7 @@ pub fn upsert_run_capture(
     snapshot: &crate::bridge::BridgeRunSnapshot,
 ) -> Result<()> {
     let replay_context_windows = build_replay_context_windows(snapshot);
+    let normalized_timeline = normalize_run_timeline(&snapshot.timeline);
     let mut conn = connect(app)?;
     let tx = conn.transaction()?;
 
@@ -1654,7 +1655,7 @@ pub fn upsert_run_capture(
             ",
         )?;
 
-        for point in &snapshot.timeline {
+        for point in &normalized_timeline {
             insert.execute(params![
                 session_id,
                 point.t_sec as i64,
@@ -1869,6 +1870,40 @@ pub fn upsert_run_capture(
 
     tx.commit()?;
     Ok(())
+}
+
+fn normalize_run_timeline(
+    timeline: &[crate::bridge::BridgeRunTimelinePoint],
+) -> Vec<crate::bridge::BridgeRunTimelinePoint> {
+    let mut sorted = timeline.to_vec();
+    sorted.sort_by_key(|point| point.t_sec);
+
+    let mut merged: Vec<crate::bridge::BridgeRunTimelinePoint> = Vec::with_capacity(sorted.len());
+    for point in sorted {
+        if let Some(current) = merged.last_mut() {
+            if current.t_sec == point.t_sec {
+                merge_timeline_point(current, &point);
+                continue;
+            }
+        }
+        merged.push(point);
+    }
+    merged
+}
+
+fn merge_timeline_point(
+    current: &mut crate::bridge::BridgeRunTimelinePoint,
+    next: &crate::bridge::BridgeRunTimelinePoint,
+) {
+    current.score_per_minute = next.score_per_minute.or(current.score_per_minute);
+    current.kills_per_second = next.kills_per_second.or(current.kills_per_second);
+    current.accuracy_pct = next.accuracy_pct.or(current.accuracy_pct);
+    current.damage_efficiency = next.damage_efficiency.or(current.damage_efficiency);
+    current.score_total = next.score_total.or(current.score_total);
+    current.score_total_derived = next.score_total_derived.or(current.score_total_derived);
+    current.kills = next.kills.or(current.kills);
+    current.shots_fired = next.shots_fired.or(current.shots_fired);
+    current.shots_hit = next.shots_hit.or(current.shots_hit);
 }
 
 pub fn get_run_summary(
