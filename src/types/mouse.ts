@@ -176,6 +176,7 @@ export interface BridgeRunSnapshot {
   p90_fire_to_hit_ms: number | null;
   avg_shots_to_hit: number | null;
   corrective_shot_ratio: number | null;
+  started_at_bridge_ts_ms: number | null;
   started_at_unix_ms: number | null;
   ended_at_unix_ms: number | null;
   event_counts: BridgeRunEventCounts;

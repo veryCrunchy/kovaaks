@@ -92,6 +92,10 @@ interface SessionRecord {
   stats_panel: StatsPanelSnapshot | null;
   shot_timing?: ShotTimingSnapshot | null;
   has_replay: boolean;
+  replay_is_favorite: boolean;
+  replay_positions_count: number;
+  replay_metrics_count: number;
+  replay_frames_count: number;
 }
 
 interface SessionCsvImportSummary {
@@ -137,6 +141,47 @@ interface PracticeProfile {
   avgScenarioSwitchesPerBlock: number;
   switchRate: number;
   topScenarios: { scenario: string; share: number; count: number }[];
+}
+
+function estimateReplayBridgeBaseTs(
+  events: BridgeShotTelemetryEvent[],
+  timeline: BridgeRunTimelinePoint[],
+): number {
+  const sortedEvents = [...events].sort((a, b) => a.ts_ms - b.ts_ms);
+  if (sortedEvents.length === 0) return 0;
+
+  const estimateOffsetMs = (field: "shots_fired" | "shots_hit", total: number): number | null => {
+    const point = timeline.find((entry) => {
+      const value = field === "shots_fired" ? entry.shots_fired : entry.shots_hit;
+      return value != null && Number.isFinite(value) && value + 0.0001 >= total;
+    });
+    return point ? point.t_sec * 1000 : null;
+  };
+
+  let cumulativeFired = 0;
+  let cumulativeHit = 0;
+  const bases: number[] = [];
+
+  for (const event of sortedEvents.slice(0, 64)) {
+    const weight = Math.max(1, event.count ?? 1);
+    let offsetMs: number | null = null;
+    if (event.event === "shot_fired") {
+      cumulativeFired += weight;
+      offsetMs = estimateOffsetMs("shots_fired", event.total ?? cumulativeFired);
+    } else if (event.event === "shot_hit") {
+      cumulativeHit += weight;
+      offsetMs = estimateOffsetMs("shots_hit", event.total ?? cumulativeHit);
+    }
+
+    if (offsetMs != null) {
+      bases.push(Math.max(0, event.ts_ms - offsetMs));
+      if (bases.length >= 12) break;
+    }
+  }
+
+  if (bases.length === 0) return sortedEvents[0]?.ts_ms ?? 0;
+  bases.sort((a, b) => a - b);
+  return bases[Math.floor(bases.length / 2)] ?? sortedEvents[0]?.ts_ms ?? 0;
 }
 
 interface BridgeParsedEvent {
@@ -2908,12 +2953,16 @@ function ReplayTab({
   warmupIds,
   requestedSelectedId,
   onRequestedSelectedIdHandled,
+  hubMode = false,
+  onReplayMetadataChanged,
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
   warmupIds: Set<string>;
   requestedSelectedId?: string | null;
   onRequestedSelectedIdHandled?: () => void;
+  hubMode?: boolean;
+  onReplayMetadataChanged?: () => void;
 }) {
   const replayRecords = useMemo(
     () => [...sorted].reverse().filter((r) => r.has_replay),
@@ -2932,6 +2981,8 @@ function ReplayTab({
   const [selectedContextKey, setSelectedContextKey] = useState<string | null>(null);
   const [shotTelemetryDisplayMode, setShotTelemetryDisplayMode] = useState<ShotTelemetryDisplayMode>("context");
   const [loading, setLoading] = useState(false);
+  const [actionBusy, setActionBusy] = useState<"favorite" | "export" | "delete" | null>(null);
+  const [actionStatus, setActionStatus] = useState<string | null>(null);
   // const [inGameReplayBusy, setInGameReplayBusy] = useState(false);
   // const [inGameReplayStatus, setInGameReplayStatus] = useState<string | null>(null);
 
@@ -3008,6 +3059,58 @@ function ReplayTab({
   };
 
   const selectedRecord = records.find((r) => r.id === selectedId) ?? null;
+  const handleToggleFavorite = async () => {
+    if (!selectedRecord) return;
+    setActionBusy("favorite");
+    setActionStatus(null);
+    try {
+      await invoke("set_session_replay_favorite", {
+        sessionId: selectedRecord.id,
+        isFavorite: !selectedRecord.replay_is_favorite,
+      });
+      onReplayMetadataChanged?.();
+      setActionStatus(
+        !selectedRecord.replay_is_favorite
+          ? "Replay pinned. It will be kept forever."
+          : "Replay unpinned.",
+      );
+    } catch (error) {
+      setActionStatus(String(error));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+  const handleDeleteReplay = async () => {
+    if (!selectedRecord) return;
+    setActionBusy("delete");
+    setActionStatus(null);
+    try {
+      await invoke("delete_session_replay", { sessionId: selectedRecord.id });
+      const remaining = sortedReplayRecords.filter((record) => record.id !== selectedRecord.id);
+      setSelectedId(remaining[0]?.id ?? null);
+      onReplayMetadataChanged?.();
+      setActionStatus("Replay removed from local storage.");
+    } catch (error) {
+      setActionStatus(String(error));
+    } finally {
+      setActionBusy(null);
+    }
+  };
+  const handleExportReplay = async () => {
+    if (!selectedRecord) return;
+    setActionBusy("export");
+    setActionStatus(null);
+    try {
+      const outputPath = await invoke<string>("export_session_replay_video", {
+        sessionId: selectedRecord.id,
+      });
+      setActionStatus(`Video exported to ${outputPath}`);
+    } catch (error) {
+      setActionStatus(String(error));
+    } finally {
+      setActionBusy(null);
+    }
+  };
   const runSnapshot: BridgeRunSnapshot | null = useMemo(
     () => (runSummary ? { ...runSummary, timeline: runTimeline } : null),
     [runSummary, runTimeline],
@@ -3517,6 +3620,12 @@ function ReplayTab({
     if (!selectedContextRow) return replayContextCoaching;
     return replayContextCoaching.filter((signal) => signal.contextKey === selectedContextRow.key);
   }, [replayContextCoaching, selectedContextRow]);
+  const replayBaseTs = useMemo(() => {
+    if (runSnapshot?.started_at_bridge_ts_ms != null) {
+      return runSnapshot.started_at_bridge_ts_ms;
+    }
+    return estimateReplayBridgeBaseTs(shotTelemetry, runTimeline);
+  }, [runSnapshot?.started_at_bridge_ts_ms, runTimeline, shotTelemetry]);
   const replayTimelineMarkers = useMemo(() => {
     if (visibleShotTelemetry.length === 0) return [] as Array<{ id: string; timestamp_ms: number; color: string; label: string }>;
     const hitEvents = visibleShotTelemetry.filter((event) => event.event === "shot_hit");
@@ -3527,12 +3636,19 @@ function ReplayTab({
       const nearest = event.targets.find((target) => target.is_nearest) ?? event.targets[0] ?? null;
       return {
         id: `${event.event}-${event.ts_ms}-${index}`,
-        timestamp_ms: Math.max(0, event.ts_ms - shotTelemetryBaseTs),
+        timestamp_ms: Math.max(0, event.ts_ms - replayBaseTs),
         color: event.event === "shot_hit" ? "#00f5a0" : "#ffd166",
         label: `${event.event === "shot_hit" ? "Hit" : "Shot"}${nearest ? ` · ${nearest.profile || nearest.entity_id}` : ""}`,
       };
     });
-  }, [shotTelemetryBaseTs, visibleShotTelemetry]);
+  }, [replayBaseTs, visibleShotTelemetry]);
+  const replayHitTimestamps = useMemo(
+    () =>
+      visibleShotTelemetry
+        .filter((event) => event.event === "shot_hit")
+        .map((event) => Math.max(0, event.ts_ms - replayBaseTs)),
+    [replayBaseTs, visibleShotTelemetry],
+  );
   const replayTimelineWindows = useMemo(
     () => visibleReplayContextCoaching.map((signal) => ({
       id: signal.id,
@@ -3588,7 +3704,30 @@ function ReplayTab({
       <div style={CHART_STYLE}>
         <SectionTitle info="Pick any run to inspect the mouse replay, shot detail, and how the run changed over time.">Select session</SectionTitle>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, marginBottom: 10, flexWrap: "wrap" }}>
-          <div />
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            {selectedRecord ? (
+              <>
+                <Btn
+                  size="sm"
+                  variant={selectedRecord.replay_is_favorite ? "accent" : "ghost"}
+                  onClick={handleToggleFavorite}
+                  disabled={actionBusy != null}
+                >
+                  {actionBusy === "favorite"
+                    ? "Saving…"
+                    : selectedRecord.replay_is_favorite
+                      ? "★ Favorited"
+                      : "☆ Favorite"}
+                </Btn>
+                <Btn size="sm" variant="ghost" onClick={handleExportReplay} disabled={actionBusy != null}>
+                  {actionBusy === "export" ? "Exporting…" : "Export video"}
+                </Btn>
+                <Btn size="sm" variant="ghost" onClick={handleDeleteReplay} disabled={actionBusy != null}>
+                  {actionBusy === "delete" ? "Removing…" : "Remove replay"}
+                </Btn>
+              </>
+            ) : null}
+          </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
             <span style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
               Sort
@@ -3620,11 +3759,23 @@ function ReplayTab({
             })}
           </div>
         </div>
+        {actionStatus ? (
+          <div style={{ marginBottom: 10, fontSize: 11, color: C.textFaint, lineHeight: 1.6 }}>
+            {actionStatus}
+          </div>
+        ) : null}
         <div style={{ maxHeight: 180, overflowY: "auto" }}>
           <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
             <thead>
               <tr style={{ color: "rgba(255,255,255,0.3)" }}>
-                {["Date", "Score", "Duration", "Acc", "Smooth"].map((h) => (
+                {[
+                  "Date",
+                  ...(hubMode ? ["Scenario"] : []),
+                  "Score",
+                  "Duration",
+                  "Acc",
+                  "Smooth",
+                ].map((h) => (
                   <th
                     key={h}
                     style={{
@@ -3655,6 +3806,7 @@ function ReplayTab({
                     }}
                   >
                     <td style={{ padding: "7px 4px 7px 0", color: active ? "#00f5a0" : "rgba(255,255,255,0.5)" }}>
+                      {r.replay_is_favorite && <span style={{ color: "#ffd700", marginRight: 6 }}>★</span>}
                       {formatDateTime(r.timestamp)}
                       {isWarmup && (
                         <span
@@ -3672,6 +3824,11 @@ function ReplayTab({
                         </span>
                       )}
                     </td>
+                    {hubMode && (
+                      <td style={{ padding: "7px 4px", color: "rgba(255,255,255,0.6)" }}>
+                        {r.scenario}
+                      </td>
+                    )}
                     <td style={{ padding: "7px 4px", fontWeight: active ? 700 : 400, color: active ? "#fff" : "rgba(255,255,255,0.7)" }}>
                       {fmtScore(r.score)}
                     </td>
@@ -3930,6 +4087,7 @@ function ReplayTab({
                   rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
                   metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
                   screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
+                  hitTimestampsMs={replayHitTimestamps}
                   segmentLabel={selectedContextRow?.label ?? null}
                   segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
                   timelineMarkers={replayTimelineMarkers}
@@ -4219,6 +4377,7 @@ function ReplayTab({
                 rawPositions={replayPayloadView?.positions ?? replayPayload.positions}
                 metricPoints={replayPayloadView?.metrics ?? replayPayload.metrics}
                 screenFrames={replayPayloadView?.frames ?? replayPayload.frames ?? []}
+                hitTimestampsMs={replayHitTimestamps}
                 segmentLabel={selectedContextRow?.label ?? null}
                 segmentWindowLabel={selectedContextRow ? formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs) : null}
                 timelineMarkers={replayTimelineMarkers}
@@ -5693,11 +5852,13 @@ function ScenarioDetails({
   practiceProfile,
   scenarioName,
   onExploreDrill,
+  onReplayMetadataChanged,
 }: {
   records: AnalyticsSessionRecord[];
   practiceProfile: PracticeProfile | null;
   scenarioName: string;
   onExploreDrill: (query: string) => void;
+  onReplayMetadataChanged?: () => void;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
@@ -5915,6 +6076,7 @@ function ScenarioDetails({
           warmupIds={warmupIds}
           requestedSelectedId={replayJumpId}
           onRequestedSelectedIdHandled={() => setReplayJumpId(null)}
+          onReplayMetadataChanged={onReplayMetadataChanged}
         />
       )}
       {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
@@ -5926,7 +6088,7 @@ function ScenarioDetails({
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-type RootMode = "sessions" | "leaderboards" | "settings" | "debug";
+type RootMode = "sessions" | "replays" | "leaderboards" | "settings" | "debug";
 type ScenarioSortMode = "recent" | "plays" | "type";
 type SessionsPaneMode = "overview" | "scenario";
 
@@ -5944,7 +6106,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [rootMode, setRootMode] = useState<RootMode>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode);
-    return stored === "leaderboards" || stored === "settings" || stored === "debug"
+    return stored === "replays" || stored === "leaderboards" || stored === "settings" || stored === "debug"
       ? stored
       : "sessions";
   });
@@ -5989,6 +6151,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     [dateRange, records],
   );
   const analyticsRecords = useMemo(() => buildAnalyticsRecords(visibleRecords), [visibleRecords]);
+  const replayHubRecords = useMemo(
+    () => [...analyticsRecords].sort((a, b) => a.timestampMs - b.timestampMs),
+    [analyticsRecords],
+  );
   const flaggedRecordCount = useMemo(
     () => analyticsRecords.filter((record) => !record.isReliableForAnalysis).length,
     [analyticsRecords],
@@ -6501,6 +6667,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       >
         {([
           "sessions",
+          "replays",
           "leaderboards",
           "settings",
           ...(isDebugBuild ? ["debug"] : []),
@@ -6527,6 +6694,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             >
               {m === "sessions"
                 ? "Session Stats"
+                : m === "replays"
+                  ? "Replay Hub"
                 : m === "leaderboards"
                   ? "Leaderboards"
                   : m === "settings"
@@ -7035,6 +7204,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               records={selectedRecords}
               practiceProfile={globalPracticeProfile}
               scenarioName={selectedScenario!}
+              onReplayMetadataChanged={() => {
+                void loadHistory(true);
+              }}
               onExploreDrill={(query) => {
                 setLeaderboardSeedQuery(query);
                 setRootMode("leaderboards");
@@ -7179,6 +7351,30 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
           </div>
         </div>
       </div>
+      )}
+
+      {rootMode === "replays" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          <div style={{ marginBottom: 20 }}>
+            <h2
+              style={{ margin: "0 0 6px", fontSize: 15, fontWeight: 700, color: C.text, letterSpacing: "-0.01em" }}
+            >
+              Replay Hub
+            </h2>
+            <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.7, maxWidth: 860 }}>
+              Browse every saved replay in one place, pin the ones you want to keep forever, and export runs to video.
+            </div>
+          </div>
+          <ReplayTab
+            records={replayHubRecords}
+            sorted={replayHubRecords}
+            warmupIds={new Set()}
+            hubMode
+            onReplayMetadataChanged={() => {
+              void loadHistory(true);
+            }}
+          />
+        </div>
       )}
 
       {/* ── Leaderboards content ── */}

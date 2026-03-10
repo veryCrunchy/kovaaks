@@ -137,6 +137,35 @@ function computeSensitivitySuggestion(
   return null;
 }
 
+function shouldClusterHitIndicators(hitTimestampsMs: number[], durationMs: number): boolean {
+  if (hitTimestampsMs.length < 12 || durationMs <= 0) return false;
+  const hitsPerSecond = hitTimestampsMs.length / Math.max(durationMs / 1000, 1);
+  return hitsPerSecond > 2;
+}
+
+function clusterHitWindows(
+  hitTimestampsMs: number[],
+  mergeGapMs = 220,
+): Array<{ start_ms: number; end_ms: number }> {
+  if (hitTimestampsMs.length === 0) return [];
+  const sorted = [...hitTimestampsMs].sort((a, b) => a - b);
+  const windows: Array<{ start_ms: number; end_ms: number }> = [];
+  let start = sorted[0];
+  let end = sorted[0];
+  for (let i = 1; i < sorted.length; i++) {
+    const timestampMs = sorted[i];
+    if (timestampMs - end <= mergeGapMs) {
+      end = timestampMs;
+      continue;
+    }
+    windows.push({ start_ms: start, end_ms: end });
+    start = timestampMs;
+    end = timestampMs;
+  }
+  windows.push({ start_ms: start, end_ms: end });
+  return windows;
+}
+
 // ─── Canvas drawing ───────────────────────────────────────────────────────────
 
 /**
@@ -155,6 +184,7 @@ function drawPath(
   trailFadeMs = 0,           // 0 = no fade; >0 = fade window in ms
   playbackMs = 0,
   viewportPx = 960,          // on-screen monitor capture width in delta-px
+  hitTimestampsMs: number[] = [],
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx || pts.length < 2) {
@@ -182,6 +212,10 @@ function drawPath(
   const PAD = 28;
   const W   = CW - PAD * 2;
   const H   = CH - PAD * 2;
+  const denseHitStream = shouldClusterHitIndicators(
+    hitTimestampsMs,
+    pts[pts.length - 1]?.timestamp_ms ?? 0,
+  );
 
   // ── Camera / projection ───────────────────────────────────────────────────
   let scale: number;
@@ -332,6 +366,37 @@ function drawPath(
     ctx.stroke();
   }
 
+  if (!showFull && hitTimestampsMs.length > 0) {
+    const activeHit = hitTimestampsMs.find((ts) => Math.abs(playbackMs - ts) <= 90);
+    if (activeHit != null) {
+      const anchor = pts[Math.max(0, Math.min(count - 1, pts.length - 1))];
+      const pulse = Math.max(0, 1 - Math.abs(playbackMs - activeHit) / 90);
+      const px = toX(anchor.x);
+      const py = toY(anchor.y);
+      const size = denseHitStream ? 8 : 10;
+      const gap = denseHitStream ? 3 : 4;
+      const alpha = denseHitStream ? 0.4 + pulse * 0.3 : 0.55 + pulse * 0.35;
+      ctx.save();
+      ctx.strokeStyle = `rgba(255,255,255,${alpha})`;
+      ctx.lineWidth = 2;
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(px - size, py - size);
+      ctx.lineTo(px - gap, py - gap);
+      ctx.moveTo(px + gap, py + gap);
+      ctx.lineTo(px + size, py + size);
+      ctx.moveTo(px + size, py - size);
+      ctx.lineTo(px + gap, py - gap);
+      ctx.moveTo(px - gap, py + gap);
+      ctx.lineTo(px - size, py + size);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(0,245,160,${alpha * 0.7})`;
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
   // ── Start / end markers ───────────────────────────────────────────────────
   ctx.beginPath();
   ctx.arc(toX(pts[0].x), toY(pts[0].y), 5, 0, Math.PI * 2);
@@ -389,6 +454,7 @@ interface Props {
   rawPositions: RawPositionPoint[];
   metricPoints: MetricPoint[];
   screenFrames: ScreenFrame[];
+  hitTimestampsMs?: number[];
   segmentLabel?: string | null;
   segmentWindowLabel?: string | null;
   timelineMarkers?: Array<{
@@ -410,6 +476,7 @@ export function MousePathViewer({
   rawPositions,
   metricPoints,
   screenFrames,
+  hitTimestampsMs = [],
   segmentLabel,
   segmentWindowLabel,
   timelineMarkers = [],
@@ -462,6 +529,14 @@ export function MousePathViewer({
     ? frames[frames.length - 1].timestamp_ms
     : 0;
   const durationMs = Math.max(lastPositionMs, lastFrameMs);
+  const denseHitStream = useMemo(
+    () => shouldClusterHitIndicators(hitTimestampsMs, durationMs),
+    [durationMs, hitTimestampsMs],
+  );
+  const hitTimelineWindows = useMemo(
+    () => (denseHitStream ? clusterHitWindows(hitTimestampsMs) : []),
+    [denseHitStream, hitTimestampsMs],
+  );
 
   const overshoots = useCallback(() => detectOvershoots(positions), [positions])();
   const suggestion = useCallback(
@@ -509,8 +584,8 @@ export function MousePathViewer({
       : durationMs > 0
         ? Math.min(1, playbackMs / durationMs)
         : -1;
-    drawPath(canvas, positions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW);
-  }, [positions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW]);
+    drawPath(canvas, positions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW, hitTimestampsMs);
+  }, [positions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW, hitTimestampsMs]);
 
   // ── Playback loop ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -654,6 +729,12 @@ export function MousePathViewer({
               <span style={{ color: "rgba(255,220,30,0.9)" }}>●</span>{" "}
               {positions.filter((p) => p.is_click).length} clicks
             </span>
+            {hitTimestampsMs.length > 0 && (
+              <span>
+                <span style={{ color: "rgba(0,245,160,0.9)" }}>✦</span>{" "}
+                {hitTimestampsMs.length} hits
+              </span>
+            )}
             <span>
               <span style={{ color: "rgba(255,80,30,0.8)" }}>▲</span>{" "}
               {overshoots.length} overshoots
@@ -691,6 +772,9 @@ export function MousePathViewer({
           </span>
           <span>
             <span style={{ color: "rgba(255,80,30,0.85)" }}>▲</span> overshoot
+          </span>
+          <span>
+            <span style={{ color: "rgba(0,245,160,0.9)" }}>✦</span> hit
           </span>
           <span>
             <span style={{ color: "rgba(0,210,255,0.7)" }}>⬜</span> viewport
@@ -750,7 +834,7 @@ export function MousePathViewer({
                 className="flex-1"
                 style={{ accentColor: "#00f5a0" }}
               />
-              {durationMs > 0 && (externalTimelineMarkers.length > 0 || externalTimelineWindows.length > 0 || overshootTimelineMarkers.length > 0) && (
+              {durationMs > 0 && (externalTimelineMarkers.length > 0 || externalTimelineWindows.length > 0 || overshootTimelineMarkers.length > 0 || hitTimestampsMs.length > 0) && (
                 <div
                   style={{
                     position: "relative",
@@ -795,6 +879,42 @@ export function MousePathViewer({
                       }}
                     />
                   ))}
+                  {denseHitStream
+                    ? hitTimelineWindows.map((window, index) => {
+                        const leftPct = (window.start_ms / durationMs) * 100;
+                        const widthPct = Math.max(0.8, ((Math.max(window.end_ms, window.start_ms + 120) - window.start_ms) / durationMs) * 100);
+                        return (
+                          <div
+                            key={`hit-window-${window.start_ms}-${index}`}
+                            title={`Contact window around ${formatMs(window.start_ms)}`}
+                            style={{
+                              position: "absolute",
+                              left: `${leftPct}%`,
+                              width: `${widthPct}%`,
+                              top: 2,
+                              bottom: 2,
+                              background: "rgba(0,245,160,0.28)",
+                              borderLeft: "1px solid rgba(0,245,160,0.75)",
+                              borderRight: "1px solid rgba(0,245,160,0.32)",
+                            }}
+                          />
+                        );
+                      })
+                    : hitTimestampsMs.map((timestampMs, index) => (
+                        <div
+                          key={`hit-${timestampMs}-${index}`}
+                          title={`Hit at ${formatMs(timestampMs)}`}
+                          style={{
+                            position: "absolute",
+                            left: `${(timestampMs / durationMs) * 100}%`,
+                            top: 2,
+                            bottom: 2,
+                            width: 1,
+                            background: "#00f5a0",
+                            opacity: 0.65,
+                          }}
+                        />
+                      ))}
                 </div>
               )}
             </div>

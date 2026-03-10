@@ -207,6 +207,7 @@ pub struct BridgeRunSnapshot {
     pub avg_shots_to_hit: Option<f64>,
     #[serde(default)]
     pub corrective_shot_ratio: Option<f64>,
+    pub started_at_bridge_ts_ms: Option<u64>,
     pub started_at_unix_ms: Option<u64>,
     pub ended_at_unix_ms: Option<u64>,
     pub event_counts: BridgeRunEventCounts,
@@ -1139,6 +1140,7 @@ mod imp {
     #[derive(Clone, Debug, Default)]
     struct RunCaptureState {
         started_at: Option<Instant>,
+        started_at_bridge_ts_ms: Option<u64>,
         started_at_unix_ms: Option<u64>,
         ended_at_unix_ms: Option<u64>,
         duration_from_challenge_secs: bool,
@@ -1245,6 +1247,7 @@ mod imp {
         state: &mut RunCaptureState,
         now: Instant,
         start_secs: Option<f64>,
+        bridge_ts_ms: Option<u64>,
     ) {
         let start_secs = finite_non_negative(start_secs);
         let start_instant = start_secs
@@ -1254,8 +1257,14 @@ mod imp {
         let start_ms = start_secs
             .map(|s| now_ms.saturating_sub((s * 1000.0).round().max(0.0) as u64))
             .unwrap_or(now_ms);
+        let start_bridge_ts_ms = bridge_ts_ms.map(|ts_ms| {
+            start_secs
+                .map(|secs| ts_ms.saturating_sub((secs * 1000.0).round().max(0.0) as u64))
+                .unwrap_or(ts_ms)
+        });
 
         state.started_at = Some(start_instant);
+        state.started_at_bridge_ts_ms = start_bridge_ts_ms;
         state.started_at_unix_ms = Some(start_ms);
         state.ended_at_unix_ms = None;
         state.duration_from_challenge_secs = false;
@@ -1328,21 +1337,32 @@ mod imp {
         state: &mut RunCaptureState,
         now: Instant,
         time_hint_secs: Option<f64>,
+        bridge_ts_ms: Option<u64>,
     ) {
         let Some(hint_secs) = finite_non_negative(time_hint_secs) else {
+            if state.started_at_bridge_ts_ms.is_none() {
+                state.started_at_bridge_ts_ms = bridge_ts_ms;
+            }
             return;
         };
         let hinted_start = now
             .checked_sub(Duration::from_secs_f64(hint_secs))
             .unwrap_or(now);
         let hinted_start_ms = unix_now_ms().saturating_sub((hint_secs * 1000.0).round() as u64);
+        let hinted_start_bridge_ts_ms = bridge_ts_ms.map(|ts_ms| {
+            ts_ms.saturating_sub((hint_secs * 1000.0).round().max(0.0) as u64)
+        });
 
         match state.started_at {
             None => {
                 state.started_at = Some(hinted_start);
+                state.started_at_bridge_ts_ms = hinted_start_bridge_ts_ms;
                 state.started_at_unix_ms = Some(hinted_start_ms);
             }
             Some(started_at) => {
+                if state.started_at_bridge_ts_ms.is_none() {
+                    state.started_at_bridge_ts_ms = hinted_start_bridge_ts_ms;
+                }
                 let elapsed_secs = now.duration_since(started_at).as_secs_f64();
                 if (elapsed_secs - hint_secs).abs() > RUN_CAPTURE_HINT_REALIGN_THRESHOLD_SECS {
                     // Once we have started collecting run data, keep timeline time monotonic.
@@ -1351,18 +1371,23 @@ mod imp {
                         return;
                     }
                     state.started_at = Some(hinted_start);
+                    state.started_at_bridge_ts_ms = hinted_start_bridge_ts_ms;
                     state.started_at_unix_ms = Some(hinted_start_ms);
                 }
             }
         }
     }
 
-    fn ensure_run_capture_started_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
+    fn ensure_run_capture_started_locked(
+        state: &mut RunCaptureState,
+        time_hint_secs: Option<f64>,
+        bridge_ts_ms: Option<u64>,
+    ) {
         let now = Instant::now();
         if state.started_at.is_none() {
-            begin_run_capture_locked(state, now, time_hint_secs);
+            begin_run_capture_locked(state, now, time_hint_secs, bridge_ts_ms);
         } else {
-            align_run_capture_start_with_hint_locked(state, now, time_hint_secs);
+            align_run_capture_start_with_hint_locked(state, now, time_hint_secs, bridge_ts_ms);
         }
     }
 
@@ -1410,7 +1435,7 @@ mod imp {
     }
 
     fn record_run_timeline_point_locked(state: &mut RunCaptureState, time_hint_secs: Option<f64>) {
-        ensure_run_capture_started_locked(state, time_hint_secs);
+        ensure_run_capture_started_locked(state, time_hint_secs, None);
 
         let Some(t_sec_f64) = run_capture_time_secs(state, time_hint_secs) else {
             return;
@@ -1538,25 +1563,25 @@ mod imp {
         match parsed.ev.as_str() {
             "session_start" | "challenge_start" => {
                 let duration_hint = state.metrics.duration_secs;
-                ensure_run_capture_started_locked(&mut state, duration_hint);
+                ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
                 state.event_counts.challenge_start_events =
                     state.event_counts.challenge_start_events.saturating_add(1);
             }
             "challenge_queued" => {
                 let duration_hint = state.metrics.duration_secs;
-                ensure_run_capture_started_locked(&mut state, duration_hint);
+                ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
                 state.event_counts.challenge_queued_events =
                     state.event_counts.challenge_queued_events.saturating_add(1);
             }
             "challenge_end" => {
                 let duration_hint = state.metrics.duration_secs;
-                ensure_run_capture_started_locked(&mut state, duration_hint);
+                ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
                 state.event_counts.challenge_end_events =
                     state.event_counts.challenge_end_events.saturating_add(1);
             }
             "challenge_complete" | "challenge_completed" | "post_challenge_complete" => {
                 let duration_hint = state.metrics.duration_secs;
-                ensure_run_capture_started_locked(&mut state, duration_hint);
+                ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
                 state.event_counts.challenge_complete_events = state
                     .event_counts
                     .challenge_complete_events
@@ -1564,7 +1589,7 @@ mod imp {
             }
             "challenge_canceled" | "challenge_quit" => {
                 let duration_hint = state.metrics.duration_secs;
-                ensure_run_capture_started_locked(&mut state, duration_hint);
+                ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
                 state.event_counts.challenge_canceled_events = state
                     .event_counts
                     .challenge_canceled_events
@@ -1575,7 +1600,7 @@ mod imp {
 
         if parsed.ev == "shot_fired" {
             let duration_hint = state.metrics.duration_secs;
-            ensure_run_capture_started_locked(&mut state, duration_hint);
+            ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
             let inc = finite_non_negative(parsed.delta)
                 .map(|v| v.round().max(1.0) as u32)
                 .unwrap_or(1);
@@ -1585,7 +1610,7 @@ mod imp {
             should_record = true;
         } else if parsed.ev == "shot_hit" {
             let duration_hint = state.metrics.duration_secs;
-            ensure_run_capture_started_locked(&mut state, duration_hint);
+            ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
             let inc = finite_non_negative(parsed.delta)
                 .map(|v| v.round().max(1.0) as u32)
                 .unwrap_or(1);
@@ -1595,7 +1620,7 @@ mod imp {
             should_record = true;
         } else if parsed.ev == "kill" {
             let duration_hint = state.metrics.duration_secs;
-            ensure_run_capture_started_locked(&mut state, duration_hint);
+            ensure_run_capture_started_locked(&mut state, duration_hint, parsed.ts_ms);
             let inc = finite_non_negative(parsed.delta)
                 .map(|v| v.round().max(1.0) as u32)
                 .unwrap_or(1);
@@ -1947,7 +1972,8 @@ mod imp {
         };
 
         let duration_hint = state.metrics.duration_secs;
-        ensure_run_capture_started_locked(&mut state, duration_hint);
+        let bridge_ts_ms = events.first().map(|event| event.ts_ms);
+        ensure_run_capture_started_locked(&mut state, duration_hint, bridge_ts_ms);
         for event in &events {
             let count = event.count.filter(|value| *value > 0).unwrap_or(1);
             if count > 1 {
@@ -2046,7 +2072,8 @@ mod imp {
                 if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
                     time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
                 }
-                ensure_run_capture_started_locked(&mut state, time_hint);
+                let bridge_ts_ms = obj.get("ts_ms").and_then(replay_json_u32).map(|value| value as u64);
+                ensure_run_capture_started_locked(&mut state, time_hint, bridge_ts_ms);
                 record_run_timeline_point_locked(&mut state, time_hint);
             }
             "replay_tick_delta" => {
@@ -2074,7 +2101,8 @@ mod imp {
                 if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
                     time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
                 }
-                ensure_run_capture_started_locked(&mut state, time_hint);
+                let bridge_ts_ms = obj.get("ts_ms").and_then(replay_json_u32).map(|value| value as u64);
+                ensure_run_capture_started_locked(&mut state, time_hint, bridge_ts_ms);
                 record_run_timeline_point_locked(&mut state, time_hint);
             }
             "replay_tick_end" => {
@@ -2151,7 +2179,7 @@ mod imp {
         reset_bridge_stats_snapshot();
         emit_current_stats_snapshot(app);
         if let Ok(mut run_state) = run_capture_state().lock() {
-            begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
+            begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint, None);
         }
         if challenge_active {
             let _ = app.emit(super::EVENT_CHALLENGE_START, ());
@@ -2319,6 +2347,7 @@ mod imp {
             p90_fire_to_hit_ms,
             avg_shots_to_hit,
             corrective_shot_ratio,
+            started_at_bridge_ts_ms: state.started_at_bridge_ts_ms,
             started_at_unix_ms: state.started_at_unix_ms,
             ended_at_unix_ms: Some(snapshot_end_ms),
             event_counts: state.event_counts.clone(),
@@ -2592,7 +2621,7 @@ mod imp {
             }
             emit_current_stats_snapshot(app);
             if let Ok(mut run_state) = run_capture_state().lock() {
-                begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint);
+                begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint, None);
             }
             let _ = app.emit(super::EVENT_SESSION_START, ());
             let session_start = crate::mouse_hook::start_session_tracking();
