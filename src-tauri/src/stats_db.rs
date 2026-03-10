@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 11;
+const SCHEMA_VERSION: i32 = 12;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -728,6 +728,22 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
                 "ALTER TABLE sessions ADD COLUMN hub_upload_next_retry_at_unix_ms INTEGER;",
                 "ALTER TABLE sessions ADD COLUMN hub_upload_last_error TEXT;",
                 "CREATE INDEX IF NOT EXISTS idx_sessions_hub_upload_retry ON sessions(hub_uploaded_at_unix_ms, hub_upload_next_retry_at_unix_ms, timestamp);",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 12 {
+        run_schema_migration(conn, 12, |tx| {
+            for statement in [
+                "ALTER TABLE sessions ADD COLUMN hub_uploaded_schema_version INTEGER;",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_hub_upload_schema ON sessions(hub_uploaded_at_unix_ms, hub_uploaded_schema_version, hub_upload_next_retry_at_unix_ms, timestamp);",
             ] {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {

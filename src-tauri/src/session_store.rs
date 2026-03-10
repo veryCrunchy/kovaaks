@@ -736,6 +736,7 @@ fn query_pending_hub_uploads(
     offset: usize,
     limit: usize,
 ) -> anyhow::Result<Vec<SessionRecord>> {
+    let current_schema_version = crate::hub_sync::HUB_SCHEMA_VERSION as i64;
     let mut stmt = conn.prepare(
         "
         SELECT
@@ -781,7 +782,10 @@ fn query_pending_hub_uploads(
         LEFT JOIN session_smoothness sm ON sm.session_id = s.id
         LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
         LEFT JOIN session_shot_timings st ON st.session_id = s.id
-        WHERE s.hub_uploaded_at_unix_ms IS NULL
+        WHERE (
+                s.hub_uploaded_at_unix_ms IS NULL
+                OR COALESCE(s.hub_uploaded_schema_version, 0) < ?3
+              )
           AND (
                 s.hub_upload_next_retry_at_unix_ms IS NULL
                 OR s.hub_upload_next_retry_at_unix_ms <= CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
@@ -790,7 +794,10 @@ fn query_pending_hub_uploads(
         LIMIT ?1 OFFSET ?2
         ",
     )?;
-    let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_session_record)?;
+    let rows = stmt.query_map(
+        params![limit as i64, offset as i64, current_schema_version],
+        row_to_session_record,
+    )?;
     let mut sessions = Vec::with_capacity(limit.min(DEFAULT_PAGE_LIMIT));
     for row in rows {
         sessions.push(row?);
@@ -799,9 +806,21 @@ fn query_pending_hub_uploads(
 }
 
 fn count_pending_hub_uploads(conn: &Connection) -> anyhow::Result<usize> {
+    let current_schema_version = crate::hub_sync::HUB_SCHEMA_VERSION as i64;
     let count = conn.query_row(
-        "SELECT COUNT(*) FROM sessions WHERE hub_uploaded_at_unix_ms IS NULL",
-        [],
+        "
+        SELECT COUNT(*)
+        FROM sessions
+        WHERE (
+                hub_uploaded_at_unix_ms IS NULL
+                OR COALESCE(hub_uploaded_schema_version, 0) < ?1
+              )
+          AND (
+                hub_upload_next_retry_at_unix_ms IS NULL
+                OR hub_upload_next_retry_at_unix_ms <= CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+              )
+        ",
+        params![current_schema_version],
         |row| row.get::<_, i64>(0),
     )?;
     Ok(count.max(0) as usize)
@@ -813,16 +832,18 @@ fn try_mark_session_hub_uploaded(app: &AppHandle, session_id: &str) -> anyhow::R
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as i64;
+    let uploaded_schema_version = crate::hub_sync::HUB_SCHEMA_VERSION as i64;
     conn.execute(
         "
         UPDATE sessions
         SET hub_uploaded_at_unix_ms = ?2,
+            hub_uploaded_schema_version = ?3,
             hub_upload_retry_count = 0,
             hub_upload_next_retry_at_unix_ms = NULL,
             hub_upload_last_error = NULL
         WHERE id = ?1
         ",
-        params![session_id, uploaded_at_unix_ms],
+        params![session_id, uploaded_at_unix_ms, uploaded_schema_version],
     )?;
     Ok(())
 }
@@ -880,6 +901,7 @@ fn try_reset_all_hub_upload_marks(app: &AppHandle) -> anyhow::Result<()> {
         "
         UPDATE sessions
         SET hub_uploaded_at_unix_ms = NULL,
+            hub_uploaded_schema_version = NULL,
             hub_upload_retry_count = 0,
             hub_upload_next_retry_at_unix_ms = NULL,
             hub_upload_last_error = NULL
