@@ -325,6 +325,20 @@ pub fn clear_linked_account(app: &AppHandle) -> anyhow::Result<()> {
 }
 
 pub fn force_full_resync(app: &AppHandle) -> anyhow::Result<()> {
+    match crate::stats_db::backfill_session_classifications(app) {
+        Ok(updated) if updated > 0 => {
+            log::info!(
+                "hub_sync: backfilled stored scenario classification for {} session(s) before full resync",
+                updated
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!(
+                "hub_sync: stored scenario classification backfill failed before full resync: {error}"
+            );
+        }
+    }
     crate::session_store::reset_all_hub_upload_marks(app);
     refresh_pending_count(app);
     queue_pending_session_sync(app);
@@ -501,8 +515,7 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
         // for historical sessions that were never seen by the stats panel hook.
         crate::session_store::StatsPanelSnapshot {
             kills: Some(input.result.kills),
-            total_damage: (input.result.damage_done > 0.0)
-                .then(|| input.result.damage_done as f32),
+            total_damage: (input.result.damage_done > 0.0).then(|| input.result.damage_done as f32),
             avg_ttk_ms: (input.result.avg_ttk > 0.0)
                 .then(|| (input.result.avg_ttk * 1000.0) as f32), // avg_ttk from CSV is in seconds
             ..Default::default()
@@ -680,12 +693,7 @@ fn build_ingest_payload(
         accuracy,
         duration_ms,
         played_at_iso: played_at_iso(&input.result.timestamp),
-        summary: build_summary_map(
-            input,
-            persisted_run,
-            context_windows.len(),
-            &scenario_type,
-        ),
+        summary: build_summary_map(input, persisted_run, context_windows.len(), &scenario_type),
         feature_set: build_feature_map(input),
         timeline_seconds: build_timeline_payload(persisted_timeline),
         context_windows: build_context_windows_payload(
@@ -772,7 +780,8 @@ async fn upload_session_batch(
                 (!family.is_empty() && family != "Unknown").then(|| family.to_string())
             })
             .unwrap_or_else(|| "Unknown".to_string());
-        let score = resolve_upload_score(&input.result, persisted_run.as_ref(), &persisted_timeline);
+        let score =
+            resolve_upload_score(&input.result, persisted_run.as_ref(), &persisted_timeline);
         let accuracy = persisted_run
             .as_ref()
             .and_then(|run| run.accuracy_pct)
@@ -813,7 +822,9 @@ async fn upload_session_batch(
         .json(&IngestBatchRequest { sessions })
         .send()
         .await
-        .with_context(|| format!("error sending request for url ({base_url}{BATCH_INGEST_PATH})"))?;
+        .with_context(|| {
+            format!("error sending request for url ({base_url}{BATCH_INGEST_PATH})")
+        })?;
 
     let status = response.status();
     let mut payload = response.json::<IngestBatchResponse>().await?;
@@ -821,9 +832,7 @@ async fn upload_session_batch(
         && payload.failures.is_empty()
         && !status.is_success()
     {
-        anyhow::bail!(
-            "hub batch ingest returned {status} with an empty result body"
-        );
+        anyhow::bail!("hub batch ingest returned {status} with an empty result body");
     }
 
     let mut next_fallback_index = 0usize;

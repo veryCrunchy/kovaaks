@@ -2582,14 +2582,20 @@ mod imp {
         }
     }
 
+    pub(super) fn has_recent_bridge_stats_flow(within: Duration) -> bool {
+        let Ok(state) = bridge_session_state().lock() else {
+            return false;
+        };
+        let last_flow = state.last_pull_event_at.or(state.last_stats_flow_at);
+        last_flow
+            .map(|seen_at| Instant::now().duration_since(seen_at) <= within)
+            .unwrap_or(false)
+    }
+
     pub(super) fn is_bridge_stats_flow_stalled() -> bool {
-        const STALL_AFTER: Duration = Duration::from_millis(1500);
+        const STALL_AFTER: Duration = Duration::from_secs(4);
 
         if !bridge_dll_connected_flag().load(Ordering::SeqCst) {
-            return false;
-        }
-
-        if !has_recent_state_snapshot_ack(Duration::from_secs(5)) {
             return false;
         }
 
@@ -6134,6 +6140,16 @@ pub fn is_bridge_stats_flow_stalled() -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_bridge_stats_flow_stalled() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn has_recent_bridge_stats_flow() -> bool {
+    imp::has_recent_bridge_stats_flow(std::time::Duration::from_secs(5))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn has_recent_bridge_stats_flow() -> bool {
     false
 }
 

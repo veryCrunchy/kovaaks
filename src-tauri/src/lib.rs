@@ -200,7 +200,9 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         };
     }
 
-    if !bridge::has_recent_state_snapshot_ack() {
+    let has_recent_state_snapshot = bridge::has_recent_state_snapshot_ack();
+    let has_recent_stats_flow = bridge::has_recent_bridge_stats_flow();
+    if !has_recent_state_snapshot && !has_recent_stats_flow {
         if pid_age < startup_grace {
             return hidden_overlay_runtime_notice();
         }
@@ -1685,7 +1687,28 @@ pub fn run() {
             });
 
             session_store::initialize(app.handle());
-            hub_sync::queue_pending_session_sync(app.handle());
+            {
+                let app_handle = app.handle().clone();
+                let _ = std::thread::Builder::new()
+                    .name("session-classification-backfill".into())
+                    .spawn(move || {
+                        match stats_db::backfill_session_classifications(&app_handle) {
+                            Ok(0) => {}
+                            Ok(updated) => {
+                                log::info!(
+                                    "stats_db: backfilled stored scenario classification for {} session(s)",
+                                    updated
+                                );
+                            }
+                            Err(error) => {
+                                log::warn!(
+                                    "stats_db: stored scenario classification backfill failed: {error}"
+                                );
+                            }
+                        }
+                        hub_sync::queue_pending_session_sync(&app_handle);
+                    });
+            }
             {
                 let app_handle = app.handle().clone();
                 let _ = std::thread::Builder::new()
@@ -1693,25 +1716,6 @@ pub fn run() {
                     .spawn(move || loop {
                         hub_sync::queue_pending_session_sync(&app_handle);
                         std::thread::sleep(Duration::from_secs(300));
-                    });
-            }
-            {
-                let app_handle = app.handle().clone();
-                let _ = std::thread::Builder::new()
-                    .name("session-classification-backfill".into())
-                    .spawn(move || match stats_db::backfill_session_classifications(&app_handle) {
-                        Ok(0) => {}
-                        Ok(updated) => {
-                            log::info!(
-                                "stats_db: backfilled stored scenario classification for {} session(s)",
-                                updated
-                            );
-                        }
-                        Err(error) => {
-                            log::warn!(
-                                "stats_db: stored scenario classification backfill failed: {error}"
-                            );
-                        }
                     });
             }
 

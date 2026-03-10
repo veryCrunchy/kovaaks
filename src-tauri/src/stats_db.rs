@@ -2406,6 +2406,8 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
     #[derive(Clone)]
     struct ClassificationRow {
         session_id: String,
+        has_stats_panel: bool,
+        scenario_name: String,
         stats_panel: crate::session_store::StatsPanelSnapshot,
         run_summary: Option<crate::bridge::BridgeRunSnapshot>,
     }
@@ -2415,14 +2417,16 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
         let mut stmt = conn.prepare(
             "
             SELECT
-                sp.session_id,
+                s.id,
+                CASE WHEN sp.session_id IS NULL THEN 0 ELSE 1 END AS has_stats_panel,
+                s.scenario,
                 sp.scenario_type,
                 sp.scenario_subtype,
-                sp.kills,
-                sp.avg_kps,
-                sp.accuracy_pct,
-                sp.total_damage,
-                sp.avg_ttk_ms,
+                COALESCE(sp.kills, s.kills),
+                COALESCE(sp.avg_kps, CASE WHEN s.duration_secs > 0 THEN s.kills / s.duration_secs ELSE NULL END),
+                COALESCE(sp.accuracy_pct, s.accuracy),
+                COALESCE(sp.total_damage, s.damage_done),
+                COALESCE(sp.avg_ttk_ms, CASE WHEN s.avg_ttk > 0 THEN s.avg_ttk * 1000.0 ELSE NULL END),
                 sp.best_ttk_ms,
                 sp.ttk_std_ms,
                 sp.accuracy_trend,
@@ -2432,17 +2436,18 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
                 rs.kills_per_second,
                 rs.damage_done,
                 rs.damage_possible
-            FROM session_stats_panels sp
-            LEFT JOIN session_run_summaries rs ON rs.session_id = sp.session_id
+            FROM sessions s
+            LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
+            LEFT JOIN session_run_summaries rs ON rs.session_id = s.id
             ",
         )?;
         stmt.query_map([], |row| {
-            let shots_fired = row.get::<_, Option<f64>>(11)?;
-            let shots_hit = row.get::<_, Option<f64>>(12)?;
-            let kills = row.get::<_, Option<f64>>(13)?;
-            let kills_per_second = row.get::<_, Option<f64>>(14)?;
-            let damage_done = row.get::<_, Option<f64>>(15)?;
-            let damage_possible = row.get::<_, Option<f64>>(16)?;
+            let shots_fired = row.get::<_, Option<f64>>(12)?;
+            let shots_hit = row.get::<_, Option<f64>>(13)?;
+            let kills = row.get::<_, Option<f64>>(14)?;
+            let kills_per_second = row.get::<_, Option<f64>>(15)?;
+            let damage_done = row.get::<_, Option<f64>>(16)?;
+            let damage_possible = row.get::<_, Option<f64>>(17)?;
             let has_run_summary = shots_fired.is_some()
                 || shots_hit.is_some()
                 || kills.is_some()
@@ -2452,17 +2457,21 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
 
             Ok(ClassificationRow {
                 session_id: row.get(0)?,
+                has_stats_panel: row.get::<_, i64>(1)? != 0,
+                scenario_name: row.get(2)?,
                 stats_panel: crate::session_store::StatsPanelSnapshot {
-                    scenario_type: row.get(1)?,
-                    scenario_subtype: row.get(2)?,
-                    kills: row.get::<_, Option<i64>>(3)?.map(|value| value as u32),
-                    avg_kps: row.get(4)?,
-                    accuracy_pct: row.get(5)?,
-                    total_damage: row.get(6)?,
-                    avg_ttk_ms: row.get(7)?,
-                    best_ttk_ms: row.get(8)?,
-                    ttk_std_ms: row.get(9)?,
-                    accuracy_trend: row.get(10)?,
+                    scenario_type: row
+                        .get::<_, Option<String>>(3)?
+                        .unwrap_or_else(|| "Unknown".to_string()),
+                    scenario_subtype: row.get(4)?,
+                    kills: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
+                    avg_kps: row.get(6)?,
+                    accuracy_pct: row.get(7)?,
+                    total_damage: row.get(8)?,
+                    avg_ttk_ms: row.get(9)?,
+                    best_ttk_ms: row.get(10)?,
+                    ttk_std_ms: row.get(11)?,
+                    accuracy_trend: row.get(12)?,
                 },
                 run_summary: has_run_summary.then(|| crate::bridge::BridgeRunSnapshot {
                     duration_secs: None,
@@ -2500,20 +2509,29 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
     let mut updates = Vec::new();
     for row in rows {
         let shot_telemetry = query_shot_telemetry(&conn, &row.session_id)?;
-        let classification = crate::bridge::classify_persisted_session(
+        let mut classification = crate::bridge::classify_persisted_session(
             &row.stats_panel,
             row.run_summary.as_ref(),
             &shot_telemetry,
         );
         if classification.family == "Unknown" {
+            classification = classify_csv_only_session(&row.scenario_name, &row.stats_panel);
+        }
+        if classification.family == "Unknown" {
             continue;
         }
-        if classification.family == row.stats_panel.scenario_type
+        if row.has_stats_panel
+            && classification.family == row.stats_panel.scenario_type
             && classification.subtype == row.stats_panel.scenario_subtype
         {
             continue;
         }
-        updates.push((row.session_id, classification));
+        updates.push((
+            row.session_id,
+            row.stats_panel,
+            row.has_stats_panel,
+            classification,
+        ));
     }
 
     if updates.is_empty() {
@@ -2521,18 +2539,134 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
     }
 
     let tx = conn.transaction()?;
-    for (session_id, classification) in &updates {
-        tx.execute(
-            "
-            UPDATE session_stats_panels
-            SET scenario_type = ?2,
-                scenario_subtype = ?3
-            WHERE session_id = ?1
-            ",
-            params![session_id, &classification.family, &classification.subtype],
-        )?;
+    for (session_id, stats_panel, has_stats_panel, classification) in &updates {
+        if *has_stats_panel {
+            tx.execute(
+                "
+                UPDATE session_stats_panels
+                SET scenario_type = ?2,
+                    scenario_subtype = ?3
+                WHERE session_id = ?1
+                ",
+                params![session_id, &classification.family, &classification.subtype],
+            )?;
+        } else {
+            tx.execute(
+                "
+                INSERT INTO session_stats_panels (
+                    session_id,
+                    scenario_type,
+                    scenario_subtype,
+                    kills,
+                    avg_kps,
+                    accuracy_pct,
+                    total_damage,
+                    avg_ttk_ms,
+                    best_ttk_ms,
+                    ttk_std_ms,
+                    accuracy_trend
+                )
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                ",
+                params![
+                    session_id,
+                    &classification.family,
+                    &classification.subtype,
+                    stats_panel.kills.map(|value| value as i64),
+                    stats_panel.avg_kps,
+                    stats_panel.accuracy_pct,
+                    stats_panel.total_damage,
+                    stats_panel.avg_ttk_ms,
+                    stats_panel.best_ttk_ms,
+                    stats_panel.ttk_std_ms,
+                    stats_panel.accuracy_trend,
+                ],
+            )?;
+        }
     }
     tx.commit()?;
 
     Ok(updates.len())
+}
+
+fn classify_csv_only_session(
+    scenario_name: &str,
+    stats_panel: &crate::session_store::StatsPanelSnapshot,
+) -> crate::bridge::PersistedScenarioClassification {
+    let lower = scenario_name.to_ascii_lowercase();
+    let kills = stats_panel.kills.unwrap_or(0);
+    let avg_ttk_secs = stats_panel
+        .avg_ttk_ms
+        .map(|value| value as f64 / 1000.0)
+        .unwrap_or(0.0);
+    let damage_done = stats_panel.total_damage.map(f64::from).unwrap_or(0.0);
+    let accuracy = stats_panel.accuracy_pct.map(f64::from).unwrap_or(0.0);
+    let avg_kps = stats_panel.avg_kps.map(f64::from).unwrap_or(0.0);
+    let damage_per_kill = if kills > 0 {
+        damage_done / kills as f64
+    } else {
+        0.0
+    };
+
+    if lower.contains("track")
+        || lower.contains("smooth")
+        || lower.contains("air ")
+        || lower.contains("centering")
+        || lower.contains("sphere")
+        || lower.contains("ground")
+        || lower.contains("close long strafes")
+        || lower.contains("controlsphere")
+    {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "Tracking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if kills == 0 && damage_done > 0.0 {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "Tracking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if kills > 0 && (avg_ttk_secs >= 5.0 || damage_per_kill < 0.5) {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "Tracking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if kills > 0 && damage_per_kill > 1.25 {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "MultiHitClicking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if kills > 0 && (avg_ttk_secs >= 0.45 || (avg_kps > 0.0 && avg_kps <= 2.25)) {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "ReactiveClicking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if kills > 0 {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "OneShotClicking".to_string(),
+            subtype: None,
+        };
+    }
+
+    if accuracy > 0.0 {
+        return crate::bridge::PersistedScenarioClassification {
+            family: "AccuracyDrill".to_string(),
+            subtype: None,
+        };
+    }
+
+    crate::bridge::PersistedScenarioClassification {
+        family: "Unknown".to_string(),
+        subtype: None,
+    }
 }
