@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.1](https://github.com/veryCrunchy/aimmod/compare/v1.5.0...v1.5.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* update DEFAULT_HUB_API_BASE_URL to remove redundant 'api' subdomain ([53ba46d](https://github.com/veryCrunchy/aimmod/commit/53ba46d4c4551fa792c9e3e213508fb6b217c397))
+
 ## [1.5.0](https://github.com/veryCrunchy/kovaaks/compare/v1.4.0...v1.5.0) (2026-03-10)
 
 
