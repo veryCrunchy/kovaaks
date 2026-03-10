@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.6.0](https://github.com/veryCrunchy/aimmod/compare/v1.5.1...v1.6.0) (2026-03-10)
+
+
+### Features
+
+* add replay media uploads and sync controls ([0ef5749](https://github.com/veryCrunchy/aimmod/commit/0ef574960ea2ad3effc22a06acdaf7102a0b8733))
+
+
+### Bug Fixes
+
+* align replay hit markers to bridge timing ([9597781](https://github.com/veryCrunchy/aimmod/commit/95977813cad6284c1da6ca7aee75baf252df5955))
+
 ## [1.5.1](https://github.com/veryCrunchy/aimmod/compare/v1.5.0...v1.5.1) (2026-03-10)
 
 
