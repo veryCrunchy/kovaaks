@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.6.1](https://github.com/veryCrunchy/aimmod/compare/v1.6.0...v1.6.1) (2026-03-10)
+
+
+### Bug Fixes
+
+* implement tracking pause functionality for smoothness metrics ([1dd13b4](https://github.com/veryCrunchy/aimmod/commit/1dd13b4a86d864ce63e057bc207eceb3889a2cf2))
+* optimize mouse hook ([fce9b11](https://github.com/veryCrunchy/aimmod/commit/fce9b11d7d4e4879b464691df53f98e9ce6ee8b9))
+* update default replay media upload mode to include PB ([037d852](https://github.com/veryCrunchy/aimmod/commit/037d852b6f86235b6aaf215e37c8e39bc80c923d))
+
 ## [1.6.0](https://github.com/veryCrunchy/aimmod/compare/v1.5.1...v1.6.0) (2026-03-10)
 
 
