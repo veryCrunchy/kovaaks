@@ -3,7 +3,7 @@ use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
-pub const DEFAULT_HUB_API_BASE_URL: &str = "https://api.aimmod.app";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.app";
 
 /// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]

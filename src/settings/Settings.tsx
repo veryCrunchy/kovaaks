@@ -10,7 +10,7 @@ import { C } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
-const DEFAULT_HUB_API_BASE_URL = "https://api.aimmod.app";
+const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
 
 type Tab = "general" | "friends" | "stats";
 
