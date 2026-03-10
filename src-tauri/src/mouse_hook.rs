@@ -1,6 +1,7 @@
 /// Mouse hook module: captures global OS mouse events, computes smoothness metrics.
 ///
-/// Uses the `rdev` crate which calls SetWindowsHookEx on Windows (OS-level, no game injection).
+/// On Windows this uses a hidden raw-input window plus global hotkeys, avoiding a
+/// low-level mouse hook for movement. On other platforms it falls back to `rdev`.
 /// Metrics are emitted every second via Tauri event `mouse-metrics`, but ONLY while a
 /// session is active (between `start_session_tracking` and `stop_session_tracking`).
 ///
@@ -14,8 +15,10 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use once_cell::sync::Lazy;
-use rdev::{Event, EventType, Key, listen};
 use tauri::{AppHandle, Emitter};
+
+#[cfg(not(target_os = "windows"))]
+use rdev::{Event, EventType, Key, listen};
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -205,25 +208,37 @@ pub fn start(app: AppHandle) -> anyhow::Result<()> {
     #[cfg(target_os = "windows")]
     start_raw_input_thread();
 
-    // Spawn the rdev listener thread (blocks, so must be its own thread)
-    std::thread::Builder::new()
-        .name("mouse-hook".into())
-        .spawn(move || {
-            log::info!("Mouse hook thread started");
+    #[cfg(target_os = "windows")]
+    {
+        let app_clone = app.clone();
+        std::thread::Builder::new()
+            .name("metric-emitter".into())
+            .spawn(move || metric_emitter_loop(app_clone))
+            .expect("failed to spawn metric emitter");
+    }
 
-            let app_clone = app.clone();
-            let _emitter = std::thread::Builder::new()
-                .name("metric-emitter".into())
-                .spawn(move || metric_emitter_loop(app_clone))
-                .expect("failed to spawn metric emitter");
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Spawn the rdev listener thread (blocks, so must be its own thread)
+        std::thread::Builder::new()
+            .name("mouse-hook".into())
+            .spawn(move || {
+                log::info!("Mouse hook thread started");
 
-            if let Err(e) = listen(mouse_event_callback) {
-                log::error!("rdev listen error: {e:?}");
-            }
+                let app_clone = app.clone();
+                let _emitter = std::thread::Builder::new()
+                    .name("metric-emitter".into())
+                    .spawn(move || metric_emitter_loop(app_clone))
+                    .expect("failed to spawn metric emitter");
 
-            HOOK_RUNNING.store(false, Ordering::SeqCst);
-            log::info!("Mouse hook thread stopped");
-        })?;
+                if let Err(e) = listen(mouse_event_callback) {
+                    log::error!("rdev listen error: {e:?}");
+                }
+
+                HOOK_RUNNING.store(false, Ordering::SeqCst);
+                log::info!("Mouse hook thread stopped");
+            })?;
+    }
 
     Ok(())
 }
@@ -626,12 +641,23 @@ fn start_raw_input_thread() {
 fn raw_input_loop() {
     use std::mem::size_of;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_INPUTSINK, RegisterRawInputDevices};
+    use windows::Win32::UI::Input::{
+        RAWINPUTDEVICE, RIDEV_INPUTSINK, RegisterRawInputDevices,
+    };
+    use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW,
         TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASS_STYLES, WNDCLASSW,
     };
     use windows::core::PCWSTR;
+
+    const HOTKEY_ID_SETTINGS: i32 = 1;
+    const HOTKEY_ID_DEBUG: i32 = 2;
+    const HOTKEY_ID_LAYOUT: i32 = 3;
+    const MOD_NOREPEAT: u32 = 0x4000;
+    const VK_F8: u32 = 0x77;
+    const VK_F9: u32 = 0x78;
+    const VK_F10: u32 = 0x79;
 
     unsafe {
         let hinstance = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
@@ -684,6 +710,37 @@ fn raw_input_loop() {
             return;
         }
 
+        if RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_ID_SETTINGS,
+            HOT_KEY_MODIFIERS(MOD_NOREPEAT),
+            VK_F8,
+        )
+        .is_err()
+        {
+            log::warn!("raw input: failed to register F8 hotkey");
+        }
+        if RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_ID_DEBUG,
+            HOT_KEY_MODIFIERS(MOD_NOREPEAT),
+            VK_F9,
+        )
+        .is_err()
+        {
+            log::warn!("raw input: failed to register F9 hotkey");
+        }
+        if RegisterHotKey(
+            Some(hwnd),
+            HOTKEY_ID_LAYOUT,
+            HOT_KEY_MODIFIERS(MOD_NOREPEAT),
+            VK_F10,
+        )
+        .is_err()
+        {
+            log::warn!("raw input: failed to register F10 hotkey");
+        }
+
         log::info!("Raw input mouse listener started");
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
@@ -707,8 +764,24 @@ unsafe extern "system" fn raw_input_wnd_proc(
     use windows::Win32::UI::WindowsAndMessaging::DefWindowProcW;
 
     const WM_INPUT: u32 = 0x00FF;
+    const WM_HOTKEY: u32 = 0x0312;
     const RIM_TYPEMOUSE: u32 = 0;
     const MOUSE_MOVE_ABSOLUTE: u16 = 0x01; // usFlags bit — clear = relative
+    const RI_MOUSE_LEFT_BUTTON_DOWN: u16 = 0x0001;
+    const RI_MOUSE_LEFT_BUTTON_UP: u16 = 0x0002;
+    const HOTKEY_ID_SETTINGS: usize = 1;
+    const HOTKEY_ID_DEBUG: usize = 2;
+    const HOTKEY_ID_LAYOUT: usize = 3;
+
+    if msg == WM_HOTKEY {
+        match wparam.0 {
+            HOTKEY_ID_SETTINGS => emit_app_event("toggle-settings"),
+            HOTKEY_ID_DEBUG => emit_app_event("toggle-debug-state-overlay"),
+            HOTKEY_ID_LAYOUT => emit_app_event("toggle-layout-huds"),
+            _ => {}
+        }
+        return windows::Win32::Foundation::LRESULT(0);
+    }
 
     if msg == WM_INPUT {
         let handle = HRAWINPUT(lparam.0 as *mut std::ffi::c_void);
@@ -732,6 +805,46 @@ unsafe extern "system" fn raw_input_wnd_proc(
                 let raw = unsafe { raw.assume_init() };
                 if raw.header.dwType == RIM_TYPEMOUSE {
                     let mouse = unsafe { &raw.data.mouse };
+                    let button_flags = unsafe { mouse.Anonymous.Anonymous.usButtonFlags };
+
+                    if TRACKING_ACTIVE.load(Ordering::Relaxed)
+                        && !TRACKING_PAUSED.load(Ordering::Relaxed)
+                    {
+                        if button_flags & RI_MOUSE_LEFT_BUTTON_DOWN != 0 {
+                            let now = Instant::now();
+                            if let Ok(mut s) = STATE.lock() {
+                                s.click_times.push_back(now);
+                                if s.click_times.len() > 500 {
+                                    s.click_times.pop_front();
+                                }
+                                s.lmb_down_at = Some(now);
+                                let click_x = s.cursor_x;
+                                let click_y = s.cursor_y;
+                                let ts_ms =
+                                    now.saturating_duration_since(s.session_start).as_millis()
+                                        as u64;
+                                s.raw_positions.push(RawPositionPoint {
+                                    x: click_x,
+                                    y: click_y,
+                                    timestamp_ms: ts_ms,
+                                    is_click: true,
+                                });
+                            }
+                        }
+
+                        if button_flags & RI_MOUSE_LEFT_BUTTON_UP != 0 {
+                            if let Ok(mut s) = STATE.lock() {
+                                if let Some(down) = s.lmb_down_at.take() {
+                                    let hold_ms = down.elapsed().as_secs_f32() * 1000.0;
+                                    s.hold_durations.push_back(hold_ms);
+                                    if s.hold_durations.len() > 500 {
+                                        s.hold_durations.pop_front();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // Ignore absolute-mode reports (pen tablets, digitisers).
                     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE == 0 {
                         let dx = mouse.lLastX as f64;
@@ -789,8 +902,18 @@ unsafe extern "system" fn raw_input_wnd_proc(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+#[cfg(target_os = "windows")]
+fn emit_app_event(event: &str) {
+    if let Ok(guard) = APP_HANDLE.lock() {
+        if let Some(app) = guard.as_ref() {
+            let _ = app.emit(event, ());
+        }
+    }
+}
+
 // ─── rdev callback ────────────────────────────────────────────────────────────
 
+#[cfg(not(target_os = "windows"))]
 fn mouse_event_callback(event: Event) {
     if !HOOK_RUNNING.load(Ordering::Relaxed) {
         return;
