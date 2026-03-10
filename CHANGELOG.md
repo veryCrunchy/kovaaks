@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.5.0](https://github.com/veryCrunchy/kovaaks/compare/v1.4.0...v1.5.0) (2026-03-10)
+
+
+### Features
+
+* add update notice functionality to StatsWindow ([f7d9e89](https://github.com/veryCrunchy/kovaaks/commit/f7d9e89d29ec49cd745532cf4caadb8504fdfad4))
+* enhance scenario classification and update related logic ([b762e8e](https://github.com/veryCrunchy/kovaaks/commit/b762e8e1a223f44474d39f3bc101410200a39c6b))
+
 ## [1.4.0](https://github.com/veryCrunchy/kovaaks/compare/v1.3.0...v1.4.0) (2026-03-10)
 
 
