@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/veryCrunchy/kovaaks/compare/v1.2.1...v1.3.0) (2026-03-10)
+
+
+### Features
+
+* Implement AimMod Hub sync functionality and settings ([6900a91](https://github.com/veryCrunchy/kovaaks/commit/6900a9143d41eee7110b6f07b0cbeee860f2942a))
+
 ## [1.2.1](https://github.com/veryCrunchy/kovaaks/compare/v1.2.0...v1.2.1) (2026-03-09)
 
 
