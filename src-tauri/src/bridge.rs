@@ -439,6 +439,19 @@ pub fn classify_persisted_session(
         };
     }
 
+    // Tracking scenarios that allow kills: detect by long TTK or near-zero damage per kill
+    let damage_per_kill = if kills > 0 { damage_dealt / kills as f64 } else { 0.0 };
+    let long_ttk_tracking = live_ttk_secs.is_some_and(|ttk| ttk >= 5.0);
+    // VT-style tracking uses invincible/high-HP bots so damage_per_kill is near zero (<0.5)
+    let vt_style_tracking = kills > 0 && damage_per_kill < 0.5;
+
+    if kills > 0 && (long_ttk_tracking || vt_style_tracking) {
+        return PersistedScenarioClassification {
+            family: "Tracking".to_string(),
+            subtype: Some(persisted_tracking_density_subtype(bot_count)),
+        };
+    }
+
     if kills > 0 && damage_present {
         return PersistedScenarioClassification {
             family: "MultiHitClicking".to_string(),
@@ -2985,6 +2998,15 @@ mod imp {
         }
 
         if kills > 0 && (damage_total > 0.0001 || damage_dealt > 0.0001) {
+            let damage_per_kill = (damage_total.max(damage_dealt)) / kills as f64;
+            let long_ttk_tracking = live_ttk_secs.is_some_and(|ttk| ttk >= 5.0);
+            let vt_style_tracking = damage_per_kill < 0.5;
+            if long_ttk_tracking || vt_style_tracking {
+                return ScenarioClassification {
+                    family: "Tracking",
+                    subtype: Some(tracking_density_subtype(bot_count)),
+                };
+            }
             return ScenarioClassification {
                 family: "MultiHitClicking",
                 subtype: Some(multi_hit_subtype(bot_count, switch_rate)),

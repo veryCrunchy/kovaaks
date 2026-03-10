@@ -236,6 +236,7 @@ const STATS_WINDOW_STORAGE_KEYS = {
   scenarioSort: "stats-window:scenario-sort",
   dateRange: "stats-window:date-range",
   compareScenario: "stats-window:compare-scenario",
+  hubNoticeDismissed: "stats-window:hub-notice-dismissed",
 } as const;
 
 function readStoredValue(key: string): string | null {
@@ -271,6 +272,22 @@ interface ScenarioSummary {
   avgAccuracy: number | null;
   totalDurationSecs: number;
   latestTimestamp: string | null;
+}
+
+interface StatsHubSyncStatus {
+  pendingCount: number;
+  lastSuccessAtUnixMs: number | null;
+  lastError: string | null;
+  lastErrorAtUnixMs: number | null;
+  lastUploadedSessionId: string | null;
+  syncInProgress: boolean;
+}
+
+interface StatsHubSyncOverview {
+  configured: boolean;
+  enabled: boolean;
+  accountLabel: string | null;
+  status: StatsHubSyncStatus;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -5932,6 +5949,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [leaderboardSeedQuery, setLeaderboardSeedQuery] = useState<string | null>(null);
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
+  const [hubSyncOverview, setHubSyncOverview] = useState<StatsHubSyncOverview | null>(null);
+  const [hubNoticeDismissed, setHubNoticeDismissed] = useState<boolean>(
+    () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.hubNoticeDismissed) === "1",
+  );
 
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
@@ -6057,6 +6078,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   useEffect(() => {
     writeStoredValue(STATS_WINDOW_STORAGE_KEYS.sessionsPane, sessionsPane);
   }, [sessionsPane]);
+  useEffect(() => {
+    writeStoredValue(
+      STATS_WINDOW_STORAGE_KEYS.hubNoticeDismissed,
+      hubNoticeDismissed ? "1" : null,
+    );
+  }, [hubNoticeDismissed]);
 
   useEffect(() => {
     loadHistory(false);
@@ -6142,11 +6169,20 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       }
     });
 
+    const refreshHubSyncOverview = () => {
+      invoke<StatsHubSyncOverview>("get_hub_sync_status")
+        .then(setHubSyncOverview)
+        .catch(() => setHubSyncOverview(null));
+    };
+    refreshHubSyncOverview();
+    const hubStatusInterval = window.setInterval(refreshHubSyncOverview, 10_000);
+
     return () => {
       unlistenComplete.then((fn) => fn());
       unlistenBridgeParsed.then((fn) => fn());
       unlistenStatsPanel.then((fn) => fn());
       unlistenBridgeMetric.then((fn) => fn());
+      window.clearInterval(hubStatusInterval);
     };
   }, []);
 
@@ -6370,6 +6406,17 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       setCompareScenario(null);
     }
   }, [compareScenario, scenarioGroups, selectedScenario]);
+
+  const showHubLinkNotice = useMemo(() => {
+    if (hubNoticeDismissed) return false;
+    if (!hubSyncOverview) return false;
+    const accountLabel = hubSyncOverview.accountLabel?.trim() ?? "";
+    const linked =
+      accountLabel.length > 0
+      || hubSyncOverview.configured
+      || hubSyncOverview.enabled;
+    return !linked;
+  }, [hubNoticeDismissed, hubSyncOverview]);
 
   return (
     <div
@@ -6734,6 +6781,49 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
 
       {/* ── Main panel ── */}
         <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          {showHubLinkNotice && (
+            <div
+              style={{
+                marginBottom: 18,
+                borderRadius: 12,
+                border: `1px solid ${C.accentBorder}`,
+                background: "linear-gradient(135deg, rgba(0,245,160,0.10), rgba(0,180,255,0.05))",
+                padding: "14px 16px",
+                display: "flex",
+                alignItems: "flex-start",
+                justifyContent: "space-between",
+                gap: 16,
+              }}
+            >
+              <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                <div
+                  style={{
+                    fontSize: 10,
+                    color: C.accent,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                    fontWeight: 700,
+                  }}
+                >
+                  AimMod Hub
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>
+                  Link your AimMod Hub account
+                </div>
+                <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.65, maxWidth: 780 }}>
+                  Sync your runs to unlock your web profile, scenario pages, search, and shared practice history across devices.
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                <Btn size="sm" variant="primary" onClick={() => setRootMode("settings")}>
+                  Connect
+                </Btn>
+                <Btn size="sm" variant="ghost" onClick={() => setHubNoticeDismissed(true)}>
+                  Dismiss
+                </Btn>
+              </div>
+            </div>
+          )}
           <div
             style={{
               display: "flex",

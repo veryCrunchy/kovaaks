@@ -225,6 +225,50 @@ pub fn get_recent_scenarios(app: &AppHandle, limit: usize) -> Vec<RecentScenario
     }
 }
 
+pub fn get_pending_hub_upload_page(
+    app: &AppHandle,
+    offset: usize,
+    limit: usize,
+) -> SessionHistoryPage {
+    match try_get_pending_hub_upload_page(app, offset, limit) {
+        Ok(page) => page,
+        Err(error) => {
+            log::warn!("session_store: pending hub upload read error: {error:?}");
+            SessionHistoryPage {
+                records: vec![],
+                total: 0,
+                offset,
+                limit,
+                has_more: false,
+            }
+        }
+    }
+}
+
+pub fn mark_session_hub_uploaded(app: &AppHandle, session_id: &str) {
+    if let Err(error) = try_mark_session_hub_uploaded(app, session_id) {
+        log::warn!(
+            "session_store: could not mark hub upload complete for {}: {error:?}",
+            session_id
+        );
+    }
+}
+
+pub fn mark_session_hub_upload_failed(app: &AppHandle, session_id: &str, error_message: &str) {
+    if let Err(error) = try_mark_session_hub_upload_failed(app, session_id, error_message) {
+        log::warn!(
+            "session_store: could not mark hub upload failure for {}: {error:?}",
+            session_id
+        );
+    }
+}
+
+pub fn reset_all_hub_upload_marks(app: &AppHandle) {
+    if let Err(error) = try_reset_all_hub_upload_marks(app) {
+        log::warn!("session_store: could not reset hub upload marks: {error:?}");
+    }
+}
+
 pub fn get_personal_best_for_scenario(app: &AppHandle, scenario_name: &str) -> Option<u32> {
     match try_get_personal_best_for_scenario(app, scenario_name) {
         Ok(score) => score,
@@ -380,6 +424,26 @@ fn try_get_session_page(
     let total = count_sessions(&conn)?;
     let limit = limit.max(1);
     let records = query_sessions(&conn, offset, limit)?;
+    let loaded = offset.saturating_add(records.len());
+
+    Ok(SessionHistoryPage {
+        records,
+        total,
+        offset,
+        limit,
+        has_more: loaded < total,
+    })
+}
+
+fn try_get_pending_hub_upload_page(
+    app: &AppHandle,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<SessionHistoryPage> {
+    let conn = crate::stats_db::connect(app)?;
+    let total = count_pending_hub_uploads(&conn)?;
+    let limit = limit.max(1);
+    let records = query_pending_hub_uploads(&conn, offset, limit)?;
     let loaded = offset.saturating_add(records.len());
 
     Ok(SessionHistoryPage {
@@ -665,6 +729,164 @@ fn query_sessions(
         sessions.push(row?);
     }
     Ok(sessions)
+}
+
+fn query_pending_hub_uploads(
+    conn: &Connection,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<Vec<SessionRecord>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            s.id,
+            s.scenario,
+            s.score,
+            s.accuracy,
+            s.kills,
+            s.deaths,
+            s.duration_secs,
+            s.avg_ttk,
+            s.damage_done,
+            s.timestamp,
+            s.smoothness_json AS legacy_smoothness_json,
+            s.stats_panel_json AS legacy_stats_panel_json,
+            s.shot_timing_json AS legacy_shot_timing_json,
+            s.has_replay,
+            sm.composite AS smoothness_composite,
+            sm.jitter AS smoothness_jitter,
+            sm.overshoot_rate AS smoothness_overshoot_rate,
+            sm.velocity_std AS smoothness_velocity_std,
+            sm.path_efficiency AS smoothness_path_efficiency,
+            sm.avg_speed AS smoothness_avg_speed,
+            sm.click_timing_cv AS smoothness_click_timing_cv,
+            sm.correction_ratio AS smoothness_correction_ratio,
+            sm.directional_bias AS smoothness_directional_bias,
+            sp.scenario_type AS stats_panel_scenario_type,
+            sp.scenario_subtype AS stats_panel_scenario_subtype,
+            sp.kills AS stats_panel_kills,
+            sp.avg_kps AS stats_panel_avg_kps,
+            sp.accuracy_pct AS stats_panel_accuracy_pct,
+            sp.total_damage AS stats_panel_total_damage,
+            sp.avg_ttk_ms AS stats_panel_avg_ttk_ms,
+            sp.best_ttk_ms AS stats_panel_best_ttk_ms,
+            sp.ttk_std_ms AS stats_panel_ttk_std_ms,
+            sp.accuracy_trend AS stats_panel_accuracy_trend,
+            st.paired_shot_hits AS shot_timing_paired_shot_hits,
+            st.avg_fire_to_hit_ms AS shot_timing_avg_fire_to_hit_ms,
+            st.p90_fire_to_hit_ms AS shot_timing_p90_fire_to_hit_ms,
+            st.avg_shots_to_hit AS shot_timing_avg_shots_to_hit,
+            st.corrective_shot_ratio AS shot_timing_corrective_shot_ratio
+        FROM sessions s
+        LEFT JOIN session_smoothness sm ON sm.session_id = s.id
+        LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
+        LEFT JOIN session_shot_timings st ON st.session_id = s.id
+        WHERE s.hub_uploaded_at_unix_ms IS NULL
+          AND (
+                s.hub_upload_next_retry_at_unix_ms IS NULL
+                OR s.hub_upload_next_retry_at_unix_ms <= CAST((julianday('now') - 2440587.5) * 86400000 AS INTEGER)
+              )
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ?1 OFFSET ?2
+        ",
+    )?;
+    let rows = stmt.query_map(params![limit as i64, offset as i64], row_to_session_record)?;
+    let mut sessions = Vec::with_capacity(limit.min(DEFAULT_PAGE_LIMIT));
+    for row in rows {
+        sessions.push(row?);
+    }
+    Ok(sessions)
+}
+
+fn count_pending_hub_uploads(conn: &Connection) -> anyhow::Result<usize> {
+    let count = conn.query_row(
+        "SELECT COUNT(*) FROM sessions WHERE hub_uploaded_at_unix_ms IS NULL",
+        [],
+        |row| row.get::<_, i64>(0),
+    )?;
+    Ok(count.max(0) as usize)
+}
+
+fn try_mark_session_hub_uploaded(app: &AppHandle, session_id: &str) -> anyhow::Result<()> {
+    let conn = crate::stats_db::connect(app)?;
+    let uploaded_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    conn.execute(
+        "
+        UPDATE sessions
+        SET hub_uploaded_at_unix_ms = ?2,
+            hub_upload_retry_count = 0,
+            hub_upload_next_retry_at_unix_ms = NULL,
+            hub_upload_last_error = NULL
+        WHERE id = ?1
+        ",
+        params![session_id, uploaded_at_unix_ms],
+    )?;
+    Ok(())
+}
+
+fn try_mark_session_hub_upload_failed(
+    app: &AppHandle,
+    session_id: &str,
+    error_message: &str,
+) -> anyhow::Result<()> {
+    let conn = crate::stats_db::connect(app)?;
+    let retry_count = conn
+        .query_row(
+            "
+            SELECT COALESCE(hub_upload_retry_count, 0)
+            FROM sessions
+            WHERE id = ?1
+            ",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        .max(0) as u32
+        + 1;
+    let shift = retry_count.saturating_sub(1).min(8);
+    let delay_ms = (60_000u64)
+        .saturating_mul(1u64 << shift)
+        .min(6 * 60 * 60 * 1000);
+    let next_retry_at_unix_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .saturating_add(delay_ms as u128) as i64;
+    let truncated_error: String = error_message.chars().take(512).collect();
+    conn.execute(
+        "
+        UPDATE sessions
+        SET hub_upload_retry_count = ?2,
+            hub_upload_next_retry_at_unix_ms = ?3,
+            hub_upload_last_error = ?4
+        WHERE id = ?1
+        ",
+        params![
+            session_id,
+            retry_count as i64,
+            next_retry_at_unix_ms,
+            truncated_error,
+        ],
+    )?;
+    Ok(())
+}
+
+fn try_reset_all_hub_upload_marks(app: &AppHandle) -> anyhow::Result<()> {
+    let conn = crate::stats_db::connect(app)?;
+    conn.execute(
+        "
+        UPDATE sessions
+        SET hub_uploaded_at_unix_ms = NULL,
+            hub_upload_retry_count = 0,
+            hub_upload_next_retry_at_unix_ms = NULL,
+            hub_upload_last_error = NULL
+        ",
+        [],
+    )?;
+    Ok(())
 }
 
 fn try_backfill_session_snapshots(app: &AppHandle) -> anyhow::Result<()> {

@@ -3,6 +3,7 @@ use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://api.aimmod.app";
 
 /// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -74,6 +75,18 @@ pub struct AppSettings {
     /// Whether the post-session overview card is shown after each run.
     #[serde(default = "default_true")]
     pub hud_post_session_visible: bool,
+    /// Whether AimMod Hub sync is enabled.
+    #[serde(default)]
+    pub hub_sync_enabled: bool,
+    /// Base URL for the AimMod Hub API.
+    #[serde(default = "default_hub_api_base_url")]
+    pub hub_api_base_url: String,
+    /// Upload credential created automatically by AimMod Hub device linking.
+    #[serde(default)]
+    pub hub_upload_token: String,
+    /// Display label for the linked AimMod Hub account.
+    #[serde(default)]
+    pub hub_account_label: String,
 }
 
 impl Default for AppSettings {
@@ -95,6 +108,10 @@ impl Default for AppSettings {
             hud_stats_visible: true,
             hud_feedback_visible: true,
             hud_post_session_visible: true,
+            hub_sync_enabled: false,
+            hub_api_base_url: default_hub_api_base_url(),
+            hub_upload_token: String::new(),
+            hub_account_label: String::new(),
         }
     }
 }
@@ -108,7 +125,12 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
     let store = app.store(STORE_PATH)?;
     if let Some(val) = store.get(STORE_KEY) {
         match serde_json::from_value::<AppSettings>(val.clone()) {
-            Ok(settings) => return Ok(settings),
+            Ok(mut settings) => {
+                if settings.hub_api_base_url.trim().is_empty() {
+                    settings.hub_api_base_url = default_hub_api_base_url();
+                }
+                return Ok(settings);
+            }
             Err(e) => {
                 log::error!("Failed to deserialize settings: {e}");
                 log::error!(
@@ -140,6 +162,9 @@ fn default_true() -> bool {
 }
 fn default_feedback_verbosity() -> u8 {
     1
+}
+fn default_hub_api_base_url() -> String {
+    DEFAULT_HUB_API_BASE_URL.to_string()
 }
 
 const KOVAAKS_STATS_SUFFIX: &str = r"steamapps\common\FPSAimTrainer\FPSAimTrainer\stats";

@@ -300,9 +300,9 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 avg_ttk: result.avg_ttk,
                                 damage_done: result.damage_done,
                                 timestamp: result.timestamp.clone(),
-                                smoothness,
+                                smoothness: smoothness.clone(),
                                 stats_panel: stats_panel.clone(),
-                                shot_timing,
+                                shot_timing: shot_timing.clone(),
                                 has_replay: false,
                             };
                             crate::session_store::add_session(app, record);
@@ -369,6 +369,17 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 SessionCompletePayload {
                                     result: result.clone(),
                                     stats_panel: stats_panel.clone(),
+                                    run_snapshot: run_snapshot.clone(),
+                                },
+                            );
+                            crate::hub_sync::queue_session_upload(
+                                app,
+                                crate::hub_sync::SessionUploadInput {
+                                    session_id: session_id.clone(),
+                                    result: result.clone(),
+                                    smoothness: smoothness.clone(),
+                                    stats_panel: stats_panel.clone(),
+                                    shot_timing: shot_timing.clone(),
                                     run_snapshot: run_snapshot.clone(),
                                 },
                             );

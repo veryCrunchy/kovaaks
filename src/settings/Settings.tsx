@@ -10,6 +10,7 @@ import { C } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
+const DEFAULT_HUB_API_BASE_URL = "https://api.aimmod.app";
 
 type Tab = "general" | "friends" | "stats";
 
@@ -293,6 +294,10 @@ export function Settings({
           <GeneralSettings
             settings={settings}
             onChange={setSettings}
+            onCommittedSettings={(next) => {
+              setSettings(next);
+              setLoadedSettings(next);
+            }}
             onSave={handleSave}
             onReset={handleReset}
             onRevert={handleRevert}
@@ -322,6 +327,7 @@ export function Settings({
 interface GeneralSettingsProps {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
+  onCommittedSettings: (s: AppSettings) => void;
   onSave: () => void;
   onReset: () => void;
   onRevert: () => void;
@@ -333,9 +339,40 @@ interface GeneralSettingsProps {
   confirmReset: boolean;
 }
 
+interface HubSyncStatus {
+  syncInProgress: boolean;
+  pendingCount: number;
+  lastSuccessAtUnixMs: number | null;
+  lastError: string | null;
+  lastErrorAtUnixMs: number | null;
+  lastUploadedSessionId: string | null;
+}
+
+interface HubSyncOverview {
+  configured: boolean;
+  enabled: boolean;
+  accountLabel: string | null;
+  status: HubSyncStatus;
+}
+
+interface HubDeviceLinkSession {
+  deviceCode: string;
+  userCode: string;
+  verificationUri: string;
+  verificationUriComplete: string;
+  expiresInSecs: number;
+  intervalSecs: number;
+}
+
+interface HubDeviceLinkPollStatus {
+  status: string;
+  accountLabel: string | null;
+}
+
 function GeneralSettings({
   settings,
   onChange,
+  onCommittedSettings,
   onSave,
   onReset,
   onRevert,
@@ -349,13 +386,89 @@ function GeneralSettings({
   const [monitors,      setMonitors]      = useState<MonitorInfo[]>([]);
   const [detectingUser, setDetectingUser] = useState(false);
   const [detectError,   setDetectError]   = useState<string | null>(null);
+  const [hubStatus, setHubStatus] = useState<HubSyncOverview | null>(null);
+  const [hubLinkSession, setHubLinkSession] = useState<HubDeviceLinkSession | null>(null);
+  const [hubLinkBusy, setHubLinkBusy] = useState(false);
+  const [hubResyncBusy, setHubResyncBusy] = useState(false);
+  const [hubLinkError, setHubLinkError] = useState<string | null>(null);
+  const [showHubApiField, setShowHubApiField] = useState(false);
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onChange({ ...settings, [key]: value });
 
+  const refreshHubStatus = useCallback(async () => {
+    try {
+      const next = await invoke<HubSyncOverview>("get_hub_sync_status");
+      setHubStatus(next);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
   useEffect(() => {
     invoke<MonitorInfo[]>("get_monitors").then(setMonitors).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    const current = settings.hub_api_base_url.trim();
+    setShowHubApiField(Boolean(current && current !== DEFAULT_HUB_API_BASE_URL));
+  }, [settings.hub_api_base_url]);
+
+  useEffect(() => {
+    void refreshHubStatus();
+    const interval = window.setInterval(() => {
+      void refreshHubStatus();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [refreshHubStatus]);
+
+  useEffect(() => {
+    if (!hubLinkSession) return;
+
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const result = await invoke<HubDeviceLinkPollStatus>("hub_poll_device_link", {
+          baseUrl: settings.hub_api_base_url,
+          deviceCode: hubLinkSession.deviceCode,
+        });
+        if (cancelled) return;
+
+        if (result.status === "approved") {
+          const latest = await invoke<AppSettings>("get_settings");
+          if (cancelled) return;
+          onCommittedSettings(latest);
+          setHubLinkSession(null);
+          setHubLinkBusy(false);
+          setHubLinkError(null);
+          await refreshHubStatus();
+          return;
+        }
+        if (result.status === "expired") {
+          setHubLinkSession(null);
+          setHubLinkBusy(false);
+          setHubLinkError("This connection code expired. Start the link again from AimMod.");
+          await refreshHubStatus();
+        }
+      } catch (err) {
+        if (cancelled) return;
+        setHubLinkSession(null);
+        setHubLinkBusy(false);
+        setHubLinkError(err instanceof Error ? err.message : String(err));
+        await refreshHubStatus();
+      }
+    };
+
+    void poll();
+    const interval = window.setInterval(() => {
+      void poll();
+    }, Math.max(hubLinkSession.intervalSecs, 2) * 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [hubLinkSession, onChange, refreshHubStatus, settings.hub_api_base_url]);
 
   const handleDetectSteamUser = async () => {
     setDetectingUser(true);
@@ -379,6 +492,52 @@ function GeneralSettings({
     update("monitor_index", index);
     await invoke("set_overlay_monitor", { index }).catch(console.error);
   };
+
+  const handleStartHubLink = async () => {
+    setHubLinkBusy(true);
+    setHubLinkError(null);
+    try {
+      const session = await invoke<HubDeviceLinkSession>("hub_start_device_link", {
+        baseUrl: settings.hub_api_base_url,
+      });
+      setHubLinkSession(session);
+    } catch (err) {
+      setHubLinkBusy(false);
+      setHubLinkError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleDisconnectHub = async () => {
+    setHubLinkBusy(true);
+    setHubLinkError(null);
+    try {
+      await invoke("hub_disconnect");
+      const latest = await invoke<AppSettings>("get_settings");
+      onCommittedSettings(latest);
+      setHubLinkSession(null);
+      await refreshHubStatus();
+    } catch (err) {
+      setHubLinkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setHubLinkBusy(false);
+    }
+  };
+
+  const handleForceHubResync = async () => {
+    setHubResyncBusy(true);
+    setHubLinkError(null);
+    try {
+      await invoke("hub_force_full_resync");
+      await refreshHubStatus();
+    } catch (err) {
+      setHubLinkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setHubResyncBusy(false);
+    }
+  };
+
+  const formatHubTime = (unixMs: number | null) =>
+    unixMs ? new Date(unixMs).toLocaleString() : "Not yet";
 
   return (
     <div style={{ padding: "28px 32px", maxWidth: 640 }}>
@@ -605,6 +764,149 @@ function GeneralSettings({
               {settings.overlay_visible ? "Visible" : "Hidden"}
             </span>
           </div>
+        </FieldGroup>
+
+        {/* ── AimMod Hub ───────────────────────────────────────────── */}
+        <FieldGroup
+          label="AimMod Hub Sync"
+          description="Link the desktop app to your AimMod Hub account and keep local runs synced automatically."
+        >
+          <GlassCard style={{ padding: "12px 14px" }}>
+            <div className="flex flex-col gap-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm" style={{ color: C.textSub }}>Enable authenticated sync</span>
+                <Toggle
+                  checked={settings.hub_sync_enabled}
+                  onChange={(v) => update("hub_sync_enabled", v)}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs" style={{ color: C.textFaint }}>Hub API</span>
+                    <span className="text-xs" style={{ color: C.textSub }}>
+                      {(settings.hub_api_base_url || DEFAULT_HUB_API_BASE_URL).replace(/^https?:\/\//, "")}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowHubApiField((value) => !value)}
+                    className="am-btn am-btn-ghost"
+                    style={{
+                      padding: "4px 8px",
+                      minHeight: 0,
+                      fontSize: 10,
+                      opacity: 0.72,
+                    }}
+                  >
+                    {showHubApiField ? "Hide" : "Change"}
+                  </button>
+                </div>
+                {showHubApiField ? (
+                  <input
+                    type="text"
+                    value={settings.hub_api_base_url || DEFAULT_HUB_API_BASE_URL}
+                    onChange={(e) => update("hub_api_base_url", e.target.value)}
+                    placeholder={DEFAULT_HUB_API_BASE_URL}
+                    className="am-input w-full font-mono"
+                  />
+                ) : null}
+              </div>
+
+              <div
+                style={{
+                  padding: "10px 12px",
+                  borderRadius: 10,
+                  background: "rgba(255,255,255,0.03)",
+                  border: `1px solid ${C.borderSub}`,
+                }}
+              >
+                <div className="flex items-start justify-between gap-4 flex-wrap">
+                  <div className="flex flex-col gap-1">
+                    <span className="text-xs" style={{ color: C.textFaint }}>Linked account</span>
+                    <span className="text-sm" style={{ color: C.text }}>
+                      {settings.hub_account_label?.trim() || hubStatus?.accountLabel || "Not connected"}
+                    </span>
+                  </div>
+                  <div className="flex gap-2 flex-wrap">
+                    {settings.hub_upload_token.trim() ? (
+                      <>
+                        <Btn
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleForceHubResync}
+                          disabled={hubLinkBusy || hubResyncBusy}
+                        >
+                          {hubResyncBusy ? "Queueing resync…" : "Resync all runs"}
+                        </Btn>
+                        <Btn variant="ghost" size="sm" onClick={handleDisconnectHub} disabled={hubLinkBusy || hubResyncBusy}>
+                          Disconnect
+                        </Btn>
+                      </>
+                    ) : (
+                      <Btn
+                        variant="primary"
+                        size="sm"
+                        onClick={handleStartHubLink}
+                        disabled={hubLinkBusy || hubResyncBusy || !settings.hub_api_base_url.trim()}
+                      >
+                        {hubLinkBusy ? "Opening browser…" : "Connect account"}
+                      </Btn>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {hubLinkSession ? (
+                <div
+                  style={{
+                    padding: "10px 12px",
+                    borderRadius: 10,
+                    background: `${C.accent}10`,
+                    border: `1px solid ${C.accentBorder}`,
+                  }}
+                >
+                  <div className="text-xs mb-1" style={{ color: C.textFaint }}>Connection code</div>
+                  <div className="text-lg tabular-nums" style={{ color: C.accent, letterSpacing: "0.12em" }}>
+                    {hubLinkSession.userCode}
+                  </div>
+                  <p className="text-xs mt-2 leading-relaxed" style={{ color: C.textFaint }}>
+                    Your browser was opened to AimMod Hub. Sign in there if needed, approve this device, and AimMod will finish linking automatically.
+                  </p>
+                </div>
+              ) : null}
+
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
+                <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                  <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Pending uploads</div>
+                  <div className="text-lg mt-1" style={{ color: C.text }}>{hubStatus?.status.pendingCount ?? 0}</div>
+                </div>
+                <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                  <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Last successful sync</div>
+                  <div className="text-xs mt-1 leading-relaxed" style={{ color: C.textSub }}>
+                    {formatHubTime(hubStatus?.status.lastSuccessAtUnixMs ?? null)}
+                  </div>
+                </div>
+              </div>
+
+              {hubStatus?.status.lastError ? (
+                <p className="text-xs leading-relaxed" style={{ color: C.warn }}>
+                  Last sync issue: {hubStatus.status.lastError}
+                </p>
+              ) : null}
+
+              {hubLinkError ? (
+                <p className="text-xs leading-relaxed" style={{ color: C.danger }}>
+                  {hubLinkError}
+                </p>
+              ) : null}
+
+              <p className="text-xs leading-relaxed" style={{ color: C.textFaint }}>
+                AimMod keeps track of which local runs have already been uploaded, retries missing ones automatically, and can requeue everything if the hub schema changes later.
+              </p>
+            </div>
+          </GlassCard>
         </FieldGroup>
 
         {/* ── HUD visibility ────────────────────────────────────────── */}

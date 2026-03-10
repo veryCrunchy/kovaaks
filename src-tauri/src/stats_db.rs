@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 9;
+const SCHEMA_VERSION: i32 = 11;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -694,6 +694,40 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
                 "ALTER TABLE sessions ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unknown';",
                 "ALTER TABLE sessions ADD COLUMN integrity_failure_codes TEXT;",
                 "ALTER TABLE sessions ADD COLUMN integrity_checked_at_unix_ms INTEGER;",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 10 {
+        run_schema_migration(conn, 10, |tx| {
+            for statement in [
+                "ALTER TABLE sessions ADD COLUMN hub_uploaded_at_unix_ms INTEGER;",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_hub_uploaded_at ON sessions(hub_uploaded_at_unix_ms, timestamp);",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 11 {
+        run_schema_migration(conn, 11, |tx| {
+            for statement in [
+                "ALTER TABLE sessions ADD COLUMN hub_upload_retry_count INTEGER NOT NULL DEFAULT 0;",
+                "ALTER TABLE sessions ADD COLUMN hub_upload_next_retry_at_unix_ms INTEGER;",
+                "ALTER TABLE sessions ADD COLUMN hub_upload_last_error TEXT;",
+                "CREATE INDEX IF NOT EXISTS idx_sessions_hub_upload_retry ON sessions(hub_uploaded_at_unix_ms, hub_upload_next_retry_at_unix_ms, timestamp);",
             ] {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {

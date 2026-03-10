@@ -34,6 +34,14 @@ export interface AppSettings {
   hud_feedback_visible: boolean;
   /** Whether the post-session overview card is shown after each run. */
   hud_post_session_visible: boolean;
+  /** Whether authenticated AimMod Hub sync is enabled. */
+  hub_sync_enabled: boolean;
+  /** Base URL for the AimMod Hub API. */
+  hub_api_base_url: string;
+  /** Upload credential issued automatically by AimMod Hub device linking. */
+  hub_upload_token: string;
+  /** Display label for the linked AimMod Hub account. */
+  hub_account_label: string;
 }
 
 export interface MonitorInfo {

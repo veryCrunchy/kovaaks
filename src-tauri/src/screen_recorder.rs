@@ -9,14 +9,16 @@ use once_cell::sync::Lazy;
 use crate::settings::RegionRect;
 
 #[cfg(target_os = "windows")]
-use windows::Win32::Foundation::{HWND, LPARAM};
+use dxgi_capture_rs::{CaptureError as DxgiCaptureError, DXGIManager};
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Gdi::{
-    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
-};
+use windows::Win32::Foundation::{HWND, LPARAM};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Dxgi::{
     CreateDXGIFactory1, DXGI_ERROR_NOT_FOUND, DXGI_OUTPUT_DESC, IDXGIAdapter1, IDXGIFactory1,
+};
+#[cfg(target_os = "windows")]
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -25,8 +27,6 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 #[cfg(target_os = "windows")]
 use windows::core::BOOL;
-#[cfg(target_os = "windows")]
-use dxgi_capture_rs::{CaptureError as DxgiCaptureError, DXGIManager};
 
 /// Screen recorder: captures a low-resolution image snapshot of the game's
 /// centre region during active sessions for post-session replay underlay.
@@ -421,12 +421,12 @@ fn dxgi_source_index_for_monitor(target_monitor_rect: RegionRect) -> anyhow::Res
                 Err(error) => {
                     return Err(anyhow::anyhow!(
                         "EnumOutputs(adapter={adapter_index}, output={output_index}): {error}"
-                    ))
+                    ));
                 }
             };
 
-            let desc: DXGI_OUTPUT_DESC =
-                unsafe { output.GetDesc() }.map_err(|e| anyhow::anyhow!("IDXGIOutput::GetDesc: {e}"))?;
+            let desc: DXGI_OUTPUT_DESC = unsafe { output.GetDesc() }
+                .map_err(|e| anyhow::anyhow!("IDXGIOutput::GetDesc: {e}"))?;
             if !desc.AttachedToDesktop.as_bool() {
                 continue;
             }
@@ -435,7 +435,8 @@ fn dxgi_source_index_for_monitor(target_monitor_rect: RegionRect) -> anyhow::Res
                 x: desc.DesktopCoordinates.left,
                 y: desc.DesktopCoordinates.top,
                 width: (desc.DesktopCoordinates.right - desc.DesktopCoordinates.left).max(0) as u32,
-                height: (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).max(0) as u32,
+                height: (desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top).max(0)
+                    as u32,
             };
             if rect == target_monitor_rect {
                 return Ok(output_match_index);
@@ -529,7 +530,10 @@ fn queue_dxgi_frame(
         width: geometry.game_rect.width.min(bounds.width),
         height: geometry.game_rect.height.min(bounds.height),
     };
-    anyhow::ensure!(game_bounds.width > 0 && game_bounds.height > 0, "game bounds are empty");
+    anyhow::ensure!(
+        game_bounds.width > 0 && game_bounds.height > 0,
+        "game bounds are empty"
+    );
 
     let rect = compute_center_capture_rect(&game_bounds);
     {
@@ -550,9 +554,16 @@ fn queue_dxgi_frame(
 
     let start_x = rect.x.max(0) as usize;
     let start_y = rect.y.max(0) as usize;
-    let end_x = start_x.saturating_add(rect.width as usize).min(frame_width as usize);
-    let end_y = start_y.saturating_add(rect.height as usize).min(frame_height as usize);
-    anyhow::ensure!(end_x > start_x && end_y > start_y, "capture crop is outside the frame");
+    let end_x = start_x
+        .saturating_add(rect.width as usize)
+        .min(frame_width as usize);
+    let end_y = start_y
+        .saturating_add(rect.height as usize)
+        .min(frame_height as usize);
+    anyhow::ensure!(
+        end_x > start_x && end_y > start_y,
+        "capture crop is outside the frame"
+    );
 
     let cropped_width = end_x - start_x;
     let cropped_height = end_y - start_y;

@@ -240,7 +240,8 @@ fn get_is_debug_build() -> bool {
 
 #[tauri::command]
 fn toggle_layout_huds(app: AppHandle) -> Result<(), String> {
-    app.emit("toggle-layout-huds", ()).map_err(|e| e.to_string())
+    app.emit("toggle-layout-huds", ())
+        .map_err(|e| e.to_string())
 }
 
 fn deploy_and_inject_ue4ss(app: &AppHandle, stats_dir: &str) -> Result<(), String> {
@@ -363,6 +364,7 @@ mod app_version;
 mod bridge;
 mod discord_rpc;
 mod file_watcher;
+mod hub_sync;
 mod kovaaks_api;
 mod logger;
 mod mouse_hook;
@@ -432,9 +434,9 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
 #[cfg(target_os = "windows")]
 fn configure_overlay_window(win: &tauri::WebviewWindow) {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE,
-        SWP_NOMOVE, SWP_NOSIZE, SWP_NOOWNERZORDER, SWP_NOZORDER, SetWindowLongW,
-        SetWindowPos, WS_EX_OVERLAPPEDWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+        GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos,
+        WS_EX_OVERLAPPEDWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
     };
 
     let _ = win.unmaximize();
@@ -608,6 +610,7 @@ fn save_settings(
     mouse_hook::set_dpi(new_settings.mouse_dpi);
     mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
+    hub_sync::queue_pending_session_sync(&app);
     let _ = app.emit("settings-changed", ());
     Ok(())
 }
@@ -624,6 +627,42 @@ fn reset_settings(state: tauri::State<AppState>, app: AppHandle) -> Result<AppSe
     mouse_hook::set_feedback_verbosity(defaults.live_feedback_verbosity);
     let _ = app.emit("settings-changed", ());
     Ok(defaults)
+}
+
+#[tauri::command]
+fn get_hub_sync_status(app: AppHandle) -> Result<hub_sync::HubSyncOverview, String> {
+    hub_sync::get_sync_overview(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn hub_start_device_link(
+    app: AppHandle,
+    base_url: Option<String>,
+) -> Result<hub_sync::HubDeviceLinkSession, String> {
+    hub_sync::start_device_link(&app, base_url)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn hub_poll_device_link(
+    app: AppHandle,
+    base_url: Option<String>,
+    device_code: String,
+) -> Result<hub_sync::HubDeviceLinkPollStatus, String> {
+    hub_sync::poll_device_link(&app, base_url, device_code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn hub_disconnect(app: AppHandle) -> Result<(), String> {
+    hub_sync::clear_linked_account(&app).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn hub_force_full_resync(app: AppHandle) -> Result<(), String> {
+    hub_sync::force_full_resync(&app).map_err(|e| e.to_string())
 }
 
 // ─── Friend / API commands ─────────────────────────────────────────────────────
@@ -1553,6 +1592,11 @@ pub fn run() {
             get_settings,
             save_settings,
             reset_settings,
+            get_hub_sync_status,
+            hub_start_device_link,
+            hub_poll_device_link,
+            hub_disconnect,
+            hub_force_full_resync,
             get_friends,
             add_friend,
             remove_friend,
@@ -1641,6 +1685,16 @@ pub fn run() {
             });
 
             session_store::initialize(app.handle());
+            hub_sync::queue_pending_session_sync(app.handle());
+            {
+                let app_handle = app.handle().clone();
+                let _ = std::thread::Builder::new()
+                    .name("hub-sync-pending".into())
+                    .spawn(move || loop {
+                        hub_sync::queue_pending_session_sync(&app_handle);
+                        std::thread::sleep(Duration::from_secs(300));
+                    });
+            }
             {
                 let app_handle = app.handle().clone();
                 let _ = std::thread::Builder::new()
