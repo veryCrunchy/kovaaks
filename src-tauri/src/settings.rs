@@ -3,7 +3,11 @@ use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
-pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.app";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://api.aimmod.app";
+pub const DEFAULT_REPLAY_CAPTURE_FPS: u32 = 24;
+pub const DEFAULT_REPLAY_KEEP_COUNT: u32 = 150;
+pub const DEFAULT_REPLAY_MEDIA_UPLOAD_MODE: &str = "favorites";
+pub const DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY: &str = "standard";
 
 /// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -87,6 +91,18 @@ pub struct AppSettings {
     /// Display label for the linked AimMod Hub account.
     #[serde(default)]
     pub hub_account_label: String,
+    /// Target replay capture framerate for recorded screen frames.
+    #[serde(default = "default_replay_capture_fps")]
+    pub replay_capture_fps: u32,
+    /// How many non-favorited replays to keep locally. Zero means unlimited.
+    #[serde(default = "default_replay_keep_count")]
+    pub replay_keep_count: u32,
+    /// Which replays should upload replay media to AimMod Hub.
+    #[serde(default = "default_replay_media_upload_mode")]
+    pub replay_media_upload_mode: String,
+    /// Replay media upload quality preset. Higher presets can later be gated by subscription tier.
+    #[serde(default = "default_replay_media_upload_quality")]
+    pub replay_media_upload_quality: String,
 }
 
 impl Default for AppSettings {
@@ -112,6 +128,10 @@ impl Default for AppSettings {
             hub_api_base_url: default_hub_api_base_url(),
             hub_upload_token: String::new(),
             hub_account_label: String::new(),
+            replay_capture_fps: default_replay_capture_fps(),
+            replay_keep_count: default_replay_keep_count(),
+            replay_media_upload_mode: default_replay_media_upload_mode(),
+            replay_media_upload_quality: default_replay_media_upload_quality(),
         }
     }
 }
@@ -129,6 +149,13 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
                 if settings.hub_api_base_url.trim().is_empty() {
                     settings.hub_api_base_url = default_hub_api_base_url();
                 }
+                if settings.replay_capture_fps == 0 {
+                    settings.replay_capture_fps = default_replay_capture_fps();
+                }
+                settings.replay_media_upload_mode =
+                    normalize_replay_media_upload_mode(&settings.replay_media_upload_mode);
+                settings.replay_media_upload_quality =
+                    normalize_replay_media_upload_quality(&settings.replay_media_upload_quality);
                 return Ok(settings);
             }
             Err(e) => {
@@ -165,6 +192,30 @@ fn default_feedback_verbosity() -> u8 {
 }
 fn default_hub_api_base_url() -> String {
     DEFAULT_HUB_API_BASE_URL.to_string()
+}
+fn default_replay_capture_fps() -> u32 {
+    DEFAULT_REPLAY_CAPTURE_FPS
+}
+fn default_replay_keep_count() -> u32 {
+    DEFAULT_REPLAY_KEEP_COUNT
+}
+fn default_replay_media_upload_mode() -> String {
+    DEFAULT_REPLAY_MEDIA_UPLOAD_MODE.to_string()
+}
+fn default_replay_media_upload_quality() -> String {
+    DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY.to_string()
+}
+fn normalize_replay_media_upload_mode(value: &str) -> String {
+    match value.trim() {
+        "off" | "favorites" | "favorites_and_pb" | "all" => value.trim().to_string(),
+        _ => default_replay_media_upload_mode(),
+    }
+}
+fn normalize_replay_media_upload_quality(value: &str) -> String {
+    match value.trim() {
+        "standard" | "high" | "ultra" => value.trim().to_string(),
+        _ => default_replay_media_upload_quality(),
+    }
 }
 
 const KOVAAKS_STATS_SUFFIX: &str = r"steamapps\common\FPSAimTrainer\FPSAimTrainer\stats";

@@ -10,7 +10,7 @@ import { C } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
-const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
+const DEFAULT_HUB_API_BASE_URL = "https://api.aimmod.app";
 
 type Tab = "general" | "friends" | "stats";
 
@@ -346,6 +346,10 @@ interface HubSyncStatus {
   lastError: string | null;
   lastErrorAtUnixMs: number | null;
   lastUploadedSessionId: string | null;
+  lastReplayMediaUploadAtUnixMs: number | null;
+  lastReplayMediaError: string | null;
+  lastReplayMediaErrorAtUnixMs: number | null;
+  lastReplayMediaSessionId: string | null;
 }
 
 interface HubSyncOverview {
@@ -367,6 +371,12 @@ interface HubDeviceLinkSession {
 interface HubDeviceLinkPollStatus {
   status: string;
   accountLabel: string | null;
+}
+
+interface FfmpegStatus {
+  available: boolean;
+  source: string;
+  path: string | null;
 }
 
 function GeneralSettings({
@@ -392,6 +402,9 @@ function GeneralSettings({
   const [hubResyncBusy, setHubResyncBusy] = useState(false);
   const [hubLinkError, setHubLinkError] = useState<string | null>(null);
   const [showHubApiField, setShowHubApiField] = useState(false);
+  const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus | null>(null);
+  const [ffmpegBusy, setFfmpegBusy] = useState(false);
+  const [ffmpegError, setFfmpegError] = useState<string | null>(null);
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onChange({ ...settings, [key]: value });
@@ -405,9 +418,22 @@ function GeneralSettings({
     }
   }, []);
 
+  const refreshFfmpegStatus = useCallback(async () => {
+    try {
+      const next = await invoke<FfmpegStatus>("get_ffmpeg_status");
+      setFfmpegStatus(next);
+    } catch (err) {
+      console.error(err);
+    }
+  }, []);
+
   useEffect(() => {
     invoke<MonitorInfo[]>("get_monitors").then(setMonitors).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    void refreshFfmpegStatus();
+  }, [refreshFfmpegStatus]);
 
   useEffect(() => {
     const current = settings.hub_api_base_url.trim();
@@ -536,8 +562,29 @@ function GeneralSettings({
     }
   };
 
+  const handleInstallFfmpeg = async () => {
+    setFfmpegBusy(true);
+    setFfmpegError(null);
+    try {
+      const next = await invoke<FfmpegStatus>("install_ffmpeg_for_replays");
+      setFfmpegStatus(next);
+    } catch (err) {
+      setFfmpegError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setFfmpegBusy(false);
+    }
+  };
+
   const formatHubTime = (unixMs: number | null) =>
     unixMs ? new Date(unixMs).toLocaleString() : "Not yet";
+
+  const ffmpegSourceLabel = ffmpegStatus?.source === "system"
+    ? "System install"
+    : ffmpegStatus?.source === "aimmod"
+      ? "Installed for AimMod"
+      : ffmpegStatus?.source === "custom"
+        ? "Custom path"
+        : "Not found";
 
   return (
     <div style={{ padding: "28px 32px", maxWidth: 640 }}>
@@ -766,6 +813,248 @@ function GeneralSettings({
           </div>
         </FieldGroup>
 
+        <FieldGroup
+          label="Replay Recording"
+          description="Control replay capture smoothness and how many local replays AimMod keeps before pruning older non-favorited ones."
+        >
+          <GlassCard style={{ padding: "12px 14px" }}>
+            <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Replay framerate</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[12, 24, 30, 60].map((preset) => {
+                      const active = settings.replay_capture_fps === preset;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => update("replay_capture_fps", preset)}
+                          className="am-btn tabular-nums"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {preset} fps
+                        </button>
+                      );
+                    })}
+                    <input
+                      type="number"
+                      min={6}
+                      max={60}
+                      step={1}
+                      value={settings.replay_capture_fps}
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        if (!Number.isNaN(next)) {
+                          update("replay_capture_fps", Math.min(60, Math.max(6, next)));
+                        }
+                      }}
+                      className="am-input w-24 tabular-nums"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Higher framerates make replay video smoother, but they also increase replay size and capture work.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Keep local replays</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[50, 150, 300, 0].map((preset) => {
+                      const active = settings.replay_keep_count === preset;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => update("replay_keep_count", preset)}
+                          className="am-btn tabular-nums"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {preset === 0 ? "Unlimited" : preset}
+                        </button>
+                      );
+                    })}
+                    <input
+                      type="number"
+                      min={0}
+                      max={5000}
+                      step={1}
+                      value={settings.replay_keep_count}
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        if (!Number.isNaN(next)) {
+                          update("replay_keep_count", Math.min(5000, Math.max(0, next)));
+                        }
+                      }}
+                      className="am-input w-24 tabular-nums"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Favorited replays are never pruned. Set this to 0 if you want AimMod to keep every replay locally.
+                </p>
+
+                <div
+                  style={{
+                    borderTop: `1px solid ${C.borderSub}`,
+                    paddingTop: 12,
+                  }}
+                  className="flex flex-col gap-3"
+                >
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-sm" style={{ color: C.textSub }}>ffmpeg for replay export</span>
+                      <span className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                        AimMod uses an existing system ffmpeg first. If none is available, it can install a local copy into AimMod&apos;s data folder.
+                      </span>
+                    </div>
+                    {!ffmpegStatus?.available || ffmpegStatus.source === "aimmod" ? (
+                      <Btn
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleInstallFfmpeg}
+                        disabled={ffmpegBusy}
+                      >
+                        {ffmpegBusy
+                          ? "Installing…"
+                          : ffmpegStatus?.available
+                            ? "Reinstall local copy"
+                            : "Install locally"}
+                      </Btn>
+                    ) : null}
+                  </div>
+
+                  <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
+                    <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                      <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Status</div>
+                      <div className="text-sm mt-1" style={{ color: ffmpegStatus?.available ? C.text : C.warn }}>
+                        {ffmpegStatus?.available ? ffmpegSourceLabel : "Missing"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                      <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Location</div>
+                      <div className="text-xs mt-1 leading-relaxed break-all" style={{ color: C.textSub }}>
+                        {ffmpegStatus?.path ?? "AimMod will install ffmpeg only if replay export or upload needs it."}
+                      </div>
+                    </div>
+                  </div>
+
+                  {ffmpegError ? (
+                    <p className="text-xs leading-relaxed" style={{ color: C.danger }}>
+                      {ffmpegError}
+                    </p>
+                  ) : null}
+                </div>
+
+                <div
+                  style={{
+                    borderTop: `1px solid ${C.borderSub}`,
+                    paddingTop: 12,
+                  }}
+                  className="flex flex-col gap-3"
+                >
+                  <div className="flex flex-col gap-1">
+                    <span className="text-sm" style={{ color: C.textSub }}>AimMod Hub replay media uploads</span>
+                    <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                      Summary data always stays lightweight. Replay video uploads can stay off, upload only favorites, or later use higher-quality tiers for Plus users.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3 xl:grid-cols-2">
+                    <div className="flex flex-col gap-2">
+                      <span className="text-xs" style={{ color: C.textFaint }}>What to upload</span>
+                      <div className="flex flex-wrap gap-2">
+                        {([
+                          ["off", "Off"],
+                          ["favorites", "Favorites"],
+                          ["favorites_and_pb", "Favorites + PBs"],
+                          ["all", "All"],
+                        ] as const).map(([value, label]) => {
+                          const active = settings.replay_media_upload_mode === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => update("replay_media_upload_mode", value)}
+                              className="am-btn am-btn-ghost"
+                              style={{
+                                padding: "6px 10px",
+                                minHeight: 0,
+                                fontSize: 11,
+                                background: active ? C.accentDim : C.surface,
+                                border: `1px solid ${active ? C.accentBorder : C.border}`,
+                                color: active ? C.accent : C.textMuted,
+                                fontFamily: "inherit",
+                              }}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col gap-2">
+                      <span className="text-xs" style={{ color: C.textFaint }}>Upload quality</span>
+                      <div className="flex flex-wrap gap-2">
+                        {([
+                          ["standard", "Standard"],
+                          ["high", "High"],
+                          ["ultra", "Ultra"],
+                        ] as const).map(([value, label]) => {
+                          const active = settings.replay_media_upload_quality === value;
+                          return (
+                            <button
+                              key={value}
+                              type="button"
+                              onClick={() => update("replay_media_upload_quality", value)}
+                              className="am-btn am-btn-ghost"
+                              style={{
+                                padding: "6px 10px",
+                                minHeight: 0,
+                                fontSize: 11,
+                                background: active ? C.accentDim : C.surface,
+                                border: `1px solid ${active ? C.accentBorder : C.border}`,
+                                color: active ? C.accent : C.textMuted,
+                                fontFamily: "inherit",
+                              }}
+                            >
+                              {label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                      <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                        Higher quality means bigger files. AimMod can later unlock higher presets automatically for Plus subscriptions.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </GlassCard>
+        </FieldGroup>
+
         {/* ── AimMod Hub ───────────────────────────────────────────── */}
         <FieldGroup
           label="AimMod Hub Sync"
@@ -888,11 +1177,23 @@ function GeneralSettings({
                     {formatHubTime(hubStatus?.status.lastSuccessAtUnixMs ?? null)}
                   </div>
                 </div>
+                <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                  <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Last replay upload</div>
+                  <div className="text-xs mt-1 leading-relaxed" style={{ color: C.textSub }}>
+                    {formatHubTime(hubStatus?.status.lastReplayMediaUploadAtUnixMs ?? null)}
+                  </div>
+                </div>
               </div>
 
               {hubStatus?.status.lastError ? (
                 <p className="text-xs leading-relaxed" style={{ color: C.warn }}>
                   Last sync issue: {hubStatus.status.lastError}
+                </p>
+              ) : null}
+
+              {hubStatus?.status.lastReplayMediaError ? (
+                <p className="text-xs leading-relaxed" style={{ color: C.warn }}>
+                  Last replay upload issue: {hubStatus.status.lastReplayMediaError}
                 </p>
               ) : null}
 

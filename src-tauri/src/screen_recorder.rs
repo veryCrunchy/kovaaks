@@ -69,7 +69,6 @@ struct CaptureTargetGeometry {
 
 // ─── Config ─────────────────────────────────────────────────────────────────────
 
-const FPS: u64 = 24;
 /// Cap at 4 320 frames ≈ 3-minute session at 24 fps.
 const MAX_FRAMES: usize = 4_320;
 /// Keep a short queue of completed session frame buffers so a fast restart does
@@ -85,6 +84,8 @@ const JPEG_QUALITY: u8 = 65;
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static PAUSED: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
+static REPLAY_CAPTURE_FPS: AtomicU64 =
+    AtomicU64::new(crate::settings::DEFAULT_REPLAY_CAPTURE_FPS as u64);
 static FRAMES: Lazy<Mutex<Vec<ScreenFrame>>> = Lazy::new(|| Mutex::new(Vec::new()));
 static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<CompletedFrameCapture>>> =
     Lazy::new(|| Mutex::new(VecDeque::new()));
@@ -108,6 +109,15 @@ static CAPTURE_WORKER: Lazy<Mutex<Option<std::thread::JoinHandle<()>>>> =
 /// last logged rect and force a fresh capture-rect log on the next session.
 pub fn update_monitor_rect(_monitor: &RegionRect) {
     *LAST_CAPTURE_RECT.lock().unwrap() = None;
+}
+
+pub fn set_replay_capture_fps(fps: u32) {
+    let clamped = fps.clamp(6, 60).max(1);
+    REPLAY_CAPTURE_FPS.store(clamped as u64, Ordering::SeqCst);
+}
+
+pub fn replay_capture_fps() -> u32 {
+    REPLAY_CAPTURE_FPS.load(Ordering::SeqCst).max(1) as u32
 }
 
 /// Start frame capture for a new session, sharing the caller's `session_start`
@@ -289,7 +299,8 @@ fn start_capture_backend(generation: u64) {
                                 .lock()
                                 .unwrap()
                                 .map_or(0, |t| t.elapsed().as_millis() as u64);
-                            let min_interval_ms = (1000 / FPS).max(1);
+                            let min_interval_ms =
+                                (1000 / replay_capture_fps() as u64).max(1);
                             if last_frame_ts_ms != 0
                                 && ts_ms.saturating_sub(last_frame_ts_ms) < min_interval_ms
                             {
@@ -605,7 +616,7 @@ fn start_encoder_worker(generation: u64) {
             while let Ok(frame) = rx.recv() {
                 if let Some(encoded) = encode_pending_frame(frame) {
                     let mut frames = FRAMES.lock().unwrap();
-                    if frames.len() < MAX_FRAMES {
+                    if frames.len() < max_frames() {
                         frames.push(encoded);
                     }
                 }
@@ -646,6 +657,10 @@ fn queue_completed_frames(ended_at_unix_ms: u64, reason: &str) -> usize {
         completed.len()
     );
     frame_count
+}
+
+fn max_frames() -> usize {
+    (replay_capture_fps() as usize).saturating_mul(180).max(MAX_FRAMES)
 }
 
 // ─── Replay merge helpers ──────────────────────────────────────────────────────

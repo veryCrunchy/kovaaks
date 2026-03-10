@@ -42,6 +42,14 @@ export interface AppSettings {
   hub_upload_token: string;
   /** Display label for the linked AimMod Hub account. */
   hub_account_label: string;
+  /** Target replay capture framerate for recorded screen frames. */
+  replay_capture_fps: number;
+  /** How many non-favorited replays to keep locally. Zero means unlimited. */
+  replay_keep_count: number;
+  /** Which replays should upload replay media to AimMod Hub. */
+  replay_media_upload_mode: "off" | "favorites" | "favorites_and_pb" | "all";
+  /** Replay media upload quality preset. Higher presets can later be reserved for Plus tiers. */
+  replay_media_upload_quality: "standard" | "high" | "ultra";
 }
 
 export interface MonitorInfo {

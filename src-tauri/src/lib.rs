@@ -621,6 +621,9 @@ fn save_settings(
     mouse_hook::set_dpi(new_settings.mouse_dpi);
     mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
+    screen_recorder::set_replay_capture_fps(new_settings.replay_capture_fps);
+    replay_store::apply_replay_retention(&app, Some(new_settings.replay_keep_count as usize), None);
+    replay_store::maybe_install_ffmpeg_for_replay_media(app.clone(), new_settings.clone());
     hub_sync::queue_pending_session_sync(&app);
     let _ = app.emit("settings-changed", ());
     Ok(())
@@ -636,6 +639,8 @@ fn reset_settings(state: tauri::State<AppState>, app: AppHandle) -> Result<AppSe
     mouse_hook::set_dpi(defaults.mouse_dpi);
     mouse_hook::set_feedback_enabled(defaults.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(defaults.live_feedback_verbosity);
+    screen_recorder::set_replay_capture_fps(defaults.replay_capture_fps);
+    replay_store::apply_replay_retention(&app, Some(defaults.replay_keep_count as usize), None);
     let _ = app.emit("settings-changed", ());
     Ok(defaults)
 }
@@ -1161,6 +1166,36 @@ fn get_session_replay_payload(
 }
 
 #[tauri::command]
+fn set_session_replay_favorite(
+    app: AppHandle,
+    session_id: String,
+    is_favorite: bool,
+) -> Result<(), String> {
+    replay_store::set_replay_favorite(&app, &session_id, is_favorite)
+}
+
+#[tauri::command]
+fn delete_session_replay(app: AppHandle, session_id: String) -> Result<(), String> {
+    replay_store::delete_replay(&app, &session_id)
+}
+
+#[tauri::command]
+fn export_session_replay_video(app: AppHandle, session_id: String) -> Result<String, String> {
+    replay_store::export_replay_video(&app, &session_id)
+        .map(|path| path.to_string_lossy().into_owned())
+}
+
+#[tauri::command]
+fn get_ffmpeg_status(app: AppHandle) -> replay_store::FfmpegStatus {
+    replay_store::get_ffmpeg_status(&app)
+}
+
+#[tauri::command]
+fn install_ffmpeg_for_replays(app: AppHandle) -> Result<replay_store::FfmpegStatus, String> {
+    replay_store::install_ffmpeg_for_app(&app)
+}
+
+#[tauri::command]
 fn get_session_run_summary(
     app: AppHandle,
     session_id: String,
@@ -1626,6 +1661,11 @@ pub fn run() {
             get_session_screen_frames,
             load_session_replay,
             get_session_replay_payload,
+            set_session_replay_favorite,
+            delete_session_replay,
+            export_session_replay_video,
+            get_ffmpeg_status,
+            install_ffmpeg_for_replays,
             get_session_run_summary,
             get_session_run_timeline,
             get_session_shot_telemetry,
@@ -1736,6 +1776,9 @@ pub fn run() {
             mouse_hook::set_dpi(loaded.mouse_dpi);
             mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
             mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
+            screen_recorder::set_replay_capture_fps(loaded.replay_capture_fps);
+            replay_store::maybe_install_ffmpeg_for_replay_media(app.handle().clone(), loaded.clone());
+            replay_store::apply_replay_retention(&app.handle(), Some(loaded.replay_keep_count as usize), None);
 
             // Start pipe server before injection so early UE4SS events are not lost.
             bridge::start(app.handle().clone());

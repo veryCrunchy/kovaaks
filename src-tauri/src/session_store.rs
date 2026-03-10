@@ -124,6 +124,15 @@ pub struct SessionRecord {
     /// True if a replay file (mouse path + per-second metrics) was saved.
     #[serde(default)]
     pub has_replay: bool,
+    /// Whether the saved replay is pinned and exempt from retention pruning.
+    #[serde(default)]
+    pub replay_is_favorite: bool,
+    #[serde(default)]
+    pub replay_positions_count: u32,
+    #[serde(default)]
+    pub replay_metrics_count: u32,
+    #[serde(default)]
+    pub replay_frames_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, Default, Serialize)]
@@ -691,6 +700,10 @@ fn query_sessions(
             s.stats_panel_json AS legacy_stats_panel_json,
             s.shot_timing_json AS legacy_shot_timing_json,
             s.has_replay,
+            COALESCE(ra.is_favorite, 0) AS replay_is_favorite,
+            COALESCE(ra.positions_count, 0) AS replay_positions_count,
+            COALESCE(ra.metrics_count, 0) AS replay_metrics_count,
+            COALESCE(ra.frames_count, 0) AS replay_frames_count,
             sm.composite AS smoothness_composite,
             sm.jitter AS smoothness_jitter,
             sm.overshoot_rate AS smoothness_overshoot_rate,
@@ -716,6 +729,7 @@ fn query_sessions(
             st.avg_shots_to_hit AS shot_timing_avg_shots_to_hit,
             st.corrective_shot_ratio AS shot_timing_corrective_shot_ratio
         FROM sessions s
+        LEFT JOIN replay_assets ra ON ra.session_id = s.id
         LEFT JOIN session_smoothness sm ON sm.session_id = s.id
         LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
         LEFT JOIN session_shot_timings st ON st.session_id = s.id
@@ -754,6 +768,10 @@ fn query_pending_hub_uploads(
             s.stats_panel_json AS legacy_stats_panel_json,
             s.shot_timing_json AS legacy_shot_timing_json,
             s.has_replay,
+            COALESCE(ra.is_favorite, 0) AS replay_is_favorite,
+            COALESCE(ra.positions_count, 0) AS replay_positions_count,
+            COALESCE(ra.metrics_count, 0) AS replay_metrics_count,
+            COALESCE(ra.frames_count, 0) AS replay_frames_count,
             sm.composite AS smoothness_composite,
             sm.jitter AS smoothness_jitter,
             sm.overshoot_rate AS smoothness_overshoot_rate,
@@ -779,6 +797,7 @@ fn query_pending_hub_uploads(
             st.avg_shots_to_hit AS shot_timing_avg_shots_to_hit,
             st.corrective_shot_ratio AS shot_timing_corrective_shot_ratio
         FROM sessions s
+        LEFT JOIN replay_assets ra ON ra.session_id = s.id
         LEFT JOIN session_smoothness sm ON sm.session_id = s.id
         LEFT JOIN session_stats_panels sp ON sp.session_id = s.id
         LEFT JOIN session_shot_timings st ON st.session_id = s.id
@@ -952,6 +971,10 @@ fn try_backfill_session_snapshots(app: &AppHandle) -> anyhow::Result<()> {
             stats_panel: deserialize_optional_json(&id, "stats_panel_json", stats_panel_json),
             shot_timing: deserialize_optional_json(&id, "shot_timing_json", shot_timing_json),
             has_replay: false,
+            replay_is_favorite: false,
+            replay_positions_count: 0,
+            replay_metrics_count: 0,
+            replay_frames_count: 0,
         };
         upsert_session_snapshots(&tx, &record)?;
         tx.execute(
@@ -1023,7 +1046,7 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
     let smoothness_json = row.get::<_, Option<String>>("legacy_smoothness_json")?;
     let stats_panel_json = row.get::<_, Option<String>>("legacy_stats_panel_json")?;
     let shot_timing_json = row.get::<_, Option<String>>("legacy_shot_timing_json")?;
-    let has_replay = row.get::<_, i64>(13)? != 0;
+    let has_replay = row.get::<_, i64>("has_replay")? != 0;
 
     Ok(SessionRecord {
         id: id.clone(),
@@ -1043,6 +1066,10 @@ fn row_to_session_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionRec
         shot_timing: shot_timing_from_row(row)?
             .or_else(|| deserialize_optional_json(&id, "shot_timing_json", shot_timing_json)),
         has_replay,
+        replay_is_favorite: row.get::<_, i64>("replay_is_favorite")? != 0,
+        replay_positions_count: row.get::<_, i64>("replay_positions_count")?.max(0) as u32,
+        replay_metrics_count: row.get::<_, i64>("replay_metrics_count")?.max(0) as u32,
+        replay_frames_count: row.get::<_, i64>("replay_frames_count")?.max(0) as u32,
     })
 }
 

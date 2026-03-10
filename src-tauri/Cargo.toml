@@ -57,7 +57,7 @@ notify = "6"
 csv = "1"
 
 # HTTP client — used for KovaaK's public API
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
 
 # Utilities
 tokio = { version = "1", features = ["full"] }
@@ -69,7 +69,12 @@ anyhow = "1"
 strsim = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 image = "0.25"
+base64 = "0.22"
+urlencoding = "2.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
+sha2 = "0.10"
+which = "8"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"

@@ -137,6 +137,10 @@ pub fn import_csv_history(app: &AppHandle, stats_dir: &str) -> Result<CsvImportS
                     stats_panel: None,
                     shot_timing: None,
                     has_replay: false,
+                    replay_is_favorite: false,
+                    replay_positions_count: 0,
+                    replay_metrics_count: 0,
+                    replay_frames_count: 0,
                 });
             }
             Err(error) => {
@@ -305,6 +309,10 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                                 stats_panel: stats_panel.clone(),
                                 shot_timing: shot_timing.clone(),
                                 has_replay: false,
+                                replay_is_favorite: false,
+                                replay_positions_count: 0,
+                                replay_metrics_count: 0,
+                                replay_frames_count: 0,
                             };
                             crate::session_store::add_session(app, record);
 

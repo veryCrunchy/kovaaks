@@ -14,10 +14,13 @@ use crate::bridge::{BridgeRunSnapshot, BridgeRunTimelinePoint};
 use crate::file_watcher::SessionResult;
 use crate::session_store::{ShotTimingSnapshot, SmoothnessSnapshot, StatsPanelSnapshot};
 
-pub const HUB_SCHEMA_VERSION: u32 = 5;
+pub const HUB_SCHEMA_VERSION: u32 = 11;
+pub const HUB_REPLAY_MEDIA_SCHEMA_VERSION: u32 = 2;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const INGEST_PATH: &str = "/aimmod.hub.v1.HubService/IngestSession";
 const BATCH_INGEST_PATH: &str = "/ingest/batch";
+const REPLAY_MEDIA_UPLOAD_PATH: &str = "/media/replays/upload";
+const REPLAY_MOUSE_PATH_UPLOAD_PATH: &str = "/replays/mouse-path/upload";
 const BATCH_SYNC_CHUNK_SIZE: usize = 25;
 
 static CLIENT: Lazy<Client> = Lazy::new(|| {
@@ -36,6 +39,10 @@ static SYNC_STATUS: Lazy<Mutex<HubSyncStatus>> = Lazy::new(|| {
         last_error: None,
         last_error_at_unix_ms: None,
         last_uploaded_session_id: None,
+        last_replay_media_upload_at_unix_ms: None,
+        last_replay_media_error: None,
+        last_replay_media_error_at_unix_ms: None,
+        last_replay_media_session_id: None,
     })
 });
 
@@ -58,6 +65,10 @@ pub struct HubSyncStatus {
     pub last_error: Option<String>,
     pub last_error_at_unix_ms: Option<u64>,
     pub last_uploaded_session_id: Option<String>,
+    pub last_replay_media_upload_at_unix_ms: Option<u64>,
+    pub last_replay_media_error: Option<String>,
+    pub last_replay_media_error_at_unix_ms: Option<u64>,
+    pub last_replay_media_session_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -147,6 +158,21 @@ fn record_sync_error(message: impl Into<String>) {
     status.sync_in_progress = false;
     status.last_error = Some(message.into());
     status.last_error_at_unix_ms = Some(now_unix_ms());
+}
+
+fn record_replay_media_upload_success(session_id: &str) {
+    let mut status = SYNC_STATUS.lock();
+    status.last_replay_media_upload_at_unix_ms = Some(now_unix_ms());
+    status.last_replay_media_error = None;
+    status.last_replay_media_error_at_unix_ms = None;
+    status.last_replay_media_session_id = Some(session_id.to_string());
+}
+
+fn record_replay_media_upload_error(session_id: &str, message: impl Into<String>) {
+    let mut status = SYNC_STATUS.lock();
+    status.last_replay_media_error = Some(message.into());
+    status.last_replay_media_error_at_unix_ms = Some(now_unix_ms());
+    status.last_replay_media_session_id = Some(session_id.to_string());
 }
 
 fn record_pending_upload_failure(app: &AppHandle, session_id: &str, message: &str) {
@@ -340,6 +366,9 @@ pub fn force_full_resync(app: &AppHandle) -> anyhow::Result<()> {
         }
     }
     crate::session_store::reset_all_hub_upload_marks(app);
+    if let Err(error) = crate::stats_db::clear_replay_media_upload_marks(app) {
+        log::warn!("hub_sync: could not clear replay media upload marks before full resync: {error}");
+    }
     refresh_pending_count(app);
     queue_pending_session_sync(app);
     Ok(())
@@ -593,6 +622,8 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
     }
 
     crate::session_store::mark_session_hub_uploaded(app, &input.session_id);
+    try_upload_replay_media_for_session(app, &input.result, &input.session_id).await;
+    try_upload_mouse_path_for_session(app, &input.session_id).await;
     record_sync_success(Some(&input.session_id));
     refresh_pending_count(app);
     log::info!("hub_sync: uploaded session {}", input.session_id);
@@ -873,11 +904,232 @@ async fn upload_session_batch(
     for session_id in &payload.uploaded_session_ids {
         crate::session_store::mark_session_hub_uploaded(app, session_id);
     }
+    for record in records {
+        if payload.uploaded_session_ids.iter().any(|id| id == &record.id) {
+            let result = SessionResult {
+                scenario: record.scenario.clone(),
+                score: record.score,
+                accuracy: record.accuracy,
+                kills: record.kills,
+                deaths: record.deaths,
+                duration_secs: record.duration_secs,
+                avg_ttk: record.avg_ttk,
+                damage_done: record.damage_done,
+                timestamp: record.timestamp.clone(),
+                csv_path: String::new(),
+            };
+            try_upload_replay_media_for_session(app, &result, &record.id).await;
+            try_upload_mouse_path_for_session(app, &record.id).await;
+        }
+    }
     if let Some(last) = payload.uploaded_session_ids.last() {
         record_sync_success(Some(last));
     }
     refresh_pending_count(app);
     Ok(payload)
+}
+
+async fn try_upload_replay_media_for_session(
+    app: &AppHandle,
+    result: &SessionResult,
+    session_id: &str,
+) {
+    if let Err(error) = upload_replay_media_for_session(app, result, session_id).await {
+        record_replay_media_upload_error(session_id, error.to_string());
+        log::warn!(
+            "hub_sync: replay media upload skipped for {}: {}",
+            session_id,
+            error
+        );
+    }
+}
+
+async fn upload_replay_media_for_session(
+    app: &AppHandle,
+    result: &SessionResult,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    let settings = crate::settings::load(app)?;
+    let base_url = normalize_base_url(&settings.hub_api_base_url);
+    let upload_token = settings.hub_upload_token.trim();
+    if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
+        anyhow::bail!("hub sync is not fully configured");
+    }
+    if !should_upload_replay_media(app, &settings, result, session_id)? {
+        return Ok(());
+    }
+
+    let temp_video = crate::replay_store::encode_replay_video_to_temp(
+        app,
+        session_id,
+        &settings.replay_media_upload_quality,
+    )
+    .map_err(anyhow::Error::msg)?;
+    let video_bytes = std::fs::read(&temp_video)
+        .with_context(|| format!("could not read encoded replay media {}", temp_video.display()))?;
+
+    let url = format!(
+        "{base_url}{REPLAY_MEDIA_UPLOAD_PATH}?sessionId={}&quality={}",
+        urlencoding::encode(session_id),
+        urlencoding::encode(&settings.replay_media_upload_quality),
+    );
+    let response = CLIENT
+        .post(&url)
+        .header("Content-Type", "video/mp4")
+        .header("Authorization", format!("Bearer {upload_token}"))
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("AimMod/{}", crate::app_version::raw_version()),
+        )
+        .body(video_bytes)
+        .send()
+        .await
+        .with_context(|| format!("error sending request for url ({})", url))?;
+    let _ = std::fs::remove_file(&temp_video);
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("hub replay media upload returned {status}: {body}");
+    }
+
+    crate::stats_db::mark_replay_media_uploaded(
+        app,
+        session_id,
+        HUB_REPLAY_MEDIA_SCHEMA_VERSION,
+        &settings.replay_media_upload_quality,
+    )?;
+    record_replay_media_upload_success(session_id);
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MousePathUploadPoint {
+    x: f64,
+    y: f64,
+    timestamp_ms: u64,
+    is_click: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MousePathUploadPayload {
+    points: Vec<MousePathUploadPoint>,
+    hit_timestamps_ms: Vec<u64>,
+}
+
+async fn try_upload_mouse_path_for_session(app: &AppHandle, session_id: &str) {
+    if let Err(error) = upload_mouse_path_for_session(app, session_id).await {
+        log::warn!(
+            "hub_sync: mouse path upload skipped for {}: {}",
+            session_id,
+            error
+        );
+    }
+}
+
+async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> anyhow::Result<()> {
+    let settings = crate::settings::load(app)?;
+    let base_url = normalize_base_url(&settings.hub_api_base_url);
+    let upload_token = settings.hub_upload_token.trim();
+    if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
+        anyhow::bail!("hub sync is not fully configured");
+    }
+
+    let Some(replay) = crate::replay_store::load_replay_payload(app, session_id) else {
+        anyhow::bail!("no replay payload is available for this run");
+    };
+    if replay.positions.is_empty() {
+        anyhow::bail!("this replay has no saved mouse path data");
+    }
+
+    let points = replay
+        .positions
+        .into_iter()
+        .take(4000)
+        .map(|point| MousePathUploadPoint {
+            x: point.x,
+            y: point.y,
+            timestamp_ms: point.timestamp_ms,
+            is_click: point.is_click,
+        })
+        .collect::<Vec<_>>();
+    let persisted_run = crate::stats_db::get_run_summary(app, session_id).unwrap_or(None);
+    let persisted_timeline = crate::stats_db::get_run_timeline(app, session_id).unwrap_or_default();
+    let shot_telemetry = crate::stats_db::get_shot_telemetry(app, session_id).unwrap_or_default();
+    let replay_base_ts = persisted_run
+        .as_ref()
+        .and_then(|run| run.started_at_bridge_ts_ms)
+        .or_else(|| estimate_replay_bridge_base_ts(&shot_telemetry, &persisted_timeline))
+        .unwrap_or(0);
+    let hit_timestamps_ms = shot_telemetry
+        .into_iter()
+        .filter(|event| event.event == "shot_hit")
+        .map(|event| event.ts_ms.saturating_sub(replay_base_ts))
+        .take(2000)
+        .collect::<Vec<_>>();
+
+    let response = CLIENT
+        .post(format!(
+            "{base_url}{REPLAY_MOUSE_PATH_UPLOAD_PATH}?sessionId={}",
+            urlencoding::encode(session_id)
+        ))
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {upload_token}"))
+        .header(
+            reqwest::header::USER_AGENT,
+            format!("AimMod/{}", crate::app_version::raw_version()),
+        )
+        .json(&MousePathUploadPayload { points, hit_timestamps_ms })
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "error sending request for url ({base_url}{REPLAY_MOUSE_PATH_UPLOAD_PATH})"
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("hub mouse path upload returned {status}: {body}");
+    }
+
+    Ok(())
+}
+
+fn should_upload_replay_media(
+    app: &AppHandle,
+    settings: &crate::settings::AppSettings,
+    result: &SessionResult,
+    session_id: &str,
+) -> anyhow::Result<bool> {
+    let Some(state) = crate::stats_db::get_replay_upload_state(app, session_id)? else {
+        return Ok(false);
+    };
+    if state.hub_media_schema_version >= HUB_REPLAY_MEDIA_SCHEMA_VERSION
+        && state.hub_media_uploaded_at_unix_ms.is_some()
+        && state
+            .hub_media_uploaded_quality
+            .as_deref()
+            .map(|value| value == settings.replay_media_upload_quality.as_str())
+            .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let is_pb = crate::session_store::get_personal_best_for_scenario(app, &result.scenario)
+        .map(|best| result.score.round().max(0.0) as u32 >= best)
+        .unwrap_or(false);
+
+    let should = match settings.replay_media_upload_mode.as_str() {
+        "all" => true,
+        "favorites_and_pb" => state.is_favorite || is_pb,
+        "favorites" => state.is_favorite,
+        _ => false,
+    };
+    Ok(should)
 }
 
 fn normalize_base_url(value: &str) -> String {
@@ -900,6 +1152,75 @@ fn played_at_iso(timestamp: &str) -> String {
 
 fn secs_to_ms(value: f64) -> u64 {
     (value.max(0.0) * 1000.0).round() as u64
+}
+
+fn estimate_replay_bridge_base_ts(
+    shot_telemetry: &[crate::bridge::BridgeShotTelemetryEvent],
+    persisted_timeline: &[BridgeRunTimelinePoint],
+) -> Option<u64> {
+    fn estimate_offset_ms(
+        timeline: &[BridgeRunTimelinePoint],
+        field: &str,
+        total: u32,
+    ) -> Option<u64> {
+        timeline.iter().find_map(|point| {
+            let value = match field {
+                "shots_fired" => point.shots_fired,
+                "shots_hit" => point.shots_hit,
+                _ => None,
+            }?;
+            (value.is_finite() && value + 0.0001 >= total as f64)
+                .then(|| point.t_sec as u64 * 1000)
+        })
+    }
+
+    if shot_telemetry.is_empty() {
+        return None;
+    }
+
+    let mut events = shot_telemetry.iter().collect::<Vec<_>>();
+    events.sort_by_key(|event| event.ts_ms);
+
+    let mut bases = Vec::new();
+    let mut cumulative_fired = 0u32;
+    let mut cumulative_hit = 0u32;
+
+    for event in events.into_iter().take(64) {
+        let weight = std::cmp::max(1, event.count.unwrap_or(1));
+        let offset_ms = match event.event.as_str() {
+            "shot_fired" => {
+                cumulative_fired = cumulative_fired.saturating_add(weight);
+                estimate_offset_ms(
+                    persisted_timeline,
+                    "shots_fired",
+                    event.total.unwrap_or(cumulative_fired),
+                )
+            }
+            "shot_hit" => {
+                cumulative_hit = cumulative_hit.saturating_add(weight);
+                estimate_offset_ms(
+                    persisted_timeline,
+                    "shots_hit",
+                    event.total.unwrap_or(cumulative_hit),
+                )
+            }
+            _ => None,
+        };
+
+        if let Some(offset_ms) = offset_ms {
+            bases.push(event.ts_ms.saturating_sub(offset_ms));
+            if bases.len() >= 12 {
+                break;
+            }
+        }
+    }
+
+    if bases.is_empty() {
+        return shot_telemetry.first().map(|event| event.ts_ms);
+    }
+
+    bases.sort_unstable();
+    Some(bases[bases.len() / 2])
 }
 
 fn first_meaningful_number(values: impl IntoIterator<Item = Option<f64>>) -> Option<f64> {

@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 12;
+const SCHEMA_VERSION: i32 = 16;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -15,6 +15,14 @@ pub struct ReplayAssetRecord<'a> {
     pub metrics_count: usize,
     pub frames_count: usize,
     pub has_run_snapshot: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReplayUploadState {
+    pub is_favorite: bool,
+    pub hub_media_uploaded_at_unix_ms: Option<u64>,
+    pub hub_media_schema_version: u32,
+    pub hub_media_uploaded_quality: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -72,9 +80,13 @@ pub fn upsert_replay_asset(app: &AppHandle, record: &ReplayAssetRecord<'_>) -> R
             metrics_count,
             frames_count,
             has_run_snapshot,
+            is_favorite,
+            hub_media_uploaded_at_unix_ms,
+            hub_media_schema_version,
+            hub_media_uploaded_quality,
             updated_at_unix_ms
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, NULL, ?7)
         ON CONFLICT(session_id) DO UPDATE SET
             file_path = excluded.file_path,
             positions_count = excluded.positions_count,
@@ -95,6 +107,127 @@ pub fn upsert_replay_asset(app: &AppHandle, record: &ReplayAssetRecord<'_>) -> R
     )?;
 
     Ok(())
+}
+
+pub fn set_replay_favorite(app: &AppHandle, session_id: &str, is_favorite: bool) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        UPDATE replay_assets
+        SET is_favorite = ?2,
+            updated_at_unix_ms = ?3
+        WHERE session_id = ?1
+        ",
+        params![
+            session_id,
+            if is_favorite { 1i64 } else { 0i64 },
+            current_unix_ms(),
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn mark_replay_media_uploaded(
+    app: &AppHandle,
+    session_id: &str,
+    schema_version: u32,
+    quality: &str,
+) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        UPDATE replay_assets
+        SET hub_media_uploaded_at_unix_ms = ?2,
+            hub_media_schema_version = ?3,
+            hub_media_uploaded_quality = ?4,
+            updated_at_unix_ms = ?2
+        WHERE session_id = ?1
+        ",
+        params![session_id, current_unix_ms(), schema_version as i64, quality],
+    )?;
+    Ok(())
+}
+
+pub fn clear_replay_media_upload_marks(app: &AppHandle) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        UPDATE replay_assets
+        SET hub_media_uploaded_at_unix_ms = NULL,
+            hub_media_schema_version = 0,
+            hub_media_uploaded_quality = NULL
+        ",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn get_replay_upload_state(app: &AppHandle, session_id: &str) -> Result<Option<ReplayUploadState>> {
+    let conn = connect(app)?;
+    conn.query_row(
+        "
+        SELECT
+            is_favorite,
+            hub_media_uploaded_at_unix_ms,
+            COALESCE(hub_media_schema_version, 0),
+            hub_media_uploaded_quality
+        FROM replay_assets
+        WHERE session_id = ?1
+        ",
+        params![session_id],
+        |row| {
+            Ok(ReplayUploadState {
+                is_favorite: row.get::<_, i64>(0)? != 0,
+                hub_media_uploaded_at_unix_ms: row.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                hub_media_schema_version: row.get::<_, i64>(2)? as u32,
+                hub_media_uploaded_quality: row.get::<_, Option<String>>(3)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+pub fn delete_replay_asset(app: &AppHandle, session_id: &str) -> Result<()> {
+    let conn = connect(app)?;
+    delete_replay_asset_with_conn(&conn, session_id)?;
+    Ok(())
+}
+
+pub fn prune_replay_assets(
+    app: &AppHandle,
+    keep_count: usize,
+    protected_session_id: Option<&str>,
+) -> Result<Vec<String>> {
+    if keep_count == 0 {
+        return Ok(Vec::new());
+    }
+
+    let conn = connect(app)?;
+    let mut stmt = conn.prepare(
+        "
+        SELECT session_id
+        FROM replay_assets
+        WHERE is_favorite = 0
+          AND (?1 IS NULL OR session_id != ?1)
+        ORDER BY updated_at_unix_ms DESC, session_id DESC
+        ",
+    )?;
+    let session_ids = stmt
+        .query_map(params![protected_session_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    if session_ids.len() <= keep_count {
+        return Ok(Vec::new());
+    }
+
+    let mut pruned = Vec::new();
+    for session_id in session_ids.into_iter().skip(keep_count) {
+        delete_replay_asset_with_conn(&conn, &session_id)?;
+        pruned.push(session_id);
+    }
+
+    Ok(pruned)
 }
 
 pub fn upsert_replay_payload(
@@ -213,6 +346,30 @@ pub fn upsert_replay_payload(
 
     tx.commit()?;
 
+    Ok(())
+}
+
+fn delete_replay_asset_with_conn(conn: &Connection, session_id: &str) -> Result<()> {
+    conn.execute(
+        "DELETE FROM session_replay_positions WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_replay_metrics WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_replay_frames WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM replay_assets WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "UPDATE sessions SET has_replay = 0 WHERE id = ?1",
+        params![session_id],
+    )?;
     Ok(())
 }
 
@@ -378,6 +535,10 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
                 metrics_count INTEGER NOT NULL DEFAULT 0,
                 frames_count INTEGER NOT NULL DEFAULT 0,
                 has_run_snapshot INTEGER NOT NULL DEFAULT 0 CHECK (has_run_snapshot IN (0, 1)),
+                is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1)),
+                hub_media_uploaded_at_unix_ms INTEGER,
+                hub_media_schema_version INTEGER NOT NULL DEFAULT 0,
+                hub_media_uploaded_quality TEXT,
                 updated_at_unix_ms INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_replay_assets_updated_at ON replay_assets(updated_at_unix_ms);
@@ -412,6 +573,7 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
                 p90_fire_to_hit_ms REAL,
                 avg_shots_to_hit REAL,
                 corrective_shot_ratio REAL,
+                started_at_bridge_ts_ms INTEGER,
                 started_at_unix_ms INTEGER,
                 ended_at_unix_ms INTEGER,
                 shot_fired_events INTEGER NOT NULL DEFAULT 0,
@@ -744,6 +906,68 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
             for statement in [
                 "ALTER TABLE sessions ADD COLUMN hub_uploaded_schema_version INTEGER;",
                 "CREATE INDEX IF NOT EXISTS idx_sessions_hub_upload_schema ON sessions(hub_uploaded_at_unix_ms, hub_uploaded_schema_version, hub_upload_next_retry_at_unix_ms, timestamp);",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 13 {
+        run_schema_migration(conn, 13, |tx| {
+            for statement in [
+                "ALTER TABLE replay_assets ADD COLUMN is_favorite INTEGER NOT NULL DEFAULT 0 CHECK (is_favorite IN (0, 1));",
+                "CREATE INDEX IF NOT EXISTS idx_replay_assets_favorite_updated ON replay_assets(is_favorite, updated_at_unix_ms);",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 14 {
+        run_schema_migration(conn, 14, |tx| {
+            for statement in [
+                "ALTER TABLE replay_assets ADD COLUMN hub_media_uploaded_at_unix_ms INTEGER;",
+                "ALTER TABLE replay_assets ADD COLUMN hub_media_schema_version INTEGER NOT NULL DEFAULT 0;",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 15 {
+        run_schema_migration(conn, 15, |tx| {
+            for statement in [
+                "ALTER TABLE replay_assets ADD COLUMN hub_media_uploaded_quality TEXT;",
+            ] {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 16 {
+        run_schema_migration(conn, 16, |tx| {
+            for statement in [
+                "ALTER TABLE session_run_summaries ADD COLUMN started_at_bridge_ts_ms INTEGER;",
             ] {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {
@@ -1643,6 +1867,7 @@ pub fn upsert_run_capture(
             p90_fire_to_hit_ms,
             avg_shots_to_hit,
             corrective_shot_ratio,
+            started_at_bridge_ts_ms,
             started_at_unix_ms,
             ended_at_unix_ms,
             shot_fired_events,
@@ -1654,7 +1879,7 @@ pub fn upsert_run_capture(
             challenge_complete_events,
             challenge_canceled_events
         )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)
         ON CONFLICT(session_id) DO UPDATE SET
             duration_secs = excluded.duration_secs,
             score_total = excluded.score_total,
@@ -1675,6 +1900,7 @@ pub fn upsert_run_capture(
             p90_fire_to_hit_ms = excluded.p90_fire_to_hit_ms,
             avg_shots_to_hit = excluded.avg_shots_to_hit,
             corrective_shot_ratio = excluded.corrective_shot_ratio,
+            started_at_bridge_ts_ms = excluded.started_at_bridge_ts_ms,
             started_at_unix_ms = excluded.started_at_unix_ms,
             ended_at_unix_ms = excluded.ended_at_unix_ms,
             shot_fired_events = excluded.shot_fired_events,
@@ -1707,6 +1933,7 @@ pub fn upsert_run_capture(
             snapshot.p90_fire_to_hit_ms,
             snapshot.avg_shots_to_hit,
             snapshot.corrective_shot_ratio,
+            snapshot.started_at_bridge_ts_ms.map(|value| value as i64),
             snapshot.started_at_unix_ms.map(|value| value as i64),
             snapshot.ended_at_unix_ms.map(|value| value as i64),
             snapshot.event_counts.shot_fired_events as i64,
@@ -2022,6 +2249,7 @@ pub fn get_run_summary(
             p90_fire_to_hit_ms,
             avg_shots_to_hit,
             corrective_shot_ratio,
+            started_at_bridge_ts_ms,
             started_at_unix_ms,
             ended_at_unix_ms,
             shot_fired_events,
@@ -2057,17 +2285,18 @@ pub fn get_run_summary(
                 p90_fire_to_hit_ms: row.get(16)?,
                 avg_shots_to_hit: row.get(17)?,
                 corrective_shot_ratio: row.get(18)?,
-                started_at_unix_ms: row.get::<_, Option<i64>>(19)?.map(|value| value as u64),
-                ended_at_unix_ms: row.get::<_, Option<i64>>(20)?.map(|value| value as u64),
+                started_at_bridge_ts_ms: row.get::<_, Option<i64>>(19)?.map(|value| value as u64),
+                started_at_unix_ms: row.get::<_, Option<i64>>(20)?.map(|value| value as u64),
+                ended_at_unix_ms: row.get::<_, Option<i64>>(21)?.map(|value| value as u64),
                 event_counts: crate::bridge::BridgeRunEventCounts {
-                    shot_fired_events: row.get::<_, i64>(21)? as u32,
-                    shot_hit_events: row.get::<_, i64>(22)? as u32,
-                    kill_events: row.get::<_, i64>(23)? as u32,
-                    challenge_queued_events: row.get::<_, i64>(24)? as u32,
-                    challenge_start_events: row.get::<_, i64>(25)? as u32,
-                    challenge_end_events: row.get::<_, i64>(26)? as u32,
-                    challenge_complete_events: row.get::<_, i64>(27)? as u32,
-                    challenge_canceled_events: row.get::<_, i64>(28)? as u32,
+                    shot_fired_events: row.get::<_, i64>(22)? as u32,
+                    shot_hit_events: row.get::<_, i64>(23)? as u32,
+                    kill_events: row.get::<_, i64>(24)? as u32,
+                    challenge_queued_events: row.get::<_, i64>(25)? as u32,
+                    challenge_start_events: row.get::<_, i64>(26)? as u32,
+                    challenge_end_events: row.get::<_, i64>(27)? as u32,
+                    challenge_complete_events: row.get::<_, i64>(28)? as u32,
+                    challenge_canceled_events: row.get::<_, i64>(29)? as u32,
                 },
                 timeline: vec![],
                 pause_windows: vec![],
@@ -2509,6 +2738,7 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
                     p90_fire_to_hit_ms: None,
                     avg_shots_to_hit: None,
                     corrective_shot_ratio: None,
+                    started_at_bridge_ts_ms: None,
                     started_at_unix_ms: None,
                     ended_at_unix_ms: None,
                     event_counts: crate::bridge::BridgeRunEventCounts::default(),
