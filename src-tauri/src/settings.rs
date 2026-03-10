@@ -6,7 +6,7 @@ const STORE_KEY: &str = "app_settings";
 pub const DEFAULT_HUB_API_BASE_URL: &str = "https://api.aimmod.app";
 pub const DEFAULT_REPLAY_CAPTURE_FPS: u32 = 24;
 pub const DEFAULT_REPLAY_KEEP_COUNT: u32 = 150;
-pub const DEFAULT_REPLAY_MEDIA_UPLOAD_MODE: &str = "favorites";
+pub const DEFAULT_REPLAY_MEDIA_UPLOAD_MODE: &str = "favorites_and_pb";
 pub const DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY: &str = "standard";
 
 /// A rectangle defining an on-screen region.
