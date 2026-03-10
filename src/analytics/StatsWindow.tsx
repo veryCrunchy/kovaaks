@@ -1,6 +1,7 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { Update } from "@tauri-apps/plugin-updater";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
 import { DebugTab } from "./DebugTab";
 import { MousePathViewer } from "./MousePathViewer";
@@ -36,6 +37,7 @@ import {
 import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
 import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
 import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
+import { useUpdater } from "../hooks/useUpdater";
 
 const SettingsTab = lazy(() =>
   import("../settings/Settings").then((m) => ({ default: m.Settings })),
@@ -237,6 +239,7 @@ const STATS_WINDOW_STORAGE_KEYS = {
   dateRange: "stats-window:date-range",
   compareScenario: "stats-window:compare-scenario",
   hubNoticeDismissed: "stats-window:hub-notice-dismissed",
+  updateNoticeDismissedVersion: "stats-window:update-notice-dismissed-version",
 } as const;
 
 function readStoredValue(key: string): string | null {
@@ -5912,6 +5915,7 @@ type ScenarioSortMode = "recent" | "plays" | "type";
 type SessionsPaneMode = "overview" | "scenario";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
+  const { status: updateStatus, checkForUpdate, installUpdate } = useUpdater();
   const [records, setRecords] = useState<SessionRecord[]>([]);
   const [search, setSearch] = useState(() => readStoredValue(STATS_WINDOW_STORAGE_KEYS.search) ?? "");
   const [selectedScenario, setSelectedScenario] = useState<string | null>(
@@ -5953,6 +5957,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [hubNoticeDismissed, setHubNoticeDismissed] = useState<boolean>(
     () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.hubNoticeDismissed) === "1",
   );
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<string | null>(
+    () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.updateNoticeDismissedVersion),
+  );
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const updateCheckStartedRef = useRef(false);
 
   // Always-current ref prevents stale closure in event listener
   const selectedRef = useRef<string | null>(null);
@@ -6084,6 +6093,28 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       hubNoticeDismissed ? "1" : null,
     );
   }, [hubNoticeDismissed]);
+  useEffect(() => {
+    writeStoredValue(
+      STATS_WINDOW_STORAGE_KEYS.updateNoticeDismissedVersion,
+      dismissedUpdateVersion,
+    );
+  }, [dismissedUpdateVersion]);
+
+  useEffect(() => {
+    if (updateCheckStartedRef.current) return;
+    updateCheckStartedRef.current = true;
+    void checkForUpdate();
+  }, [checkForUpdate]);
+
+  useEffect(() => {
+    if (updateStatus.state === "available") {
+      setAvailableUpdate(updateStatus.update);
+      return;
+    }
+    if (updateStatus.state === "up-to-date") {
+      setAvailableUpdate(null);
+    }
+  }, [updateStatus]);
 
   useEffect(() => {
     loadHistory(false);
@@ -6417,6 +6448,15 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       || hubSyncOverview.enabled;
     return !linked;
   }, [hubNoticeDismissed, hubSyncOverview]);
+  const updateNoticeVersion = availableUpdate?.version ?? null;
+  const showUpdateNotice = useMemo(() => {
+    if (!updateNoticeVersion) return false;
+    if (dismissedUpdateVersion === updateNoticeVersion) return false;
+    return updateStatus.state === "available"
+      || updateStatus.state === "downloading"
+      || updateStatus.state === "ready"
+      || updateStatus.state === "error";
+  }, [dismissedUpdateVersion, updateNoticeVersion, updateStatus.state]);
 
   return (
     <div
@@ -6500,7 +6540,84 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
 
       {/* ── Sessions content ── */}
       {rootMode === "sessions" && (
-        <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
+        <div style={{ display: "flex", flex: 1, flexDirection: "column", overflow: "hidden" }}>
+          {showUpdateNotice && (
+            <div
+              style={{
+                padding: "12px 16px",
+                borderBottom: `1px solid ${C.border}`,
+                background: "rgba(255,255,255,0.018)",
+                flexShrink: 0,
+              }}
+            >
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  border: "1px solid rgba(255,159,67,0.24)",
+                  background: "linear-gradient(135deg, rgba(255,159,67,0.12), rgba(255,159,67,0.05))",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.22)",
+                }}
+              >
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <Badge color="#ff9f43">Update Available</Badge>
+                    <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>
+                      {updateNoticeVersion ? `AimMod ${updateNoticeVersion} is ready to install.` : "A new AimMod update is available."}
+                    </span>
+                  </div>
+                  <span style={{ fontSize: 12, color: C.textMuted, lineHeight: 1.5 }}>
+                    {updateStatus.state === "available" && "Install from Session Stats and AimMod will relaunch when the update finishes."}
+                    {updateStatus.state === "downloading" && `Downloading update… ${updateStatus.progress}%`}
+                    {updateStatus.state === "ready" && "Update installed. Restarting AimMod…"}
+                    {updateStatus.state === "error" && "Update install failed. You can retry from here or use Settings."}
+                  </span>
+                </div>
+
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                  <Btn
+                    variant="primary"
+                    size="sm"
+                    disabled={
+                      !availableUpdate
+                      || updateStatus.state === "checking"
+                      || updateStatus.state === "downloading"
+                      || updateStatus.state === "ready"
+                    }
+                    onClick={() => {
+                      if (availableUpdate) void installUpdate(availableUpdate);
+                    }}
+                  >
+                    {updateStatus.state === "downloading"
+                      ? `Downloading ${updateStatus.progress}%`
+                      : updateStatus.state === "ready"
+                        ? "Restarting…"
+                        : updateStatus.state === "error"
+                          ? "Retry Install"
+                          : `Install ${updateNoticeVersion ?? "Update"}`}
+                  </Btn>
+                  <Btn
+                    variant="ghost"
+                    size="sm"
+                    disabled={!updateNoticeVersion}
+                    onClick={() => {
+                      if (updateNoticeVersion) {
+                        setDismissedUpdateVersion(updateNoticeVersion);
+                      }
+                    }}
+                  >
+                    Dismiss
+                  </Btn>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flex: 1, overflow: "hidden" }}>
       {/* ── Sidebar ── */}
       <div
         style={{
@@ -7043,8 +7160,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             )}
           </div>
         )}
-      </div>
+          </div>
         </div>
+      </div>
       )}
 
       {/* ── Leaderboards content ── */}
