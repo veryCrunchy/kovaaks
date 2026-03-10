@@ -19,8 +19,8 @@ export function StatsHUD({ preview = false }: StatsHUDProps) {
   const shortLabel      = SCENARIO_LABELS[scenarioType] ?? scenarioType;
   const isActive        = gameState === "IN-GAME" || gameState === "PLAYING";
 
-  const showTTK    = scenarioType !== "Tracking" && scenarioType !== "Unknown";
-  const showDamage = scenarioType === "MultiHitClicking";
+  const showTTK    = scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill" && scenarioType !== "Unknown";
+  const showDamage = scenarioType === "TargetSwitching" || scenarioType === "MultiHitClicking";
   const showKills  = scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill";
 
   const hasPositive    = (v: number | null | undefined) => v != null && isFinite(v) && v > 0.0001;

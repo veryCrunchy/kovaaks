@@ -78,8 +78,8 @@ export function PostSessionOverview({ preview = false, onDismissButtonRectChange
   const shortLabel      = SCENARIO_LABELS[scenarioType] ?? scenarioType;
 
   const showKills  = scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill" && scenarioType !== "Unknown";
-  const showTTK    = scenarioType === "OneShotClicking" || scenarioType === "ReactiveClicking";
-  const showDamage = scenarioType === "MultiHitClicking";
+  const showTTK    = scenarioType !== "Tracking" && scenarioType !== "AccuracyDrill" && scenarioType !== "Unknown";
+  const showDamage = scenarioType === "TargetSwitching" || scenarioType === "MultiHitClicking";
 
   const accuracyStr =
     statsPanel?.accuracy_pct != null

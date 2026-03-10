@@ -991,7 +991,12 @@ fn maybe_emit_feedback(
 ) {
     let is_clicking = matches!(
         scenario,
-        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking"
+        "StaticClicking"
+            | "TargetSwitching"
+            | "DynamicClicking"
+            | "OneShotClicking"
+            | "MultiHitClicking"
+            | "ReactiveClicking"
     );
     let is_tracking = matches!(scenario, "Tracking" | "PureTracking");
     let is_accuracy = scenario == "AccuracyDrill";
@@ -1468,7 +1473,12 @@ fn compute_metrics(
     //  Unknown   — balanced baseline (original formula).
     let (w_jitter, w_path, w_consistency, w_overshoot): (f64, f64, f64, f64) = match scenario {
         "Tracking" | "PureTracking" => (35.0, 25.0, 30.0, 10.0),
-        "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" => (5.0, 25.0, 10.0, 60.0),
+        "StaticClicking"
+        | "TargetSwitching"
+        | "DynamicClicking"
+        | "OneShotClicking"
+        | "MultiHitClicking"
+        | "ReactiveClicking" => (5.0, 25.0, 10.0, 60.0),
         "AccuracyDrill" => (10.0, 40.0, 10.0, 40.0),
         _ =>
         // Unknown / default

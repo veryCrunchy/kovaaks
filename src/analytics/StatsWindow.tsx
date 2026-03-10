@@ -450,6 +450,22 @@ function isTrackingScenario(scenarioType: string | null | undefined): boolean {
   return scenarioType === "PureTracking" || scenarioType.includes("Tracking");
 }
 
+function isTargetSwitchingScenario(scenarioType: string | null | undefined): boolean {
+  return scenarioType === "TargetSwitching" || scenarioType === "MultiHitClicking";
+}
+
+function isStaticClickingScenario(scenarioType: string | null | undefined): boolean {
+  return scenarioType === "StaticClicking" || scenarioType === "OneShotClicking";
+}
+
+function isDynamicClickingScenario(scenarioType: string | null | undefined): boolean {
+  return scenarioType === "DynamicClicking" || scenarioType === "MovingClicking" || scenarioType === "ReactiveClicking";
+}
+
+function isAccuracyScenario(scenarioType: string | null | undefined): boolean {
+  return scenarioType === "AccuracyDrill";
+}
+
 function rangesOverlap(startA: number, endA: number, startB: number, endB: number): boolean {
   return startA <= endB && endA >= startB;
 }
@@ -1451,11 +1467,11 @@ function detectInsights(records: SessionRecord[]): Insight[] {
       ? (panelRecords[panelRecords.length - 1].stats_panel!.scenario_type ?? "Unknown")
       : "Unknown";
 
-  const isTracking = scenarioType === "Tracking";
-  const isOneShot  = scenarioType === "OneShotClicking";
-  const isMultiHit = scenarioType === "MultiHitClicking";
-  const isReactive = scenarioType === "ReactiveClicking";
-  const isAccuracy = scenarioType === "AccuracyDrill";
+  const isTracking = isTrackingScenario(scenarioType);
+  const isOneShot  = isStaticClickingScenario(scenarioType);
+  const isMultiHit = isTargetSwitchingScenario(scenarioType);
+  const isReactive = isDynamicClickingScenario(scenarioType);
+  const isAccuracy = isAccuracyScenario(scenarioType);
 
   // ── Mouse / smoothness insights ──────────────────────────────────────────────
   if (smoothRecords.length > 0) {

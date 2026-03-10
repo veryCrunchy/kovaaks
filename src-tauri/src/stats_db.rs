@@ -2526,6 +2526,7 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
     for row in rows {
         let shot_telemetry = query_shot_telemetry(&conn, &row.session_id)?;
         let mut classification = crate::bridge::classify_persisted_session(
+            Some(row.scenario_name.as_str()),
             &row.stats_panel,
             row.run_summary.as_ref(),
             &shot_telemetry,
@@ -2609,6 +2610,10 @@ fn classify_csv_only_session(
     scenario_name: &str,
     stats_panel: &crate::session_store::StatsPanelSnapshot,
 ) -> crate::bridge::PersistedScenarioClassification {
+    if let Some(classification) = crate::bridge::classify_scenario_name_family(scenario_name) {
+        return classification;
+    }
+
     let lower = scenario_name.to_ascii_lowercase();
     let kills = stats_panel.kills.unwrap_or(0);
     let avg_ttk_secs = stats_panel
@@ -2646,6 +2651,25 @@ fn classify_csv_only_session(
         };
     }
 
+    let target_switching_hint = lower.contains("switch")
+        || lower.contains(" patts")
+        || lower.contains(" voxts")
+        || lower.contains(" driftts")
+        || lower.contains(" flyts")
+        || lower.contains(" bouncets")
+        || lower.ends_with(" ts")
+        || lower.contains(" target switching");
+    let dynamic_clicking_hint = lower.contains("pasu")
+        || lower.contains("popcorn")
+        || lower.contains("bounce")
+        || lower.contains("air angelic")
+        || lower.contains("dynamic");
+    let static_clicking_hint = lower.contains("static")
+        || lower.contains("1w")
+        || lower.contains("ww")
+        || lower.contains("sixshot")
+        || lower.contains("clicking");
+
     if kills > 0 && (avg_ttk_secs >= 5.0 || damage_per_kill < 0.5) {
         return crate::bridge::PersistedScenarioClassification {
             family: "Tracking".to_string(),
@@ -2653,23 +2677,23 @@ fn classify_csv_only_session(
         };
     }
 
-    if kills > 0 && damage_per_kill > 1.25 {
+    if target_switching_hint || (kills > 0 && damage_per_kill > 1.25) {
         return crate::bridge::PersistedScenarioClassification {
-            family: "MultiHitClicking".to_string(),
+            family: "TargetSwitching".to_string(),
             subtype: None,
         };
     }
 
-    if kills > 0 && (avg_ttk_secs >= 0.45 || (avg_kps > 0.0 && avg_kps <= 2.25)) {
+    if dynamic_clicking_hint || (kills > 0 && (avg_ttk_secs >= 0.45 || (avg_kps > 0.0 && avg_kps <= 2.25))) {
         return crate::bridge::PersistedScenarioClassification {
-            family: "ReactiveClicking".to_string(),
+            family: "DynamicClicking".to_string(),
             subtype: None,
         };
     }
 
-    if kills > 0 {
+    if static_clicking_hint || kills > 0 {
         return crate::bridge::PersistedScenarioClassification {
-            family: "OneShotClicking".to_string(),
+            family: "StaticClicking".to_string(),
             subtype: None,
         };
     }

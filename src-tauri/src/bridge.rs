@@ -307,38 +307,117 @@ fn persisted_tracking_density_subtype(bot_count: Option<u32>) -> String {
     }
 }
 
-fn persisted_one_shot_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
-    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
-    match (bot_count.unwrap_or(0), is_switching) {
-        (0 | 1, _) => "Static One-Shot".to_string(),
-        (2..=5, true) => "Sparse Switching One-Shot".to_string(),
-        (6..=10, true) => "Dense Switching One-Shot".to_string(),
-        (2..=5, false) => "Cluster One-Shot".to_string(),
-        (6..=10, false) => "Crowd One-Shot".to_string(),
-        (_, true) => "Wide Switching One-Shot".to_string(),
-        _ => "Wide One-Shot".to_string(),
-    }
+fn normalized_scenario_name_tokens(raw: &str) -> (String, String, Vec<String>) {
+    let lower = raw.to_ascii_lowercase();
+    let normalized = lower
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { ' ' })
+        .collect::<String>();
+    let compact = normalized
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    let tokens = normalized
+        .split_whitespace()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (normalized, compact, tokens)
 }
 
-fn persisted_multi_hit_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
-    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
-    match (bot_count.unwrap_or(0), is_switching) {
-        (0 | 1, _) => "Single Target Multi-Hit".to_string(),
-        (2..=5, true) => "Sparse Switching Multi-Hit".to_string(),
-        (6..=10, true) => "Dense Switching Multi-Hit".to_string(),
-        (2..=5, false) => "Cluster Multi-Hit".to_string(),
-        (6..=10, false) => "Crowd Multi-Hit".to_string(),
-        (_, true) => "Wide Switching Multi-Hit".to_string(),
-        _ => "Wide Multi-Hit".to_string(),
+fn scenario_name_family_hint(scenario_name: &str) -> Option<&'static str> {
+    let trimmed = scenario_name.trim();
+    if trimmed.is_empty() {
+        return None;
     }
+
+    let (normalized, compact, tokens) = normalized_scenario_name_tokens(trimmed);
+    let has_named_ts_token = tokens.iter().any(|token| {
+        token.ends_with("ts")
+            && !token.chars().any(|ch| ch.is_ascii_digit())
+            && token.as_str() != "targets"
+    });
+
+    if compact.contains("targetswitch")
+        || compact.contains("switchingspheres")
+        || compact.contains("switchinghumanoid")
+        || compact.contains("controlts")
+        || compact.contains("eddiets")
+        || compact.contains("dotts")
+        || compact.contains("driftts")
+        || compact.contains("flyts")
+        || compact.contains("bouncets")
+        || normalized.contains("target switching")
+        || has_named_ts_token
+    {
+        return Some("TargetSwitching");
+    }
+
+    if compact.contains("pasu")
+        || compact.contains("popcorn")
+        || compact.contains("airangelic")
+        || compact.contains("bounce")
+        || compact.contains("dynamicclick")
+        || compact.contains("fuglaa")
+    {
+        return Some("DynamicClicking");
+    }
+
+    let has_static_token = tokens.iter().any(|token| {
+        token.starts_with("1w")
+            || token.starts_with("ww")
+            || token.starts_with("sixshot")
+            || token.starts_with("tilefrenzy")
+    });
+    if compact.contains("variousstatic")
+        || compact.contains("clickingstatic")
+        || compact.contains("tilefrenzy")
+        || compact.contains("sixshot")
+        || compact.contains("1wall")
+        || has_static_token
+    {
+        return Some("StaticClicking");
+    }
+
+    if compact.contains("tracking")
+        || compact.contains("whisphere")
+        || compact.contains("silo")
+        || compact.contains("smooth")
+        || compact.contains("controlsphere")
+        || compact.contains("centering")
+        || compact.contains("distancetrack")
+        || compact.contains("movementtracking")
+        || compact.contains("ground")
+        || tokens.iter().any(|token| token == "pgt")
+    {
+        return Some("Tracking");
+    }
+
+    None
 }
 
-fn persisted_reactive_subtype(bot_count: Option<u32>) -> String {
-    match bot_count.unwrap_or(0) {
-        0 | 1 => "Single Target Reactive".to_string(),
-        2..=5 => "Sparse Reactive".to_string(),
-        6..=10 => "Dense Reactive".to_string(),
-        _ => "Wide Reactive".to_string(),
+pub fn classify_scenario_name_family(
+    scenario_name: &str,
+) -> Option<PersistedScenarioClassification> {
+    scenario_name_family_hint(scenario_name).map(|family| PersistedScenarioClassification {
+        family: family.to_string(),
+        subtype: None,
+    })
+}
+
+fn is_switching_pattern(bot_count: Option<u32>, switch_rate: f64) -> bool {
+    bot_count.unwrap_or(0) >= 2 || switch_rate >= 0.22
+}
+
+fn persisted_target_switching_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+    let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
+    match (bot_count.unwrap_or(0), is_switching) {
+        (0 | 1, _) => "Single Target Switching".to_string(),
+        (2..=5, true) => "Sparse Target Switching".to_string(),
+        (6..=10, true) => "Dense Target Switching".to_string(),
+        (2..=5, false) => "Sparse Sustain Switching".to_string(),
+        (6..=10, false) => "Dense Sustain Switching".to_string(),
+        (_, true) => "Wide Target Switching".to_string(),
+        _ => "Wide Sustain Switching".to_string(),
     }
 }
 
@@ -353,6 +432,7 @@ fn persisted_accuracy_subtype(bot_count: Option<u32>, switch_rate: f64) -> Strin
 }
 
 pub fn classify_persisted_session(
+    scenario_name: Option<&str>,
     stats_panel: &crate::session_store::StatsPanelSnapshot,
     run_summary: Option<&BridgeRunSnapshot>,
     shot_telemetry: &[BridgeShotTelemetryEvent],
@@ -432,6 +512,16 @@ pub fn classify_persisted_session(
             && bot_count
                 .is_some_and(|value| (1..=5).contains(&value) || (8..=10).contains(&value)));
 
+    if let Some(classification) = scenario_name.and_then(classify_scenario_name_family) {
+        if classification.family == "Tracking" && tracking_candidate {
+            return PersistedScenarioClassification {
+                family: "Tracking".to_string(),
+                subtype: Some(persisted_tracking_density_subtype(bot_count)),
+            };
+        }
+        return classification;
+    }
+
     if tracking_candidate {
         return PersistedScenarioClassification {
             family: "Tracking".to_string(),
@@ -440,7 +530,11 @@ pub fn classify_persisted_session(
     }
 
     // Tracking scenarios that allow kills: detect by long TTK or near-zero damage per kill
-    let damage_per_kill = if kills > 0 { damage_dealt / kills as f64 } else { 0.0 };
+    let damage_per_kill = if kills > 0 {
+        damage_dealt / kills as f64
+    } else {
+        0.0
+    };
     let long_ttk_tracking = live_ttk_secs.is_some_and(|ttk| ttk >= 5.0);
     // VT-style tracking uses invincible/high-HP bots so damage_per_kill is near zero (<0.5)
     let vt_style_tracking = kills > 0 && damage_per_kill < 0.5;
@@ -452,10 +546,10 @@ pub fn classify_persisted_session(
         };
     }
 
-    if kills > 0 && damage_present {
+    if kills > 0 && damage_present && is_switching_pattern(bot_count, switch_rate) {
         return PersistedScenarioClassification {
-            family: "MultiHitClicking".to_string(),
-            subtype: Some(persisted_multi_hit_subtype(bot_count, switch_rate)),
+            family: "TargetSwitching".to_string(),
+            subtype: Some(persisted_target_switching_subtype(bot_count, switch_rate)),
         };
     }
 
@@ -467,14 +561,14 @@ pub fn classify_persisted_session(
             });
         if reactive_candidate {
             return PersistedScenarioClassification {
-                family: "ReactiveClicking".to_string(),
-                subtype: Some(persisted_reactive_subtype(bot_count)),
+                family: "DynamicClicking".to_string(),
+                subtype: None,
             };
         }
 
         return PersistedScenarioClassification {
-            family: "OneShotClicking".to_string(),
-            subtype: Some(persisted_one_shot_subtype(bot_count, switch_rate)),
+            family: "StaticClicking".to_string(),
+            subtype: None,
         };
     }
 
@@ -2897,38 +2991,20 @@ mod imp {
         }
     }
 
-    fn one_shot_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
-        let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
-        match (bot_count.unwrap_or(0), is_switching) {
-            (0 | 1, _) => "Static One-Shot".to_string(),
-            (2..=5, true) => "Sparse Switching One-Shot".to_string(),
-            (6..=10, true) => "Dense Switching One-Shot".to_string(),
-            (2..=5, false) => "Cluster One-Shot".to_string(),
-            (6..=10, false) => "Crowd One-Shot".to_string(),
-            (_, true) => "Wide Switching One-Shot".to_string(),
-            _ => "Wide One-Shot".to_string(),
-        }
+    fn switching_pattern(bot_count: Option<u32>, switch_rate: f64) -> bool {
+        bot_count.unwrap_or(0) >= 2 || switch_rate >= 0.22
     }
 
-    fn multi_hit_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
+    fn target_switching_subtype(bot_count: Option<u32>, switch_rate: f64) -> String {
         let is_switching = bot_count.unwrap_or(0) >= 2 && switch_rate >= 0.35;
         match (bot_count.unwrap_or(0), is_switching) {
-            (0 | 1, _) => "Single Target Multi-Hit".to_string(),
-            (2..=5, true) => "Sparse Switching Multi-Hit".to_string(),
-            (6..=10, true) => "Dense Switching Multi-Hit".to_string(),
-            (2..=5, false) => "Cluster Multi-Hit".to_string(),
-            (6..=10, false) => "Crowd Multi-Hit".to_string(),
-            (_, true) => "Wide Switching Multi-Hit".to_string(),
-            _ => "Wide Multi-Hit".to_string(),
-        }
-    }
-
-    fn reactive_subtype(bot_count: Option<u32>) -> String {
-        match bot_count.unwrap_or(0) {
-            0 | 1 => "Single Target Reactive".to_string(),
-            2..=5 => "Sparse Reactive".to_string(),
-            6..=10 => "Dense Reactive".to_string(),
-            _ => "Wide Reactive".to_string(),
+            (0 | 1, _) => "Single Target Switching".to_string(),
+            (2..=5, true) => "Sparse Target Switching".to_string(),
+            (6..=10, true) => "Dense Target Switching".to_string(),
+            (2..=5, false) => "Sparse Sustain Switching".to_string(),
+            (6..=10, false) => "Dense Sustain Switching".to_string(),
+            (_, true) => "Wide Target Switching".to_string(),
+            _ => "Wide Sustain Switching".to_string(),
         }
     }
 
@@ -2996,6 +3072,23 @@ mod imp {
                     (1..=5).contains(&value) || (8..=10).contains(&value)
                 }));
 
+        if let Some(classification) = stats
+            .scenario_name
+            .as_deref()
+            .and_then(super::scenario_name_family_hint)
+        {
+            if classification == "Tracking" && tracking_candidate {
+                return ScenarioClassification {
+                    family: "Tracking",
+                    subtype: Some(tracking_density_subtype(bot_count)),
+                };
+            }
+            return ScenarioClassification {
+                family: classification,
+                subtype: None,
+            };
+        }
+
         if tracking_candidate {
             return ScenarioClassification {
                 family: "Tracking",
@@ -3003,19 +3096,31 @@ mod imp {
             };
         }
 
-        if kills > 0 && (damage_total > 0.0001 || damage_dealt > 0.0001) {
-            let damage_per_kill = (damage_total.max(damage_dealt)) / kills as f64;
-            let long_ttk_tracking = live_ttk_secs.is_some_and(|ttk| ttk >= 5.0);
-            let vt_style_tracking = damage_per_kill < 0.5;
-            if long_ttk_tracking || vt_style_tracking {
-                return ScenarioClassification {
-                    family: "Tracking",
-                    subtype: Some(tracking_density_subtype(bot_count)),
-                };
-            }
+        let long_ttk_tracking = live_ttk_secs.is_some_and(|ttk| ttk >= 5.0);
+        let damage_per_kill = if kills > 0 {
+            damage_total.max(damage_dealt) / kills as f64
+        } else {
+            0.0
+        };
+        let vt_style_tracking = kills > 0 && damage_per_kill < 0.5;
+
+        if kills > 0 && (long_ttk_tracking || vt_style_tracking) {
             return ScenarioClassification {
-                family: "MultiHitClicking",
-                subtype: Some(multi_hit_subtype(bot_count, switch_rate)),
+                family: "Tracking",
+                subtype: Some(tracking_density_subtype(bot_count)),
+            };
+        }
+
+        if kills > 0
+            && (damage_total > 0.0001 || damage_dealt > 0.0001)
+            && switching_pattern(bot_count, switch_rate)
+        {
+            return ScenarioClassification {
+                family: "TargetSwitching",
+                subtype: Some(target_switching_subtype(
+                    bot_count,
+                    if damage_per_kill > 1.25 { switch_rate.max(0.35) } else { switch_rate },
+                )),
             };
         }
 
@@ -3024,17 +3129,17 @@ mod imp {
                 || ttk_std_secs.map_or(false, |value| value >= 0.16)
                 || stats.kps.map_or(false, |value| {
                     value > 0.0 && value <= 2.25 && shots > kills.saturating_add(5)
-                });
+            });
             if reactive_candidate {
                 return ScenarioClassification {
-                    family: "ReactiveClicking",
-                    subtype: Some(reactive_subtype(bot_count)),
+                    family: "DynamicClicking",
+                    subtype: None,
                 };
             }
 
             return ScenarioClassification {
-                family: "OneShotClicking",
-                subtype: Some(one_shot_subtype(bot_count, switch_rate)),
+                family: "StaticClicking",
+                subtype: None,
             };
         }
 

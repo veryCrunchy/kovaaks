@@ -176,7 +176,18 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         };
     }
 
-    if bridge::is_runtime_restart_required() {
+    let bridge_connected = bridge::is_bridge_dll_connected();
+    let has_recent_state_snapshot = bridge::has_recent_state_snapshot_ack();
+    let has_recent_stats_flow = bridge::has_recent_bridge_stats_flow();
+    let stats_flow_stalled = bridge::is_bridge_stats_flow_stalled();
+    let bridge_healthy = bridge_connected
+        && (has_recent_state_snapshot || has_recent_stats_flow)
+        && !stats_flow_stalled;
+
+    if bridge::is_runtime_restart_required() && !bridge_healthy {
+        if pid_age < startup_grace {
+            return hidden_overlay_runtime_notice();
+        }
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),
@@ -186,7 +197,7 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         };
     }
 
-    if !bridge::is_bridge_dll_connected() {
+    if !bridge_connected {
         if pid_age < startup_grace {
             return hidden_overlay_runtime_notice();
         }
@@ -200,8 +211,6 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         };
     }
 
-    let has_recent_state_snapshot = bridge::has_recent_state_snapshot_ack();
-    let has_recent_stats_flow = bridge::has_recent_bridge_stats_flow();
     if !has_recent_state_snapshot && !has_recent_stats_flow {
         if pid_age < startup_grace {
             return hidden_overlay_runtime_notice();
@@ -216,7 +225,7 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
         };
     }
 
-    if bridge::is_bridge_stats_flow_stalled() {
+    if stats_flow_stalled {
         return OverlayRuntimeNotice {
             visible: true,
             kind: "warning".to_string(),

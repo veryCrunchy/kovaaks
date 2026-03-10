@@ -71,7 +71,7 @@ export interface StatsPanelReading {
   game_state?: string | null;
   /** State-manager scenario identity when available. */
   scenario_name?: string | null;
-  /** "Unknown" | "Tracking" | "OneShotClicking" | "MultiHitClicking" | "ReactiveClicking" | "AccuracyDrill" */
+  /** "Unknown" | "Tracking" | "TargetSwitching" | "StaticClicking" | "DynamicClicking" | "AccuracyDrill" */
   scenario_type: string;
   scenario_subtype?: string | null;
 }

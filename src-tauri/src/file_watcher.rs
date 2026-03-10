@@ -265,6 +265,7 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             });
                             if let Some(base_stats_panel) = stats_panel.clone() {
                                 let classification = crate::bridge::classify_persisted_session(
+                                    Some(result.scenario.as_str()),
                                     &base_stats_panel,
                                     run_snapshot.as_ref(),
                                     run_snapshot

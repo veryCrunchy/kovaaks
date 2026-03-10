@@ -14,7 +14,7 @@ use crate::bridge::{BridgeRunSnapshot, BridgeRunTimelinePoint};
 use crate::file_watcher::SessionResult;
 use crate::session_store::{ShotTimingSnapshot, SmoothnessSnapshot, StatsPanelSnapshot};
 
-pub const HUB_SCHEMA_VERSION: u32 = 2;
+pub const HUB_SCHEMA_VERSION: u32 = 5;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const INGEST_PATH: &str = "/aimmod.hub.v1.HubService/IngestSession";
 const BATCH_INGEST_PATH: &str = "/ingest/batch";
@@ -522,22 +522,26 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
         }
     });
     let inferred_classification = crate::bridge::classify_persisted_session(
+        Some(input.result.scenario.as_str()),
         &classification_stats,
         persisted_run.as_ref(),
         &shot_telemetry,
     );
 
-    let scenario_type = input
-        .stats_panel
-        .as_ref()
-        .map(|stats| stats.scenario_type.trim())
-        .filter(|value| !value.is_empty() && *value != "Unknown")
-        .map(str::to_string)
-        .or_else(|| {
-            let family = inferred_classification.family.trim();
-            (!family.is_empty() && family != "Unknown").then(|| family.to_string())
-        })
-        .unwrap_or_else(|| "Unknown".to_string());
+    let scenario_type = {
+        let inferred = inferred_classification.family.trim();
+        if !inferred.is_empty() && inferred != "Unknown" {
+            inferred.to_string()
+        } else {
+            input
+                .stats_panel
+                .as_ref()
+                .map(|stats| stats.scenario_type.trim())
+                .filter(|value| !value.is_empty() && *value != "Unknown")
+                .map(str::to_string)
+                .unwrap_or_else(|| "Unknown".to_string())
+        }
+    };
 
     let score = resolve_upload_score(&input.result, persisted_run.as_ref(), &persisted_timeline);
     let accuracy = persisted_run
@@ -765,21 +769,25 @@ async fn upload_session_batch(
             }
         });
         let inferred_classification = crate::bridge::classify_persisted_session(
+            Some(input.result.scenario.as_str()),
             &classification_stats,
             persisted_run.as_ref(),
             &shot_telemetry,
         );
-        let scenario_type = input
-            .stats_panel
-            .as_ref()
-            .map(|stats| stats.scenario_type.trim())
-            .filter(|value| !value.is_empty() && *value != "Unknown")
-            .map(str::to_string)
-            .or_else(|| {
-                let family = inferred_classification.family.trim();
-                (!family.is_empty() && family != "Unknown").then(|| family.to_string())
-            })
-            .unwrap_or_else(|| "Unknown".to_string());
+        let scenario_type = {
+            let inferred = inferred_classification.family.trim();
+            if !inferred.is_empty() && inferred != "Unknown" {
+                inferred.to_string()
+            } else {
+                input
+                    .stats_panel
+                    .as_ref()
+                    .map(|stats| stats.scenario_type.trim())
+                    .filter(|value| !value.is_empty() && *value != "Unknown")
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "Unknown".to_string())
+            }
+        };
         let score =
             resolve_upload_score(&input.result, persisted_run.as_ref(), &persisted_timeline);
         let accuracy = persisted_run
@@ -981,7 +989,14 @@ fn build_summary_map(
     summary_string(
         &mut summary,
         "buildProfile",
-        Some(if cfg!(debug_assertions) { "debug" } else { "release" }.to_string()),
+        Some(
+            if cfg!(debug_assertions) {
+                "debug"
+            } else {
+                "release"
+            }
+            .to_string(),
+        ),
     );
     summary_bool(&mut summary, "hasBridgeRunSnapshot", Some(run.is_some()));
     summary_bool(

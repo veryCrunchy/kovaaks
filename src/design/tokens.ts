@@ -3,6 +3,10 @@
 
 export const SCENARIO_COLORS: Record<string, string> = {
   Tracking:          "#60a5fa",
+  TargetSwitching:   "#f472b6",
+  StaticClicking:    "#a78bfa",
+  DynamicClicking:   "#fb923c",
+  MovingClicking:    "#fb923c",
   OneShotClicking:   "#a78bfa",
   MultiHitClicking:  "#f472b6",
   ReactiveClicking:  "#fb923c",
@@ -12,9 +16,13 @@ export const SCENARIO_COLORS: Record<string, string> = {
 
 export const SCENARIO_LABELS: Record<string, string> = {
   Tracking:          "Tracking",
-  OneShotClicking:   "1-Shot",
-  MultiHitClicking:  "Multi-Hit",
-  ReactiveClicking:  "Reactive",
+  TargetSwitching:   "Target Switch",
+  StaticClicking:    "Static Click",
+  DynamicClicking:   "Dynamic Click",
+  MovingClicking:    "Dynamic Click",
+  OneShotClicking:   "Static Click",
+  MultiHitClicking:  "Target Switch",
+  ReactiveClicking:  "Dynamic Click",
   AccuracyDrill:     "Accuracy",
   Unknown:           "Unknown",
 };
