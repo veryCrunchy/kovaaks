@@ -14,7 +14,7 @@ use crate::bridge::{BridgeRunSnapshot, BridgeRunTimelinePoint};
 use crate::file_watcher::SessionResult;
 use crate::session_store::{ShotTimingSnapshot, SmoothnessSnapshot, StatsPanelSnapshot};
 
-const HUB_SCHEMA_VERSION: u32 = 1;
+pub const HUB_SCHEMA_VERSION: u32 = 2;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const INGEST_PATH: &str = "/aimmod.hub.v1.HubService/IngestSession";
 const BATCH_INGEST_PATH: &str = "/ingest/batch";
@@ -962,6 +962,43 @@ fn build_summary_map(
     scenario_type: &str,
 ) -> HashMap<String, SessionSummaryValue> {
     let mut summary = HashMap::new();
+
+    summary_string(
+        &mut summary,
+        "appVersion",
+        Some(crate::app_version::raw_version().to_string()),
+    );
+    summary_string(
+        &mut summary,
+        "platformOs",
+        Some(std::env::consts::OS.to_string()),
+    );
+    summary_string(
+        &mut summary,
+        "platformArch",
+        Some(std::env::consts::ARCH.to_string()),
+    );
+    summary_string(
+        &mut summary,
+        "buildProfile",
+        Some(if cfg!(debug_assertions) { "debug" } else { "release" }.to_string()),
+    );
+    summary_bool(&mut summary, "hasBridgeRunSnapshot", Some(run.is_some()));
+    summary_bool(
+        &mut summary,
+        "hasSmoothnessSnapshot",
+        Some(input.smoothness.is_some()),
+    );
+    summary_bool(
+        &mut summary,
+        "hasShotTimingSnapshot",
+        Some(input.shot_timing.is_some()),
+    );
+    summary_bool(
+        &mut summary,
+        "hasStatsPanelSnapshot",
+        Some(input.stats_panel.is_some()),
+    );
 
     summary_number(&mut summary, "csvScore", Some(input.result.score));
     summary_number(&mut summary, "csvAccuracy", Some(input.result.accuracy));
