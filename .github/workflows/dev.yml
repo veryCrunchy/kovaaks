@@ -143,6 +143,23 @@ jobs:
             Write-Host "$($runtimeDll.Name) sha256: $($_.Hash.ToLowerInvariant())"
           }
 
+      - name: Ensure GitHub pre-release exists
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $tagName = "${{ steps.prerelease_meta.outputs.pre_tag }}"
+          $releaseName = "AimMod $tagName"
+
+          gh release view $tagName *> $null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $tagName already exists."
+            exit 0
+          }
+
+          Write-Host "Release $tagName does not exist yet. Creating it explicitly before tauri-action upload."
+          gh release create $tagName --prerelease --title $releaseName --notes ""
+
       - name: Build and publish prod-on-main pre-release
         uses: tauri-apps/tauri-action@v0
         env:
