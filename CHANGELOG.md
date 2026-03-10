@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.4.0](https://github.com/veryCrunchy/kovaaks/compare/v1.3.0...v1.4.0) (2026-03-10)
+
+
+### Features
+
+* add hub_uploaded_schema_version to sessions and update schema migration ([e6fb772](https://github.com/veryCrunchy/kovaaks/commit/e6fb772abbcc7d42b87b7e788accb8aa52ceb8d8))
+
+
+### Bug Fixes
+
+* enhance session classification logic ([37c0458](https://github.com/veryCrunchy/kovaaks/commit/37c0458bb276cb38038df3a844deeb165f1a2bf2))
+
 ## [1.3.0](https://github.com/veryCrunchy/kovaaks/compare/v1.2.1...v1.3.0) (2026-03-10)
 
 
