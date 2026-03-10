@@ -2494,6 +2494,9 @@ mod imp {
 
     fn emit_stats_panel_update(app: &AppHandle, stats: &BridgeStatsPanelEvent) {
         let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, stats);
+        crate::mouse_hook::set_tracking_paused(
+            stats.scenario_is_paused == Some(true) || stats.game_state_code == 5,
+        );
 
         let scenario_type = if stats.scenario_type == "Unknown" {
             None
@@ -2619,6 +2622,7 @@ mod imp {
             if !preserve_bridge_snapshot {
                 reset_bridge_stats_snapshot();
             }
+            crate::mouse_hook::set_tracking_paused(false);
             emit_current_stats_snapshot(app);
             if let Ok(mut run_state) = run_capture_state().lock() {
                 begin_run_capture_locked(&mut run_state, Instant::now(), run_time_hint, None);
@@ -2684,6 +2688,7 @@ mod imp {
             let _ = app.emit(super::EVENT_SESSION_END, ());
             mark_run_capture_end(run_time_hint);
             crate::mouse_hook::stop_session_tracking();
+            crate::mouse_hook::set_tracking_paused(false);
             crate::screen_recorder::stop();
             reset_bridge_stats_snapshot();
             emit_current_stats_snapshot(app);

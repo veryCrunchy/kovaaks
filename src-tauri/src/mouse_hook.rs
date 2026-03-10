@@ -124,6 +124,9 @@ struct RawMouseEvent {
 static HOOK_RUNNING: AtomicBool = AtomicBool::new(false);
 /// True only while a KovaaK's scenario session is active.
 static TRACKING_ACTIVE: AtomicBool = AtomicBool::new(false);
+/// True while the active scenario is paused; live smoothness input should not
+/// contribute to session metrics during this window.
+static TRACKING_PAUSED: AtomicBool = AtomicBool::new(false);
 /// User's configured mouse DPI/CPI, used to normalise speed metrics.
 static MOUSE_DPI: AtomicU32 = AtomicU32::new(800);
 /// Whether to emit live-feedback coaching notifications.
@@ -252,6 +255,7 @@ pub fn start_session_tracking() -> Instant {
         s.cursor_x = 0.0;
         s.cursor_y = 0.0;
     }
+    TRACKING_PAUSED.store(false, Ordering::SeqCst);
     TRACKING_ACTIVE.store(true, Ordering::SeqCst);
     log::info!("Smoothness tracking started");
     session_start
@@ -260,11 +264,34 @@ pub fn start_session_tracking() -> Instant {
 /// Stop recording metrics (session ended). Data is retained for post-session report.
 pub fn stop_session_tracking() {
     if TRACKING_ACTIVE.swap(false, Ordering::SeqCst) {
+        TRACKING_PAUSED.store(false, Ordering::SeqCst);
         if let Ok(mut s) = STATE.lock() {
             queue_completed_capture_locked(&mut s, unix_now_ms(), "stop");
         }
         log::info!("Smoothness tracking stopped");
     }
+}
+
+pub fn set_tracking_paused(paused: bool) {
+    let changed = TRACKING_PAUSED.swap(paused, Ordering::SeqCst) != paused;
+    if !changed {
+        return;
+    }
+
+    if let Ok(mut s) = STATE.lock() {
+        // Clear only short-lived live-analysis buffers so paused menu movement
+        // never bleeds into the next active smoothness window.
+        s.events.clear();
+        s.click_times.clear();
+        s.hold_durations.clear();
+        s.lmb_down_at = None;
+        s.last_raw_sample = None;
+    }
+
+    log::info!(
+        "Smoothness tracking {}",
+        if paused { "paused" } else { "resumed" }
+    );
 }
 
 /// Drain session metric buffer for post-session analysis.
@@ -709,7 +736,10 @@ unsafe extern "system" fn raw_input_wnd_proc(
                     if mouse.usFlags.0 & MOUSE_MOVE_ABSOLUTE == 0 {
                         let dx = mouse.lLastX as f64;
                         let dy = mouse.lLastY as f64;
-                        if (dx != 0.0 || dy != 0.0) && TRACKING_ACTIVE.load(Ordering::Relaxed) {
+                        if (dx != 0.0 || dy != 0.0)
+                            && TRACKING_ACTIVE.load(Ordering::Relaxed)
+                            && !TRACKING_PAUSED.load(Ordering::Relaxed)
+                        {
                             let now = Instant::now();
                             if let Ok(mut s) = STATE.lock() {
                                 s.cursor_x += dx;
@@ -774,7 +804,8 @@ fn mouse_event_callback(event: Event) {
         // and SetCursorPos recenter artifacts.
         EventType::MouseMove { .. } => {}
         EventType::ButtonPress(rdev::Button::Left) => {
-            if TRACKING_ACTIVE.load(Ordering::Relaxed) {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed)
+            {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
                     s.click_times.push_back(now);
@@ -796,7 +827,8 @@ fn mouse_event_callback(event: Event) {
             }
         }
         EventType::ButtonRelease(rdev::Button::Left) => {
-            if TRACKING_ACTIVE.load(Ordering::Relaxed) {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed)
+            {
                 if let Ok(mut s) = STATE.lock() {
                     if let Some(down) = s.lmb_down_at.take() {
                         let hold_ms = down.elapsed().as_secs_f32() * 1000.0;
@@ -855,6 +887,11 @@ fn metric_emitter_loop(app: AppHandle) {
         // Only compute and emit when a session is active
         if !TRACKING_ACTIVE.load(Ordering::Relaxed) {
             // Reset streaks when not in session
+            streaks.clear();
+            continue;
+        }
+
+        if TRACKING_PAUSED.load(Ordering::Relaxed) {
             streaks.clear();
             continue;
         }
