@@ -32,7 +32,8 @@ pub struct FfmpegStatus {
     pub path: Option<String>,
 }
 
-const FFMPEG_DOWNLOAD_URL: &str = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+const FFMPEG_DOWNLOAD_URL: &str =
+    "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
 const FFMPEG_DOWNLOAD_SHA256_URL: &str =
     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip.sha256";
 
@@ -174,16 +175,16 @@ fn repair_run_capture_if_needed(app: &AppHandle, session_id: &str, replay: &Repl
     }
 }
 
-fn repair_replay_timing_if_needed(
-    app: &AppHandle,
-    session_id: &str,
-    replay: &mut ReplayData,
-) {
+fn repair_replay_timing_if_needed(app: &AppHandle, session_id: &str, replay: &mut ReplayData) {
     if replay.frames.len() < 2 || replay.positions.len() < 2 {
         return;
     }
 
-    let frame_duration_ms = replay.frames.last().map(|frame| frame.timestamp_ms).unwrap_or(0);
+    let frame_duration_ms = replay
+        .frames
+        .last()
+        .map(|frame| frame.timestamp_ms)
+        .unwrap_or(0);
     let position_duration_ms = replay
         .positions
         .last()
@@ -258,7 +259,8 @@ fn ffmpeg_install_root(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("Could not resolve AimMod local data directory: {e}"))?
         .join("tools")
         .join("ffmpeg");
-    fs::create_dir_all(&root).map_err(|e| format!("Could not create AimMod ffmpeg directory: {e}"))?;
+    fs::create_dir_all(&root)
+        .map_err(|e| format!("Could not create AimMod ffmpeg directory: {e}"))?;
     Ok(root)
 }
 
@@ -341,10 +343,8 @@ pub fn install_ffmpeg_for_app(app: &AppHandle) -> Result<FfmpegStatus, String> {
     verify_ffmpeg_archive_checksum(&archive_bytes, &checksum_text)?;
 
     let install_root = ffmpeg_install_root(app)?;
-    let staging_root = install_root.join(format!(
-        "staging-{}",
-        chrono::Utc::now().timestamp_millis()
-    ));
+    let staging_root =
+        install_root.join(format!("staging-{}", chrono::Utc::now().timestamp_millis()));
     let extracted_root = staging_root.join("extracted");
     fs::create_dir_all(&extracted_root)
         .map_err(|e| format!("Could not prepare ffmpeg staging directory: {e}"))?;
@@ -368,7 +368,10 @@ pub fn install_ffmpeg_for_app(app: &AppHandle) -> Result<FfmpegStatus, String> {
     Ok(status)
 }
 
-pub fn maybe_install_ffmpeg_for_replay_media(app: AppHandle, settings: crate::settings::AppSettings) {
+pub fn maybe_install_ffmpeg_for_replay_media(
+    app: AppHandle,
+    settings: crate::settings::AppSettings,
+) {
     if !settings.hub_sync_enabled || settings.replay_media_upload_mode.trim() == "off" {
         return;
     }
@@ -452,8 +455,8 @@ fn extract_ffmpeg_archive(bytes: &[u8], destination: &Path) -> Result<(), String
             fs::create_dir_all(parent)
                 .map_err(|e| format!("Could not create ffmpeg extract parent: {e}"))?;
         }
-        let mut output =
-            fs::File::create(&out_path).map_err(|e| format!("Could not create extracted ffmpeg file: {e}"))?;
+        let mut output = fs::File::create(&out_path)
+            .map_err(|e| format!("Could not create extracted ffmpeg file: {e}"))?;
         std::io::copy(&mut entry, &mut output)
             .map_err(|e| format!("Could not extract ffmpeg archive file: {e}"))?;
         #[cfg(unix)]
@@ -478,12 +481,21 @@ fn find_ffmpeg_bin_dir(root: &Path) -> Option<PathBuf> {
                 stack.push(path);
                 continue;
             }
-            if path.file_name().and_then(|name| name.to_str()).map(|name| {
-                #[cfg(target_os = "windows")]
-                { name.eq_ignore_ascii_case("ffmpeg.exe") }
-                #[cfg(not(target_os = "windows"))]
-                { name == "ffmpeg" }
-            }).unwrap_or(false) {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        name.eq_ignore_ascii_case("ffmpeg.exe")
+                    }
+                    #[cfg(not(target_os = "windows"))]
+                    {
+                        name == "ffmpeg"
+                    }
+                })
+                .unwrap_or(false)
+            {
                 return path.parent().map(Path::to_path_buf);
             }
         }
@@ -492,8 +504,11 @@ fn find_ffmpeg_bin_dir(root: &Path) -> Option<PathBuf> {
 }
 
 fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> {
-    fs::create_dir_all(target).map_err(|e| format!("Could not create ffmpeg target directory: {e}"))?;
-    for entry in fs::read_dir(source).map_err(|e| format!("Could not read ffmpeg extracted directory: {e}"))? {
+    fs::create_dir_all(target)
+        .map_err(|e| format!("Could not create ffmpeg target directory: {e}"))?;
+    for entry in fs::read_dir(source)
+        .map_err(|e| format!("Could not read ffmpeg extracted directory: {e}"))?
+    {
         let entry = entry.map_err(|e| format!("Could not read ffmpeg extracted entry: {e}"))?;
         let from = entry.path();
         let to = target.join(entry.file_name());
@@ -504,7 +519,8 @@ fn copy_directory_recursive(source: &Path, target: &Path) -> Result<(), String> 
                 fs::create_dir_all(parent)
                     .map_err(|e| format!("Could not create ffmpeg target parent directory: {e}"))?;
             }
-            fs::copy(&from, &to).map_err(|e| format!("Could not copy ffmpeg file into AimMod: {e}"))?;
+            fs::copy(&from, &to)
+                .map_err(|e| format!("Could not copy ffmpeg file into AimMod: {e}"))?;
         }
     }
     Ok(())
@@ -535,8 +551,13 @@ pub fn apply_replay_retention(
     }
 }
 
-pub fn set_replay_favorite(app: &AppHandle, session_id: &str, is_favorite: bool) -> Result<(), String> {
-    crate::stats_db::set_replay_favorite(app, session_id, is_favorite).map_err(|e| e.to_string())?;
+pub fn set_replay_favorite(
+    app: &AppHandle,
+    session_id: &str,
+    is_favorite: bool,
+) -> Result<(), String> {
+    crate::stats_db::set_replay_favorite(app, session_id, is_favorite)
+        .map_err(|e| e.to_string())?;
     if !is_favorite {
         apply_replay_retention(app, None, None);
     }
@@ -557,7 +578,8 @@ pub fn export_replay_video(app: &AppHandle, session_id: &str) -> Result<PathBuf,
         .ok_or_else(|| "Could not resolve an export directory.".to_string())?
         .join("AimMod")
         .join("Replays");
-    fs::create_dir_all(&export_root).map_err(|e| format!("Could not create export directory: {e}"))?;
+    fs::create_dir_all(&export_root)
+        .map_err(|e| format!("Could not create export directory: {e}"))?;
 
     let encode_quality = crate::settings::load(app)
         .map(|settings| ReplayMediaQuality::from_settings(&settings.replay_media_upload_quality))
@@ -585,7 +607,12 @@ pub fn encode_replay_video_to_temp(
         fs::create_dir_all(parent)
             .map_err(|e| format!("Could not create replay upload temp directory: {e}"))?;
     }
-    encode_replay_video_to_path(app, session_id, ReplayMediaQuality::from_settings(quality), &output_path)?;
+    encode_replay_video_to_path(
+        app,
+        session_id,
+        ReplayMediaQuality::from_settings(quality),
+        &output_path,
+    )?;
     Ok(output_path)
 }
 
@@ -597,7 +624,8 @@ fn encode_replay_video_to_path(
 ) -> Result<(), String> {
     use base64::Engine;
 
-    let replay = load_replay(app, session_id).ok_or_else(|| format!("replay not found: {session_id}"))?;
+    let replay =
+        load_replay(app, session_id).ok_or_else(|| format!("replay not found: {session_id}"))?;
     if replay.frames.is_empty() {
         return Err("This replay has no saved video frames.".to_string());
     }
@@ -605,8 +633,13 @@ fn encode_replay_video_to_path(
     let safe_session = sanitize_replay_temp_component(session_id);
     let temp_root = std::env::temp_dir()
         .join("aimmod-replay-exports")
-        .join(format!("{}-{}", safe_session, chrono::Utc::now().timestamp_millis()));
-    fs::create_dir_all(&temp_root).map_err(|e| format!("Could not create temporary export directory: {e}"))?;
+        .join(format!(
+            "{}-{}",
+            safe_session,
+            chrono::Utc::now().timestamp_millis()
+        ));
+    fs::create_dir_all(&temp_root)
+        .map_err(|e| format!("Could not create temporary export directory: {e}"))?;
 
     let decode_engine = base64::engine::general_purpose::STANDARD;
     for (index, frame) in replay.frames.iter().enumerate() {
@@ -614,8 +647,13 @@ fn encode_replay_video_to_path(
             .decode(frame.jpeg_b64.as_bytes())
             .map_err(|e| format!("Could not decode replay frame {}: {}", index + 1, e))?;
         let frame_path = temp_root.join(format!("frame_{index:06}.jpg"));
-        fs::write(&frame_path, jpeg)
-            .map_err(|e| format!("Could not write temporary replay frame {}: {}", index + 1, e))?;
+        fs::write(&frame_path, jpeg).map_err(|e| {
+            format!(
+                "Could not write temporary replay frame {}: {}",
+                index + 1,
+                e
+            )
+        })?;
     }
 
     let fps = infer_export_fps(&replay.frames).clamp(6, 60);
@@ -717,7 +755,9 @@ fn infer_export_fps(frames: &[crate::screen_recorder::ScreenFrame]) -> u32 {
 
     let mut deltas = Vec::with_capacity(frames.len().saturating_sub(1));
     for window in frames.windows(2) {
-        let delta = window[1].timestamp_ms.saturating_sub(window[0].timestamp_ms);
+        let delta = window[1]
+            .timestamp_ms
+            .saturating_sub(window[0].timestamp_ms);
         if delta > 0 {
             deltas.push(delta);
         }
@@ -794,7 +834,12 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
         Ok(None) => match crate::stats_db::get_legacy_replay_blob(app, session_id) {
             Ok(Some(replay)) => {
                 if replay.frames.is_empty() {
-                    purge_invalid_replay_without_video_frames(app, session_id, "legacy sqlite replay blob", None);
+                    purge_invalid_replay_without_video_frames(
+                        app,
+                        session_id,
+                        "legacy sqlite replay blob",
+                        None,
+                    );
                     let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
                     return None;
                 }

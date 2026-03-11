@@ -69,11 +69,13 @@ struct CaptureTargetGeometry {
 
 // ─── Config ─────────────────────────────────────────────────────────────────────
 
-/// Cap at 4 320 frames ≈ 3-minute session at 24 fps.
-const MAX_FRAMES: usize = 4_320;
+/// Keep up to 3 minutes of frames at the user-configured capture rate.
+const MAX_CAPTURE_BUFFER_SECS: usize = 180;
 /// Keep a short queue of completed session frame buffers so a fast restart does
 /// not erase frames before the file-watcher persists the previous run.
 const MAX_COMPLETED_SESSIONS: usize = 8;
+/// Keep the encoder queue tiny so capture never builds an unbounded backlog.
+const MAX_PENDING_ENCODE_FRAMES: usize = 2;
 /// Output width after downscaling; height is preserved from the source aspect ratio.
 const OUT_W: u32 = 480;
 /// JPEG quality (0–100).
@@ -92,7 +94,8 @@ static COMPLETED_FRAMES: Lazy<Mutex<VecDeque<CompletedFrameCapture>>> =
 static SESSION_START: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 static SESSION_START_UNIX_MS: Lazy<Mutex<Option<u64>>> = Lazy::new(|| Mutex::new(None));
 static LAST_CAPTURE_RECT: Lazy<Mutex<Option<RegionRect>>> = Lazy::new(|| Mutex::new(None));
-static ENCODER_TX: Lazy<Mutex<Option<mpsc::Sender<PendingFrame>>>> = Lazy::new(|| Mutex::new(None));
+static ENCODER_TX: Lazy<Mutex<Option<mpsc::SyncSender<PendingFrame>>>> =
+    Lazy::new(|| Mutex::new(None));
 static ENCODER_WORKER: Lazy<Mutex<Option<std::thread::JoinHandle<()>>>> =
     Lazy::new(|| Mutex::new(None));
 #[cfg(target_os = "windows")]
@@ -118,6 +121,13 @@ pub fn set_replay_capture_fps(fps: u32) {
 
 pub fn replay_capture_fps() -> u32 {
     REPLAY_CAPTURE_FPS.load(Ordering::SeqCst).max(1) as u32
+}
+
+fn current_session_elapsed_ms() -> u64 {
+    SESSION_START
+        .lock()
+        .unwrap()
+        .map_or(0, |t| t.elapsed().as_millis() as u64)
 }
 
 /// Start frame capture for a new session, sharing the caller's `session_start`
@@ -273,6 +283,7 @@ fn start_capture_backend(generation: u64) {
                 );
 
                 let mut last_frame_ts_ms = 0u64;
+                let mut next_geometry_refresh_at = Instant::now();
                 loop {
                     if !RECORDING.load(Ordering::Relaxed)
                         || GENERATION.load(Ordering::Relaxed) != generation
@@ -284,28 +295,33 @@ fn start_capture_backend(generation: u64) {
                         continue;
                     }
 
-                    if let Ok(updated_geometry) = capture_target_geometry(hwnd) {
-                        if updated_geometry.monitor_rect != geometry.monitor_rect {
-                            *CAPTURE_TARGET_GEOMETRY.lock().unwrap() = Some(updated_geometry);
-                            break;
+                    let min_interval_ms = (1000 / replay_capture_fps() as u64).max(1);
+                    if last_frame_ts_ms != 0 {
+                        let ts_ms = current_session_elapsed_ms();
+                        let next_due_ms = last_frame_ts_ms.saturating_add(min_interval_ms);
+                        if ts_ms < next_due_ms {
+                            std::thread::sleep(Duration::from_millis(
+                                (next_due_ms - ts_ms).min(10),
+                            ));
+                            continue;
                         }
-                        geometry = updated_geometry;
-                        *CAPTURE_TARGET_GEOMETRY.lock().unwrap() = Some(geometry);
+                    }
+
+                    if Instant::now() >= next_geometry_refresh_at {
+                        next_geometry_refresh_at = Instant::now() + Duration::from_millis(250);
+                        if let Ok(updated_geometry) = capture_target_geometry(hwnd) {
+                            if updated_geometry.monitor_rect != geometry.monitor_rect {
+                                *CAPTURE_TARGET_GEOMETRY.lock().unwrap() = Some(updated_geometry);
+                                break;
+                            }
+                            geometry = updated_geometry;
+                            *CAPTURE_TARGET_GEOMETRY.lock().unwrap() = Some(geometry);
+                        }
                     }
 
                     match manager.capture_frame_fast() {
                         Ok((pixels, (width, height))) => {
-                            let ts_ms = SESSION_START
-                                .lock()
-                                .unwrap()
-                                .map_or(0, |t| t.elapsed().as_millis() as u64);
-                            let min_interval_ms =
-                                (1000 / replay_capture_fps() as u64).max(1);
-                            if last_frame_ts_ms != 0
-                                && ts_ms.saturating_sub(last_frame_ts_ms) < min_interval_ms
-                            {
-                                continue;
-                            }
+                            let ts_ms = current_session_elapsed_ms();
                             last_frame_ts_ms = ts_ms;
                             if let Err(error) = queue_dxgi_frame(
                                 pixels,
@@ -587,12 +603,17 @@ fn queue_dxgi_frame(
     }
 
     if let Some(tx) = ENCODER_TX.lock().unwrap().as_ref().cloned() {
-        let _ = tx.send(PendingFrame {
+        let pending = PendingFrame {
             timestamp_ms: ts_ms,
             bgra: cropped,
             width: cropped_width as u32,
             height: cropped_height as u32,
-        });
+        };
+        match tx.try_send(pending) {
+            Ok(()) => {}
+            Err(mpsc::TrySendError::Full(_)) => {}
+            Err(mpsc::TrySendError::Disconnected(_)) => {}
+        }
     }
 
     Ok(())
@@ -608,7 +629,7 @@ fn unix_now_ms() -> u64 {
 }
 
 fn start_encoder_worker(generation: u64) {
-    let (tx, rx) = mpsc::channel::<PendingFrame>();
+    let (tx, rx) = mpsc::sync_channel::<PendingFrame>(MAX_PENDING_ENCODE_FRAMES);
     *ENCODER_TX.lock().unwrap() = Some(tx);
     let handle = std::thread::Builder::new()
         .name(format!("screen-encoder-{generation}"))
@@ -660,7 +681,7 @@ fn queue_completed_frames(ended_at_unix_ms: u64, reason: &str) -> usize {
 }
 
 fn max_frames() -> usize {
-    (replay_capture_fps() as usize).saturating_mul(180).max(MAX_FRAMES)
+    (replay_capture_fps() as usize).saturating_mul(MAX_CAPTURE_BUFFER_SECS)
 }
 
 // ─── Replay merge helpers ──────────────────────────────────────────────────────
