@@ -717,13 +717,13 @@ function GeneralSettings({
 
         {/* ── Username ──────────────────────────────────────────────── */}
         {activeSection === "basics" && (
-        <FieldGroup label="Display Name" description="Your KovaaK's username — used for VS-mode score comparison">
+        <FieldGroup label="Display Name" description="Optional local label for the app UI. Live VS mode and hub uploads now use the active in-game identity directly.">
           <div className="flex gap-2">
             <input
               type="text"
               value={settings.username}
               onChange={(e) => update("username", e.target.value)}
-              placeholder="KovaaK's username"
+              placeholder="Shown locally in the desktop app"
               className="am-input flex-1"
             />
             <Btn
@@ -1308,7 +1308,7 @@ function GeneralSettings({
               ) : null}
 
               <p className="text-xs leading-relaxed" style={{ color: C.textFaint }}>
-                AimMod keeps track of which local runs have already been uploaded, retries missing ones automatically, and can requeue everything if the hub schema changes later.
+                AimMod keeps track of what is already uploaded, retries anything that did not go through, and can send older runs again when needed.
               </p>
 
               <div

@@ -143,7 +143,12 @@ pub fn mark_replay_media_uploaded(
             updated_at_unix_ms = ?2
         WHERE session_id = ?1
         ",
-        params![session_id, current_unix_ms(), schema_version as i64, quality],
+        params![
+            session_id,
+            current_unix_ms(),
+            schema_version as i64,
+            quality
+        ],
     )?;
     Ok(())
 }
@@ -162,7 +167,10 @@ pub fn clear_replay_media_upload_marks(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
-pub fn get_replay_upload_state(app: &AppHandle, session_id: &str) -> Result<Option<ReplayUploadState>> {
+pub fn get_replay_upload_state(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<ReplayUploadState>> {
     let conn = connect(app)?;
     conn.query_row(
         "
@@ -178,7 +186,9 @@ pub fn get_replay_upload_state(app: &AppHandle, session_id: &str) -> Result<Opti
         |row| {
             Ok(ReplayUploadState {
                 is_favorite: row.get::<_, i64>(0)? != 0,
-                hub_media_uploaded_at_unix_ms: row.get::<_, Option<i64>>(1)?.map(|value| value as u64),
+                hub_media_uploaded_at_unix_ms: row
+                    .get::<_, Option<i64>>(1)?
+                    .map(|value| value as u64),
                 hub_media_schema_version: row.get::<_, i64>(2)? as u32,
                 hub_media_uploaded_quality: row.get::<_, Option<String>>(3)?,
             })
@@ -951,9 +961,9 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
 
     if user_version < 15 {
         run_schema_migration(conn, 15, |tx| {
-            for statement in [
-                "ALTER TABLE replay_assets ADD COLUMN hub_media_uploaded_quality TEXT;",
-            ] {
+            for statement in
+                ["ALTER TABLE replay_assets ADD COLUMN hub_media_uploaded_quality TEXT;"]
+            {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {
                         return Err(error.into());
@@ -966,9 +976,9 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
 
     if user_version < 16 {
         run_schema_migration(conn, 16, |tx| {
-            for statement in [
-                "ALTER TABLE session_run_summaries ADD COLUMN started_at_bridge_ts_ms INTEGER;",
-            ] {
+            for statement in
+                ["ALTER TABLE session_run_summaries ADD COLUMN started_at_bridge_ts_ms INTEGER;"]
+            {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {
                         return Err(error.into());
@@ -2914,7 +2924,9 @@ fn classify_csv_only_session(
         };
     }
 
-    if dynamic_clicking_hint || (kills > 0 && (avg_ttk_secs >= 0.45 || (avg_kps > 0.0 && avg_kps <= 2.25))) {
+    if dynamic_clicking_hint
+        || (kills > 0 && (avg_ttk_secs >= 0.45 || (avg_kps > 0.0 && avg_kps <= 2.25)))
+    {
         return crate::bridge::PersistedScenarioClassification {
             family: "DynamicClicking".to_string(),
             subtype: None,

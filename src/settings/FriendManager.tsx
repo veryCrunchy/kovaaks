@@ -230,11 +230,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     try {
       const added = await invoke<FriendProfile[]>("import_steam_friends");
       if (added.length === 0) {
-        showSuccess("All Steam friends are already added (or list is empty).");
+        showSuccess("All detected KovaaK's friends are already added (or the list is empty).");
       } else {
         const next = await invoke<FriendProfile[]>("get_friends");
         updateFriends(next);
-        showSuccess(`Imported ${added.length} Steam friend${added.length === 1 ? "" : "s"}.`);
+        showSuccess(`Imported ${added.length} KovaaK's friend${added.length === 1 ? "" : "s"}.`);
       }
     } catch (e) {
       setError(String(e));
@@ -328,7 +328,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
               cursor: importing ? "not-allowed" : "pointer",
             }}
           >
-            {importing ? `Importing… ${importProgress > 0 ? importProgress : ""}` : "Import Steam Friends"}
+            {importing ? `Importing… ${importProgress > 0 ? importProgress : ""}` : "Import KovaaK's Friends"}
           </button>
         </div>
       )}

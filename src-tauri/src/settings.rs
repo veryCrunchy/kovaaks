@@ -218,9 +218,23 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
     } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.app") {
         format!("https://aimmod.app{}", rest)
     } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.app") {
-        format!("https://aimmod.app{}", if rest.starts_with('/') { rest.to_string() } else { format!("/{}", rest) })
+        format!(
+            "https://aimmod.app{}",
+            if rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{}", rest)
+            }
+        )
     } else if let Some(rest) = trimmed.strip_prefix("aimmod.app") {
-        format!("https://aimmod.app{}", if rest.is_empty() || rest.starts_with('/') { rest.to_string() } else { format!("/{}", rest) })
+        format!(
+            "https://aimmod.app{}",
+            if rest.is_empty() || rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{}", rest)
+            }
+        )
     } else {
         trimmed.to_string()
     };
