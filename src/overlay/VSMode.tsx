@@ -41,6 +41,7 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
   const { liveScore, sessionResult, isSessionActive, elapsedSeconds } = useLiveScore();
   const statsPanel = useStatsPanel();
   const [selectedFriend, setSelectedFriend] = useState<FriendProfile | null>(null);
+  const [currentUser, setCurrentUser] = useState<FriendProfile | null>(null);
   const [friendScore, setFriendScore] = useState<number | null>(null);
   const [fetchingFriend, setFetchingFriend] = useState(false);
   const [personalBestScore, setPersonalBestScore] = useState<number | null>(null);
@@ -60,8 +61,10 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
     Promise.all([
       invoke<FriendProfile[]>("get_friends"),
       invoke<{ selected_friend?: string }>("get_settings"),
+      invoke<FriendProfile | null>("get_current_kovaaks_user"),
     ])
-      .then(([list, settings]) => {
+      .then(([list, settings, current]) => {
+        setCurrentUser(current);
         if (settings.selected_friend) {
           const match = list.find((f) => f.username === settings.selected_friend);
           if (match) setSelectedFriend(match);
@@ -78,8 +81,10 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
       Promise.all([
         invoke<FriendProfile[]>("get_friends"),
         invoke<{ selected_friend?: string }>("get_settings"),
+        invoke<FriendProfile | null>("get_current_kovaaks_user"),
       ])
-        .then(([list, settings]) => {
+        .then(([list, settings, current]) => {
+          setCurrentUser(current);
           const username = e.payload || settings.selected_friend;
           if (username) {
             const match = list.find((f) => f.username === username);
@@ -93,6 +98,30 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
         });
     });
     return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen("kovaaks-user-updated", () => {
+      void invoke<FriendProfile | null>("get_current_kovaaks_user")
+        .then((profile) => setCurrentUser(profile))
+        .catch((err) => {
+          logError("VSMode", `Failed to refresh current user: ${err && err.message ? err.message : err}`);
+        });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  useEffect(() => {
+    const id = setInterval(() => {
+      void invoke<FriendProfile | null>("get_current_kovaaks_user")
+        .then((profile) => setCurrentUser(profile))
+        .catch((err) => {
+          logError("VSMode", `Periodic current-user refresh failed: ${err && err.message ? err.message : err}`);
+        });
+    }, 5_000);
+    return () => clearInterval(id);
   }, []);
 
   // Update scenario duration when a session completes
@@ -112,25 +141,28 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
 
   // Initial friend score fetch when friend/scenario changes
   useEffect(() => {
-    if (!selectedFriend || !activeScenario) {
+    const opponent = selectedFriend ?? currentUser;
+    if (!opponent || !activeScenario) {
       setFriendScore(null);
       return;
     }
     setFetchingFriend(true);
     invoke<number | null>("fetch_friend_score", {
-      username: selectedFriend.username,
+      username: opponent.username,
       scenarioName: activeScenario,
+      steamId: opponent.steam_id,
+      steamAccountName: opponent.steam_account_name,
     })
       .then((score) => setFriendScore(score))
       .catch((err) => {
         setFriendScore(null);
         logError(
           "VSMode",
-          `Failed to fetch friend score for ${selectedFriend.username} / ${activeScenario}: ${err && err.message ? err.message : err}`
+          `Failed to fetch friend score for ${opponent.username} / ${activeScenario}: ${err && err.message ? err.message : err}`
         );
       })
       .finally(() => setFetchingFriend(false));
-  }, [selectedFriend?.username, activeScenario]);
+  }, [selectedFriend?.username, selectedFriend?.steam_id, currentUser?.username, currentUser?.steam_id, activeScenario]);
 
   // Load personal best for the active scenario so VS mode can fallback to PB.
   useEffect(() => {
@@ -159,25 +191,28 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
 
   // Periodic re-fetch every 30s while session is live (friend may be playing too)
   useEffect(() => {
-    if (!isSessionActive || !selectedFriend || !activeScenario) return;
+    const opponent = selectedFriend ?? currentUser;
+    if (!isSessionActive || !opponent || !activeScenario) return;
     const id = setInterval(() => {
       invoke<number | null>("fetch_friend_score", {
-        username: selectedFriend.username,
+        username: opponent.username,
         scenarioName: activeScenario,
+        steamId: opponent.steam_id,
+        steamAccountName: opponent.steam_account_name,
       })
         .then((score) => setFriendScore(score))
         .catch((err) => {
           logError(
             "VSMode",
-            `Periodic fetch_friend_score failed for ${selectedFriend.username} / ${activeScenario}: ${err && err.message ? err.message : err}`
+            `Periodic fetch_friend_score failed for ${opponent.username} / ${activeScenario}: ${err && err.message ? err.message : err}`
           );
         });
-    }, 30_000);
+    }, 10_000);
     return () => clearInterval(id);
-  }, [isSessionActive, selectedFriend?.username, activeScenario]);
+  }, [isSessionActive, selectedFriend?.username, selectedFriend?.steam_id, currentUser?.username, currentUser?.steam_id, activeScenario]);
 
   const displayScore = sessionResult?.score ?? liveScore ?? 0;
-  const opponentFinalScore = selectedFriend ? friendScore : personalBestScore;
+  const opponentFinalScore = selectedFriend || currentUser ? friendScore : personalBestScore;
 
   const liveChallengeSeconds =
     statsPanel?.challenge_seconds_total != null
@@ -260,8 +295,10 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
   const isBehind = delta !== null && delta < 0;
   const opponentLabel = selectedFriend
     ? (selectedFriend.steam_account_name || selectedFriend.username)
+    : currentUser
+    ? "YOUR BEST"
     : "HIGH SCORE";
-  const isFetchingOpponent = selectedFriend ? fetchingFriend : fetchingPersonalBest;
+  const isFetchingOpponent = selectedFriend || currentUser ? fetchingFriend : fetchingPersonalBest;
 
   const shouldShow = isSessionActive || sessionResult !== null || displayScore > 0;
 
@@ -360,11 +397,11 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
             <div className="flex items-center justify-between mb-1">
               {/* Left: avatar + name */}
               <div className="flex items-center gap-1.5" style={{ pointerEvents: "auto", minWidth: 0 }}>
-                {selectedFriend ? (
-                  selectedFriend.avatar_url ? (
+                {selectedFriend || currentUser ? (
+                  (selectedFriend ?? currentUser)?.avatar_url ? (
                     <img
-                      src={selectedFriend.avatar_url}
-                      alt={selectedFriend.username}
+                      src={(selectedFriend ?? currentUser)?.avatar_url}
+                      alt={(selectedFriend ?? currentUser)?.username}
                       style={{ width: 16, height: 16, borderRadius: "50%", objectFit: "cover", border: "1px solid rgba(255,255,255,0.15)", flexShrink: 0 }}
                     />
                   ) : (
@@ -378,7 +415,7 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
                   {opponentLabel}
                 </span>
 
-                {selectedFriend && friendSpm !== null && !sessionResult && (
+                {(selectedFriend || currentUser) && friendSpm !== null && !sessionResult && (
                   <span className="tabular-nums" style={{ fontSize: 9, color: "rgba(255,107,107,0.55)" }}>
                     {friendSpm.toLocaleString()} spm
                   </span>
