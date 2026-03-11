@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tauri::Manager;
 
@@ -52,6 +53,8 @@ pub struct CsvImportSummary {
 // ─── Watcher state ─────────────────────────────────────────────────────────────
 
 static WATCHER: Lazy<Mutex<Option<RecommendedWatcher>>> = Lazy::new(|| Mutex::new(None));
+static WATCH_TARGET: Lazy<Mutex<Option<PathBuf>>> = Lazy::new(|| Mutex::new(None));
+static WATCH_RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
 /// Tracks the last time each stats CSV path was fully processed so duplicate
 /// fs-events (Create then Modify for the same file) are silently ignored.
 /// The same file must not be reprocessed within 10 seconds.
@@ -66,9 +69,14 @@ pub fn start(app: AppHandle, stats_dir: &str) {
         *started = Some(SystemTime::now());
     }
     let path = PathBuf::from(stats_dir);
+    if let Ok(mut target) = WATCH_TARGET.lock() {
+        *target = Some(path.clone());
+    }
     if !path.exists() {
         log::warn!("Stats dir does not exist: {stats_dir}");
-        // Still set up the watcher — it will log errors until the dir exists
+        ensure_missing_dir_retry(app.clone());
+    } else {
+        WATCH_RETRY_RUNNING.store(false, Ordering::Release);
     }
 
     let watcher = build_watcher(app, path.clone());
@@ -177,12 +185,229 @@ fn build_watcher(app: AppHandle, path: PathBuf) -> notify::Result<RecommendedWat
         Config::default().with_poll_interval(Duration::from_secs(1)),
     )?;
 
-    // Watch even if dir doesn't exist yet — it will become active when created
+    // The stats dir may not exist yet at startup; `start()` handles retrying
+    // registration once the directory appears.
     if path.exists() {
         watcher.watch(&path, RecursiveMode::NonRecursive)?;
     }
 
     Ok(watcher)
+}
+
+fn ensure_missing_dir_retry(app: AppHandle) {
+    if WATCH_RETRY_RUNNING
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let _ = std::thread::Builder::new()
+        .name("stats-dir-watcher-retry".into())
+        .spawn(move || {
+            while WATCH_RETRY_RUNNING.load(Ordering::Acquire) {
+                std::thread::sleep(Duration::from_secs(1));
+                let target = WATCH_TARGET.lock().ok().and_then(|guard| guard.clone());
+                let Some(target) = target else {
+                    continue;
+                };
+                if !target.exists() {
+                    continue;
+                }
+
+                let stats_dir = target.to_string_lossy().into_owned();
+                WATCH_RETRY_RUNNING.store(false, Ordering::Release);
+                restart(&app, &stats_dir);
+                break;
+            }
+        });
+}
+
+fn process_stats_csv(app: AppHandle, path: PathBuf) {
+    // Give KovaaK's a brief window to finish flushing the CSV before parsing.
+    std::thread::sleep(Duration::from_millis(500));
+    match parse_csv(&path) {
+        Ok(result) => {
+            log::info!(
+                "Session complete: {} score={}",
+                result.scenario,
+                result.score
+            );
+            // Capture smoothness summary BEFORE draining buffers
+            let smoothness = crate::mouse_hook::session_summary();
+            let mut stats_panel = crate::bridge::take_stats_panel_snapshot();
+            // Seal the run through the bridge lifecycle so session-active
+            // state, mouse metrics, and screen capture stay in sync.
+            crate::bridge::finalize_session_tracking_from_csv_completion(&app);
+            let persistence_sync_ok = crate::bridge::sync_run_capture_for_persistence(4000);
+            if !persistence_sync_ok {
+                log::warn!(
+                    "file_watcher: bridge state sync did not complete before persistence for {}",
+                    result.scenario
+                );
+            }
+            let run_snapshot = crate::bridge::take_run_snapshot();
+            // Drain path + metric + video buffers using the finalized
+            // run timing so split capture segments from recovery/restarts
+            // are matched back to the correct run before persistence.
+            let mouse_capture =
+                crate::mouse_hook::take_replay_capture_for_run(run_snapshot.as_ref());
+            let screen_frames = crate::screen_recorder::take_frames_for_run(run_snapshot.as_ref());
+            let shot_timing =
+                run_snapshot
+                    .as_ref()
+                    .map(|snap| crate::session_store::ShotTimingSnapshot {
+                        paired_shot_hits: snap.paired_shot_hits,
+                        avg_fire_to_hit_ms: snap.avg_fire_to_hit_ms.map(|v| v as f32),
+                        p90_fire_to_hit_ms: snap.p90_fire_to_hit_ms.map(|v| v as f32),
+                        avg_shots_to_hit: snap.avg_shots_to_hit.map(|v| v as f32),
+                        corrective_shot_ratio: snap.corrective_shot_ratio.map(|v| v as f32),
+                    });
+            if let Some(base_stats_panel) = stats_panel.clone() {
+                let classification = crate::bridge::classify_persisted_session(
+                    Some(result.scenario.as_str()),
+                    &base_stats_panel,
+                    run_snapshot.as_ref(),
+                    run_snapshot
+                        .as_ref()
+                        .map(|snap| snap.shot_telemetry.as_slice())
+                        .unwrap_or(&[]),
+                );
+                if classification.family != "Unknown"
+                    && (base_stats_panel.scenario_type == "Unknown"
+                        || base_stats_panel.scenario_subtype.is_none())
+                {
+                    let mut next = base_stats_panel;
+                    next.scenario_type = classification.family;
+                    next.scenario_subtype = classification.subtype;
+                    stats_panel = Some(next);
+                }
+            }
+            // Build session id and persist the session row before
+            // child replay/run tables, which are foreign-keyed to sessions.
+            let session_id = format!(
+                "{}-{}",
+                result.scenario.to_lowercase().replace(' ', "_"),
+                result.timestamp
+            );
+            let record = crate::session_store::SessionRecord {
+                id: session_id.clone(),
+                scenario: result.scenario.clone(),
+                score: result.score,
+                accuracy: result.accuracy,
+                kills: result.kills,
+                deaths: result.deaths,
+                duration_secs: result.duration_secs,
+                avg_ttk: result.avg_ttk,
+                damage_done: result.damage_done,
+                timestamp: result.timestamp.clone(),
+                smoothness: smoothness.clone(),
+                stats_panel: stats_panel.clone(),
+                shot_timing: shot_timing.clone(),
+                has_replay: false,
+                replay_is_favorite: false,
+                replay_positions_count: 0,
+                replay_metrics_count: 0,
+                replay_frames_count: 0,
+            };
+            crate::session_store::add_session(&app, record);
+
+            let has_replay = crate::replay_store::save_replay(
+                &app,
+                &session_id,
+                crate::replay_store::ReplayData {
+                    positions: mouse_capture.positions,
+                    metrics: mouse_capture.metrics,
+                    frames: screen_frames,
+                    run_snapshot: run_snapshot.clone(),
+                },
+            );
+            if has_replay {
+                crate::session_store::set_session_has_replay(&app, &session_id, true);
+            }
+            let audit_app = app.clone();
+            let audit_session_id = session_id.clone();
+            let _ = std::thread::Builder::new()
+                .name("session-sql-audit".into())
+                .spawn(move || {
+                    match crate::stats_db::audit_session_sql(&audit_app, &audit_session_id) {
+                        Ok(audit) if audit.has_issues() => {
+                            let _ =
+                                crate::stats_db::persist_session_sql_audit(&audit_app, &audit);
+                            log::warn!(
+                                "file_watcher: sql audit failed for {} classes={} issues={} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
+                                audit_session_id,
+                                audit.failure_classes.join(","),
+                                audit.issues.join(" | "),
+                                audit.replay_positions_rows,
+                                audit.replay_metrics_rows,
+                                audit.replay_frames_rows,
+                                audit.run_summary_rows,
+                                audit.run_timeline_rows,
+                                audit.shot_event_rows,
+                                audit.shot_target_rows,
+                                audit.context_window_rows,
+                            );
+                        }
+                        Ok(audit) => {
+                            let _ =
+                                crate::stats_db::persist_session_sql_audit(&audit_app, &audit);
+                            log::info!(
+                                "file_watcher: sql audit ok for {} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
+                                audit_session_id,
+                                audit.replay_positions_rows,
+                                audit.replay_metrics_rows,
+                                audit.replay_frames_rows,
+                                audit.run_summary_rows,
+                                audit.run_timeline_rows,
+                                audit.shot_event_rows,
+                                audit.shot_target_rows,
+                                audit.context_window_rows,
+                            );
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "file_watcher: could not audit persisted session {}: {error}",
+                                audit_session_id
+                            );
+                        }
+                    }
+                });
+            let _ = app.emit(
+                EVENT_SESSION_COMPLETE,
+                SessionCompletePayload {
+                    result: result.clone(),
+                    stats_panel: stats_panel.clone(),
+                    run_snapshot: run_snapshot.clone(),
+                },
+            );
+            crate::hub_sync::queue_session_upload(
+                &app,
+                crate::hub_sync::SessionUploadInput {
+                    session_id: session_id.clone(),
+                    result: result.clone(),
+                    smoothness: smoothness.clone(),
+                    stats_panel: stats_panel.clone(),
+                    shot_timing: shot_timing.clone(),
+                    run_snapshot: run_snapshot.clone(),
+                },
+            );
+            // Bring the stats window to the foreground so the
+            // user sees results immediately without manual action.
+            let should_open_stats = crate::settings::load(&app)
+                .map(|settings| settings.open_stats_window_on_session_complete)
+                .unwrap_or(false);
+            if should_open_stats {
+                if let Some(win) = app.get_webview_window("stats") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
+                }
+            }
+        }
+        Err(e) => {
+            log::warn!("Failed to parse stats CSV {}: {e}", path.display());
+        }
+    }
 }
 
 fn handle_fs_event(app: &AppHandle, event: &Event) {
@@ -224,190 +449,11 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                         seen.insert(canonical, Instant::now());
                     }
                     log::info!("New stats file detected: {}", path.display());
-                    // Small delay to ensure the game has finished writing
-                    std::thread::sleep(Duration::from_millis(500));
-                    match parse_csv(path) {
-                        Ok(result) => {
-                            log::info!(
-                                "Session complete: {} score={}",
-                                result.scenario,
-                                result.score
-                            );
-                            // Capture smoothness summary BEFORE draining buffers
-                            let smoothness = crate::mouse_hook::session_summary();
-                            let mut stats_panel = crate::bridge::take_stats_panel_snapshot();
-                            // Seal the run through the bridge lifecycle so session-active
-                            // state, mouse metrics, and screen capture stay in sync.
-                            crate::bridge::finalize_session_tracking_from_csv_completion(app);
-                            let persistence_sync_ok =
-                                crate::bridge::sync_run_capture_for_persistence(4000);
-                            if !persistence_sync_ok {
-                                log::warn!(
-                                    "file_watcher: bridge state sync did not complete before persistence for {}",
-                                    result.scenario
-                                );
-                            }
-                            let run_snapshot = crate::bridge::take_run_snapshot();
-                            // Drain path + metric + video buffers using the finalized
-                            // run timing so split capture segments from recovery/restarts
-                            // are matched back to the correct run before persistence.
-                            let mouse_capture = crate::mouse_hook::take_replay_capture_for_run(
-                                run_snapshot.as_ref(),
-                            );
-                            let screen_frames =
-                                crate::screen_recorder::take_frames_for_run(run_snapshot.as_ref());
-                            let shot_timing = run_snapshot.as_ref().map(|snap| {
-                                crate::session_store::ShotTimingSnapshot {
-                                    paired_shot_hits: snap.paired_shot_hits,
-                                    avg_fire_to_hit_ms: snap.avg_fire_to_hit_ms.map(|v| v as f32),
-                                    p90_fire_to_hit_ms: snap.p90_fire_to_hit_ms.map(|v| v as f32),
-                                    avg_shots_to_hit: snap.avg_shots_to_hit.map(|v| v as f32),
-                                    corrective_shot_ratio: snap
-                                        .corrective_shot_ratio
-                                        .map(|v| v as f32),
-                                }
-                            });
-                            if let Some(base_stats_panel) = stats_panel.clone() {
-                                let classification = crate::bridge::classify_persisted_session(
-                                    Some(result.scenario.as_str()),
-                                    &base_stats_panel,
-                                    run_snapshot.as_ref(),
-                                    run_snapshot
-                                        .as_ref()
-                                        .map(|snap| snap.shot_telemetry.as_slice())
-                                        .unwrap_or(&[]),
-                                );
-                                if classification.family != "Unknown"
-                                    && (base_stats_panel.scenario_type == "Unknown"
-                                        || base_stats_panel.scenario_subtype.is_none())
-                                {
-                                    let mut next = base_stats_panel;
-                                    next.scenario_type = classification.family;
-                                    next.scenario_subtype = classification.subtype;
-                                    stats_panel = Some(next);
-                                }
-                            }
-                            // Build session id and persist the session row before
-                            // child replay/run tables, which are foreign-keyed to sessions.
-                            let session_id = format!(
-                                "{}-{}",
-                                result.scenario.to_lowercase().replace(' ', "_"),
-                                result.timestamp
-                            );
-                            let record = crate::session_store::SessionRecord {
-                                id: session_id.clone(),
-                                scenario: result.scenario.clone(),
-                                score: result.score,
-                                accuracy: result.accuracy,
-                                kills: result.kills,
-                                deaths: result.deaths,
-                                duration_secs: result.duration_secs,
-                                avg_ttk: result.avg_ttk,
-                                damage_done: result.damage_done,
-                                timestamp: result.timestamp.clone(),
-                                smoothness: smoothness.clone(),
-                                stats_panel: stats_panel.clone(),
-                                shot_timing: shot_timing.clone(),
-                                has_replay: false,
-                                replay_is_favorite: false,
-                                replay_positions_count: 0,
-                                replay_metrics_count: 0,
-                                replay_frames_count: 0,
-                            };
-                            crate::session_store::add_session(app, record);
-
-                            let has_replay = crate::replay_store::save_replay(
-                                app,
-                                &session_id,
-                                crate::replay_store::ReplayData {
-                                    positions: mouse_capture.positions,
-                                    metrics: mouse_capture.metrics,
-                                    frames: screen_frames,
-                                    run_snapshot: run_snapshot.clone(),
-                                },
-                            );
-                            if has_replay {
-                                crate::session_store::set_session_has_replay(
-                                    app,
-                                    &session_id,
-                                    true,
-                                );
-                            }
-                            match crate::stats_db::audit_session_sql(app, &session_id) {
-                                Ok(audit) if audit.has_issues() => {
-                                    let _ = crate::stats_db::persist_session_sql_audit(app, &audit);
-                                    log::warn!(
-                                        "file_watcher: sql audit failed for {} classes={} issues={} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
-                                        session_id,
-                                        audit.failure_classes.join(","),
-                                        audit.issues.join(" | "),
-                                        audit.replay_positions_rows,
-                                        audit.replay_metrics_rows,
-                                        audit.replay_frames_rows,
-                                        audit.run_summary_rows,
-                                        audit.run_timeline_rows,
-                                        audit.shot_event_rows,
-                                        audit.shot_target_rows,
-                                        audit.context_window_rows,
-                                    );
-                                }
-                                Ok(audit) => {
-                                    let _ = crate::stats_db::persist_session_sql_audit(app, &audit);
-                                    log::info!(
-                                        "file_watcher: sql audit ok for {} replay=({}/{}/{}) summary_rows={} timeline_rows={} shot_events={} shot_targets={} context_windows={}",
-                                        session_id,
-                                        audit.replay_positions_rows,
-                                        audit.replay_metrics_rows,
-                                        audit.replay_frames_rows,
-                                        audit.run_summary_rows,
-                                        audit.run_timeline_rows,
-                                        audit.shot_event_rows,
-                                        audit.shot_target_rows,
-                                        audit.context_window_rows,
-                                    );
-                                }
-                                Err(error) => {
-                                    log::warn!(
-                                        "file_watcher: could not audit persisted session {}: {error}",
-                                        session_id
-                                    );
-                                }
-                            }
-                            let _ = app.emit(
-                                EVENT_SESSION_COMPLETE,
-                                SessionCompletePayload {
-                                    result: result.clone(),
-                                    stats_panel: stats_panel.clone(),
-                                    run_snapshot: run_snapshot.clone(),
-                                },
-                            );
-                            crate::hub_sync::queue_session_upload(
-                                app,
-                                crate::hub_sync::SessionUploadInput {
-                                    session_id: session_id.clone(),
-                                    result: result.clone(),
-                                    smoothness: smoothness.clone(),
-                                    stats_panel: stats_panel.clone(),
-                                    shot_timing: shot_timing.clone(),
-                                    run_snapshot: run_snapshot.clone(),
-                                },
-                            );
-                            // Bring the stats window to the foreground so the
-                            // user sees results immediately without manual action.
-                            let should_open_stats = crate::settings::load(app)
-                                .map(|settings| settings.open_stats_window_on_session_complete)
-                                .unwrap_or(false);
-                            if should_open_stats {
-                                if let Some(win) = app.get_webview_window("stats") {
-                                    let _ = win.show();
-                                    let _ = win.set_focus();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("Failed to parse stats CSV {}: {e}", path.display());
-                        }
-                    }
+                    let app = app.clone();
+                    let path = path.clone();
+                    let _ = std::thread::Builder::new()
+                        .name("stats-csv-processor".into())
+                        .spawn(move || process_stats_csv(app, path));
                 }
             }
         }
