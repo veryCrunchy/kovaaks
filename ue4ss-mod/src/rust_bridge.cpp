@@ -2,6 +2,7 @@
 
 #include <array>
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -38,6 +39,7 @@ std::atomic<ULONGLONG> g_last_reconnect_attempt_ms{0};
 std::atomic<ULONGLONG> g_last_probe_attempt_ms{0};
 std::atomic<bool> g_reconnect_worker_stop{false};
 std::thread g_reconnect_worker{};
+std::recursive_mutex g_api_mutex{};
 
 constexpr ULONGLONG k_min_reconnect_interval_ms = 250;
 constexpr ULONGLONG k_connected_probe_interval_ms = 1500;
@@ -60,10 +62,12 @@ bool module_still_loaded(HMODULE expected_module, const void* symbol_address) {
 }
 
 void invalidate_api() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     g_api = {};
 }
 
 void refresh_transport_error() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (g_api.last_error && module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.last_error))) {
         g_last_transport_error.store(static_cast<DWORD>(g_api.last_error()), std::memory_order_relaxed);
         return;
@@ -72,6 +76,7 @@ void refresh_transport_error() {
 }
 
 bool reconnect_now() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.init || !module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.init))) {
         return false;
     }
@@ -93,6 +98,7 @@ void reconnect_throttled() {
 }
 
 bool probe_connected_transport() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.emit_json || !module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.emit_json))) {
         invalidate_api();
         return false;
@@ -128,19 +134,26 @@ void ensure_reconnect_worker() {
     g_reconnect_worker_stop.store(false, std::memory_order_release);
     g_reconnect_worker = std::thread([] {
         while (!g_reconnect_worker_stop.load(std::memory_order_acquire)) {
-            const bool api_ready =
-                g_api.module != nullptr
-                && g_api.init != nullptr
-                && g_api.is_connected != nullptr;
+            bool api_ready = false;
+            {
+                const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
+                api_ready =
+                    g_api.module != nullptr
+                    && g_api.init != nullptr
+                    && g_api.is_connected != nullptr;
+            }
             if (api_ready) {
                 bool connected = false;
-                if (module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.is_connected))) {
-                    connected = g_api.is_connected();
-                    if (connected) {
-                        connected = probe_connected_transport();
+                {
+                    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
+                    if (module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.is_connected))) {
+                        connected = g_api.is_connected();
+                    } else {
+                        invalidate_api();
                     }
-                } else {
-                    invalidate_api();
+                }
+                if (connected) {
+                    connected = probe_connected_transport();
                 }
                 if (!connected) {
                     reconnect_throttled();
@@ -165,6 +178,7 @@ std::wstring module_dir() {
 }
 
 bool load_api() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (g_api.module != nullptr) {
         return true;
     }
@@ -204,6 +218,7 @@ bool load_api() {
 namespace kovaaks {
 
 bool RustBridge::startup() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!load_api()) {
         return false;
     }
@@ -220,6 +235,7 @@ bool RustBridge::startup() {
 }
 
 bool RustBridge::reconnect() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!load_api()) {
         return false;
     }
@@ -229,41 +245,49 @@ bool RustBridge::reconnect() {
 
 void RustBridge::shutdown() {
     stop_reconnect_worker();
+    RustApi api_snapshot{};
+    g_api_mutex.lock();
     if (!g_api.module) {
+        g_api_mutex.unlock();
         return;
     }
     if (!module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.shutdown))) {
         // Module unload order during process detach can invalidate function pointers.
         // Drop API state and return without touching stale addresses.
-        invalidate_api();
+        g_api = {};
+        g_api_mutex.unlock();
         return;
     }
-    if (g_api.shutdown) {
+    api_snapshot = g_api;
+    g_api = {};
+    g_api_mutex.unlock();
+    if (api_snapshot.shutdown) {
         // Process exit/unload can invalidate downstream state; keep shutdown best-effort.
 #if defined(_MSC_VER)
         __try {
-            g_api.shutdown();
+            api_snapshot.shutdown();
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
 #else
-        g_api.shutdown();
+        api_snapshot.shutdown();
 #endif
     }
     // Avoid aggressive FreeLibrary on shutdown path; process teardown will reclaim.
     // This trades a tiny leak on hot-reload for improved exit stability.
 #if 0
-    if (g_api.module) {
-        FreeLibrary(g_api.module);
+    if (api_snapshot.module) {
+        FreeLibrary(api_snapshot.module);
     }
 #endif
-    invalidate_api();
 }
 
 bool RustBridge::api_ready() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     return g_api.module != nullptr && g_api.init != nullptr && g_api.emit_json != nullptr;
 }
 
 bool RustBridge::is_connected() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.is_connected) {
         return false;
     }
@@ -275,6 +299,7 @@ bool RustBridge::is_connected() {
 }
 
 const wchar_t* RustBridge::last_dll_path() {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     return g_last_dll_path.c_str();
 }
 
@@ -287,6 +312,7 @@ uint32_t RustBridge::last_transport_error() {
 }
 
 bool RustBridge::emit_i32(const char* ev, int32_t value) {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.emit_i32) {
         return false;
     }
@@ -311,6 +337,7 @@ bool RustBridge::emit_i32(const char* ev, int32_t value) {
 }
 
 bool RustBridge::emit_f32(const char* ev, float value) {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.emit_f32) {
         return false;
     }
@@ -335,6 +362,7 @@ bool RustBridge::emit_f32(const char* ev, float value) {
 }
 
 bool RustBridge::emit_json(const char* json_line) {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.emit_json) {
         return false;
     }
@@ -359,6 +387,7 @@ bool RustBridge::emit_json(const char* json_line) {
 }
 
 bool RustBridge::poll_command(std::string& out_json) {
+    const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     out_json.clear();
     if (!g_api.poll_command) {
         return false;
