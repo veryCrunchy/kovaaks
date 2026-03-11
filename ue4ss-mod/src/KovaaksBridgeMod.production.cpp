@@ -2,16 +2,20 @@
 #include <Mod/CppUserModBase.hpp>
 #include <Unreal/FText.hpp>
 #include <Unreal/FProperty.hpp>
+#include <Unreal/Core/Containers/ScriptArray.hpp>
+#include <Unreal/Property/FArrayProperty.hpp>
 #include <Unreal/Property/FBoolProperty.hpp>
 #include <Unreal/Property/FNumericProperty.hpp>
 #include <Unreal/Property/FObjectProperty.hpp>
 #include <Unreal/Property/FStrProperty.hpp>
+#include <Unreal/Property/FStructProperty.hpp>
 #include <Unreal/Property/FTextProperty.hpp>
 #include <Unreal/UClass.hpp>
 #include <Unreal/UFunction.hpp>
 #include <Unreal/UObject.hpp>
 #include <Unreal/UObjectGlobals.hpp>
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <cctype>
@@ -1040,53 +1044,39 @@ private:
             );
             kovaaks::RustBridge::emit_json(scenario_msg.data());
         }
-
-        const auto emit_i32_if_valid = [](const char* ev, int32_t value) {
-            if (value >= 0) {
-                kovaaks::RustBridge::emit_i32(ev, value);
-            }
-        };
-        const auto emit_f32_if_valid = [](const char* ev, float value) {
-            if (std::isfinite(value) && value >= 0.0f) {
-                kovaaks::RustBridge::emit_f32(ev, value);
-            }
-        };
-
-        emit_i32_if_valid("pull_is_in_challenge", last_is_in_challenge_);
-        emit_i32_if_valid("pull_is_in_scenario", last_is_in_scenario_);
-        emit_i32_if_valid("pull_is_in_scenario_editor", last_is_in_scenario_editor_);
-        emit_i32_if_valid("pull_is_currently_in_benchmark", last_is_currently_in_benchmark_);
-        emit_i32_if_valid("pull_is_in_trainer", last_is_in_trainer_);
-        emit_i32_if_valid("pull_scenario_is_paused", s_last_pull_scenario_is_paused);
-        emit_i32_if_valid("pull_shots_fired_total", last_shots_fired_);
-        emit_i32_if_valid("pull_shots_hit_total", last_shots_hit_);
-        emit_i32_if_valid("pull_kills_total", last_kills_total_);
-        emit_i32_if_valid("pull_challenge_tick_count_total", last_challenge_tick_count_);
-        emit_i32_if_valid("pull_game_state_code", static_cast<int32_t>(game_state_code));
-
-        emit_f32_if_valid("pull_seconds_total", last_seconds_);
-        emit_f32_if_valid("pull_challenge_seconds_total", last_challenge_seconds_total_);
-        emit_f32_if_valid("pull_score_total", last_score_total_);
-        emit_f32_if_valid("pull_score_total_derived", last_score_total_derived_);
-        emit_f32_if_valid("pull_score_per_minute", last_score_per_minute_);
-        emit_f32_if_valid("pull_kills_per_second", last_kills_per_second_);
-        emit_f32_if_valid("pull_accuracy", last_accuracy_);
-        emit_f32_if_valid("pull_damage_done", last_damage_done_);
-        emit_f32_if_valid("pull_damage_possible", last_damage_possible_);
-        emit_f32_if_valid("pull_damage_efficiency", last_damage_efficiency_);
-        emit_f32_if_valid("pull_time_remaining", last_time_remaining_);
-        emit_f32_if_valid("pull_queue_time_remaining", last_queue_time_remaining_);
-        emit_f32_if_valid("pull_challenge_average_fps", last_challenge_average_fps_);
-
-        std::array<char, 256> gs_msg{};
+        std::array<char, 2048> snapshot{};
         std::snprintf(
-            gs_msg.data(),
-            gs_msg.size(),
-            "{\"ev\":\"pull_game_state\",\"field\":\"%s\",\"value\":%d}",
-            game_state,
-            static_cast<int>(game_state_code)
+            snapshot.data(),
+            snapshot.size(),
+            "{\"ev\":\"pull_snapshot\",\"ts_ms\":%llu,\"is_in_challenge\":%d,\"is_in_scenario\":%d,\"is_in_scenario_editor\":%d,\"is_in_trainer\":%d,\"is_currently_in_benchmark\":%d,\"scenario_is_paused\":%d,\"kills\":%d,\"shots_fired\":%d,\"shots_hit\":%d,\"challenge_tick_count_total\":%d,\"session_time_secs\":%.6f,\"challenge_seconds_total\":%.6f,\"score_total\":%.6f,\"score_total_derived\":%.6f,\"spm\":%.6f,\"kps\":%.6f,\"accuracy_pct\":%.6f,\"challenge_average_fps\":%.6f,\"damage_done\":%.6f,\"damage_possible\":%.6f,\"damage_efficiency\":%.6f,\"time_remaining\":%.6f,\"queue_time_remaining\":%.6f,\"game_state_code\":%d,\"game_state\":\"%s\",\"method\":\"state_request\",\"origin_flag\":\"state_snapshot\",\"source\":\"production_state_sync\"}",
+            static_cast<unsigned long long>(now_ms),
+            last_is_in_challenge_,
+            last_is_in_scenario_,
+            last_is_in_scenario_editor_,
+            last_is_in_trainer_,
+            last_is_currently_in_benchmark_,
+            s_last_pull_scenario_is_paused,
+            last_kills_total_,
+            last_shots_fired_,
+            last_shots_hit_,
+            last_challenge_tick_count_,
+            static_cast<double>(last_seconds_),
+            static_cast<double>(last_challenge_seconds_total_),
+            static_cast<double>(last_score_total_),
+            static_cast<double>(last_score_total_derived_),
+            static_cast<double>(last_score_per_minute_),
+            static_cast<double>(last_kills_per_second_),
+            static_cast<double>(last_accuracy_),
+            static_cast<double>(last_challenge_average_fps_),
+            static_cast<double>(last_damage_done_),
+            static_cast<double>(last_damage_possible_),
+            static_cast<double>(last_damage_efficiency_),
+            static_cast<double>(last_time_remaining_),
+            static_cast<double>(last_queue_time_remaining_),
+            static_cast<int>(game_state_code),
+            game_state
         );
-        kovaaks::RustBridge::emit_json(gs_msg.data());
+        kovaaks::RustBridge::emit_json(snapshot.data());
 
         std::array<char, 320> ack{};
         std::snprintf(
@@ -1097,6 +1087,7 @@ private:
             static_cast<unsigned long long>(now_ms)
         );
         kovaaks::RustBridge::emit_json(ack.data());
+        maybe_emit_user_management_snapshot(now_ms, true);
     }
 
     auto emit_requested_state_snapshot_safe(uint64_t now_ms, const std::string& request_reason) -> bool {
@@ -1627,6 +1618,8 @@ private:
             next_receiver_resolve_ms_ = 0;
             next_scenario_resolve_ms_ = 0;
         }
+
+        maybe_emit_user_management_snapshot(now, false);
 
         resolve_targets(false);
         auto* receiver = resolve_state_receiver_instance(now);
@@ -3025,6 +3018,9 @@ private:
     bool live_metric_hooks_registered_{false};
     bool live_pull_snapshot_dirty_{false};
 
+    // Keep user identity and friend resolution isolated from the core bridge loop.
+    #include "kmod/user_management.inl"
+
     static inline KovaaksBridgeModProduction* s_instance_{nullptr};
 
     void reset_runtime_resolvers() {
@@ -3032,6 +3028,7 @@ private:
         state_receiver_instance_ = nullptr;
         scenario_state_receiver_instance_ = nullptr;
         scenario_manager_instance_ = nullptr;
+        xsolla_login_subsystem_ = nullptr;
         cached_scenario_is_paused_ = -1;
         live_metric_receiver_hint_ = nullptr;
         live_metric_receiver_hint_ms_ = 0;
