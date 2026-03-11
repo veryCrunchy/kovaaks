@@ -184,18 +184,72 @@ fn refresh_pending_count(app: &AppHandle) {
     SYNC_STATUS.lock().pending_count = pending_count;
 }
 
+fn first_nonempty_owned(candidates: &[&str]) -> String {
+    for candidate in candidates {
+        let trimmed = candidate.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    String::new()
+}
+
+fn derive_upload_identity() -> Option<UploadIdentity> {
+    let user = crate::bridge::current_kovaaks_user()?;
+    let kovaaks_user_id = user.kovaaks_user_id.trim().to_string();
+    let kovaaks_username = user.username.trim().to_string();
+    let steam_id = user.steam_id.trim().to_string();
+    if kovaaks_user_id.is_empty() && kovaaks_username.is_empty() && steam_id.is_empty() {
+        return None;
+    }
+
+    let user_external_id = if !kovaaks_user_id.is_empty() {
+        format!("kovaaks:{kovaaks_user_id}")
+    } else if !steam_id.is_empty() {
+        format!("steam:{steam_id}")
+    } else {
+        format!("kovaaks:username:{}", kovaaks_username.to_ascii_lowercase())
+    };
+
+    Some(UploadIdentity {
+        user_external_id,
+        kovaaks_user_id,
+        kovaaks_username: kovaaks_username.clone(),
+        user_display_name: first_nonempty_owned(&[
+            user.display_name.as_str(),
+            user.steam_name.as_str(),
+            kovaaks_username.as_str(),
+        ]),
+        avatar_url: user.avatar_url.trim().to_string(),
+        steam_id,
+        steam_display_name: first_nonempty_owned(&[
+            user.steam_name.as_str(),
+            user.display_name.as_str(),
+        ]),
+    })
+}
+
 pub fn get_sync_overview(app: &AppHandle) -> anyhow::Result<HubSyncOverview> {
     let settings = crate::settings::load(app)?;
     refresh_pending_count(app);
     let status = SYNC_STATUS.lock().clone();
+    let discovered_identity = derive_upload_identity();
     let account_label = if settings.hub_account_label.trim().is_empty() {
-        None
+        discovered_identity.as_ref().and_then(|identity| {
+            let label = first_nonempty_owned(&[
+                identity.user_display_name.as_str(),
+                identity.kovaaks_username.as_str(),
+                identity.steam_display_name.as_str(),
+                identity.steam_id.as_str(),
+            ]);
+            (!label.is_empty()).then_some(label)
+        })
     } else {
         Some(settings.hub_account_label.trim().to_string())
     };
     Ok(HubSyncOverview {
         configured: !normalize_base_url(&settings.hub_api_base_url).is_empty()
-            && !settings.hub_upload_token.trim().is_empty(),
+            && (!settings.hub_upload_token.trim().is_empty() || discovered_identity.is_some()),
         enabled: settings.hub_sync_enabled,
         account_label,
         status,
@@ -367,7 +421,9 @@ pub fn force_full_resync(app: &AppHandle) -> anyhow::Result<()> {
     }
     crate::session_store::reset_all_hub_upload_marks(app);
     if let Err(error) = crate::stats_db::clear_replay_media_upload_marks(app) {
-        log::warn!("hub_sync: could not clear replay media upload marks before full resync: {error}");
+        log::warn!(
+            "hub_sync: could not clear replay media upload marks before full resync: {error}"
+        );
     }
     refresh_pending_count(app);
     queue_pending_session_sync(app);
@@ -380,6 +436,12 @@ struct IngestSessionRequest {
     app_version: String,
     schema_version: u32,
     user_external_id: String,
+    kovaaks_user_id: String,
+    kovaaks_username: String,
+    user_display_name: String,
+    avatar_url: String,
+    steam_id: String,
+    steam_display_name: String,
     session_id: String,
     scenario_name: String,
     scenario_type: String,
@@ -455,6 +517,17 @@ struct ContextWindowPayload {
     coaching_tags: Vec<String>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct UploadIdentity {
+    user_external_id: String,
+    kovaaks_user_id: String,
+    kovaaks_username: String,
+    user_display_name: String,
+    avatar_url: String,
+    steam_id: String,
+    steam_display_name: String,
+}
+
 pub fn queue_session_upload(app: &AppHandle, input: SessionUploadInput) {
     set_sync_in_progress(true);
     let session_id = input.session_id.clone();
@@ -483,7 +556,7 @@ pub fn queue_pending_session_sync(app: &AppHandle) {
     }
 
     if normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || settings.hub_upload_token.trim().is_empty()
+        || (settings.hub_upload_token.trim().is_empty() && derive_upload_identity().is_none())
     {
         return;
     }
@@ -515,7 +588,8 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
 
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
-    if base_url.is_empty() || upload_token.is_empty() {
+    let upload_identity = derive_upload_identity();
+    if base_url.is_empty() || (upload_token.is_empty() && upload_identity.is_none()) {
         log::info!(
             "hub_sync: skipping upload for {} because hub sync is not fully configured",
             input.session_id
@@ -598,18 +672,22 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
         score,
         accuracy,
         duration_ms,
+        upload_identity.as_ref(),
     );
 
     let url = format!("{base_url}{INGEST_PATH}");
-    let response = CLIENT
+    let mut request = CLIENT
         .post(&url)
         .header("Content-Type", "application/json")
         .header("Connect-Protocol-Version", CONNECT_PROTOCOL_VERSION)
-        .header("Authorization", format!("Bearer {upload_token}"))
         .header(
             reqwest::header::USER_AGENT,
             format!("AimMod/{}", crate::app_version::raw_version()),
-        )
+        );
+    if !upload_token.is_empty() {
+        request = request.header("Authorization", format!("Bearer {upload_token}"));
+    }
+    let response = request
         .json(&payload)
         .send()
         .await
@@ -634,7 +712,7 @@ async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
     let settings = crate::settings::load(app)?;
     if !settings.hub_sync_enabled
         || normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || settings.hub_upload_token.trim().is_empty()
+        || (settings.hub_upload_token.trim().is_empty() && derive_upload_identity().is_none())
     {
         record_sync_success(None);
         return Ok(());
@@ -716,11 +794,19 @@ fn build_ingest_payload(
     score: f64,
     accuracy: f64,
     duration_ms: u64,
+    upload_identity: Option<&UploadIdentity>,
 ) -> IngestSessionRequest {
+    let upload_identity = upload_identity.cloned().unwrap_or_default();
     IngestSessionRequest {
         app_version: crate::app_version::raw_version().to_string(),
         schema_version: HUB_SCHEMA_VERSION,
-        user_external_id: String::new(),
+        user_external_id: upload_identity.user_external_id,
+        kovaaks_user_id: upload_identity.kovaaks_user_id,
+        kovaaks_username: upload_identity.kovaaks_username,
+        user_display_name: upload_identity.user_display_name,
+        avatar_url: upload_identity.avatar_url,
+        steam_id: upload_identity.steam_id,
+        steam_display_name: upload_identity.steam_display_name,
         session_id: input.session_id.clone(),
         scenario_name: input.result.scenario.clone(),
         scenario_type: scenario_type.clone(),
@@ -747,7 +833,11 @@ async fn upload_session_batch(
     let settings = crate::settings::load(app)?;
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
-    if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
+    let upload_identity = derive_upload_identity();
+    if !settings.hub_sync_enabled
+        || base_url.is_empty()
+        || (upload_token.is_empty() && upload_identity.is_none())
+    {
         anyhow::bail!("hub sync is not fully configured");
     }
 
@@ -847,17 +937,21 @@ async fn upload_session_batch(
             score,
             accuracy,
             duration_ms,
+            upload_identity.as_ref(),
         ));
     }
 
-    let response = CLIENT
+    let mut request = CLIENT
         .post(format!("{base_url}{BATCH_INGEST_PATH}"))
         .header("Content-Type", "application/json")
-        .header("Authorization", format!("Bearer {upload_token}"))
         .header(
             reqwest::header::USER_AGENT,
             format!("AimMod/{}", crate::app_version::raw_version()),
-        )
+        );
+    if !upload_token.is_empty() {
+        request = request.header("Authorization", format!("Bearer {upload_token}"));
+    }
+    let response = request
         .json(&IngestBatchRequest { sessions })
         .send()
         .await
@@ -905,7 +999,11 @@ async fn upload_session_batch(
         crate::session_store::mark_session_hub_uploaded(app, session_id);
     }
     for record in records {
-        if payload.uploaded_session_ids.iter().any(|id| id == &record.id) {
+        if payload
+            .uploaded_session_ids
+            .iter()
+            .any(|id| id == &record.id)
+        {
             let result = SessionResult {
                 scenario: record.scenario.clone(),
                 score: record.score,
@@ -965,8 +1063,12 @@ async fn upload_replay_media_for_session(
         &settings.replay_media_upload_quality,
     )
     .map_err(anyhow::Error::msg)?;
-    let video_bytes = std::fs::read(&temp_video)
-        .with_context(|| format!("could not read encoded replay media {}", temp_video.display()))?;
+    let video_bytes = std::fs::read(&temp_video).with_context(|| {
+        format!(
+            "could not read encoded replay media {}",
+            temp_video.display()
+        )
+    })?;
 
     let url = format!(
         "{base_url}{REPLAY_MEDIA_UPLOAD_PATH}?sessionId={}&quality={}",
@@ -1081,13 +1183,14 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
             reqwest::header::USER_AGENT,
             format!("AimMod/{}", crate::app_version::raw_version()),
         )
-        .json(&MousePathUploadPayload { points, hit_timestamps_ms })
+        .json(&MousePathUploadPayload {
+            points,
+            hit_timestamps_ms,
+        })
         .send()
         .await
         .with_context(|| {
-            format!(
-                "error sending request for url ({base_url}{REPLAY_MOUSE_PATH_UPLOAD_PATH})"
-            )
+            format!("error sending request for url ({base_url}{REPLAY_MOUSE_PATH_UPLOAD_PATH})")
         })?;
 
     if !response.status().is_success() {
@@ -1132,8 +1235,8 @@ fn should_upload_replay_media(
     Ok(should)
 }
 
-fn normalize_base_url(value: &str) -> String {
-    value.trim().trim_end_matches('/').to_string()
+pub(crate) fn normalize_base_url(value: &str) -> String {
+    crate::settings::normalize_hub_api_base_url(value)
 }
 
 fn played_at_iso(timestamp: &str) -> String {
@@ -1169,8 +1272,7 @@ fn estimate_replay_bridge_base_ts(
                 "shots_hit" => point.shots_hit,
                 _ => None,
             }?;
-            (value.is_finite() && value + 0.0001 >= total as f64)
-                .then(|| point.t_sec as u64 * 1000)
+            (value.is_finite() && value + 0.0001 >= total as f64).then(|| point.t_sec as u64 * 1000)
         })
     }
 
