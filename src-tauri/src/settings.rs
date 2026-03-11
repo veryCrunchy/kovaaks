@@ -3,11 +3,12 @@ use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
-pub const DEFAULT_HUB_API_BASE_URL: &str = "https://api.aimmod.app";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.app";
 pub const DEFAULT_REPLAY_CAPTURE_FPS: u32 = 24;
 pub const DEFAULT_REPLAY_KEEP_COUNT: u32 = 150;
 pub const DEFAULT_REPLAY_MEDIA_UPLOAD_MODE: &str = "favorites_and_pb";
 pub const DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY: &str = "standard";
+pub const DEFAULT_POST_SESSION_SUMMARY_DURATION_SECS: u32 = 20;
 
 /// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -79,6 +80,12 @@ pub struct AppSettings {
     /// Whether the post-session overview card is shown after each run.
     #[serde(default = "default_true")]
     pub hud_post_session_visible: bool,
+    /// Whether AimMod should open the Session Stats window after a run finishes.
+    #[serde(default)]
+    pub open_stats_window_on_session_complete: bool,
+    /// How long the post-session summary should stay on screen. Zero keeps it open until dismissed.
+    #[serde(default = "default_post_session_summary_duration_secs")]
+    pub post_session_summary_duration_secs: u32,
     /// Whether AimMod Hub sync is enabled.
     #[serde(default)]
     pub hub_sync_enabled: bool,
@@ -124,6 +131,8 @@ impl Default for AppSettings {
             hud_stats_visible: true,
             hud_feedback_visible: true,
             hud_post_session_visible: true,
+            open_stats_window_on_session_complete: false,
+            post_session_summary_duration_secs: default_post_session_summary_duration_secs(),
             hub_sync_enabled: false,
             hub_api_base_url: default_hub_api_base_url(),
             hub_upload_token: String::new(),
@@ -146,12 +155,17 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
     if let Some(val) = store.get(STORE_KEY) {
         match serde_json::from_value::<AppSettings>(val.clone()) {
             Ok(mut settings) => {
+                settings.hub_api_base_url = normalize_hub_api_base_url(&settings.hub_api_base_url);
                 if settings.hub_api_base_url.trim().is_empty() {
                     settings.hub_api_base_url = default_hub_api_base_url();
                 }
                 if settings.replay_capture_fps == 0 {
                     settings.replay_capture_fps = default_replay_capture_fps();
                 }
+                settings.post_session_summary_duration_secs =
+                    normalize_post_session_summary_duration_secs(
+                        settings.post_session_summary_duration_secs,
+                    );
                 settings.replay_media_upload_mode =
                     normalize_replay_media_upload_mode(&settings.replay_media_upload_mode);
                 settings.replay_media_upload_quality =
@@ -193,6 +207,26 @@ fn default_feedback_verbosity() -> u8 {
 fn default_hub_api_base_url() -> String {
     DEFAULT_HUB_API_BASE_URL.to_string()
 }
+pub fn normalize_hub_api_base_url(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+
+    let migrated = if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.app") {
+        format!("https://aimmod.app{}", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.app") {
+        format!("https://aimmod.app{}", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.app") {
+        format!("https://aimmod.app{}", if rest.starts_with('/') { rest.to_string() } else { format!("/{}", rest) })
+    } else if let Some(rest) = trimmed.strip_prefix("aimmod.app") {
+        format!("https://aimmod.app{}", if rest.is_empty() || rest.starts_with('/') { rest.to_string() } else { format!("/{}", rest) })
+    } else {
+        trimmed.to_string()
+    };
+
+    migrated.trim_end_matches('/').to_string()
+}
 fn default_replay_capture_fps() -> u32 {
     DEFAULT_REPLAY_CAPTURE_FPS
 }
@@ -204,6 +238,12 @@ fn default_replay_media_upload_mode() -> String {
 }
 fn default_replay_media_upload_quality() -> String {
     DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY.to_string()
+}
+fn default_post_session_summary_duration_secs() -> u32 {
+    DEFAULT_POST_SESSION_SUMMARY_DURATION_SECS
+}
+fn normalize_post_session_summary_duration_secs(value: u32) -> u32 {
+    value.min(600)
 }
 fn normalize_replay_media_upload_mode(value: &str) -> String {
     match value.trim() {

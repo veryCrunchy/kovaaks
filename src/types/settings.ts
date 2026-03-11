@@ -34,6 +34,10 @@ export interface AppSettings {
   hud_feedback_visible: boolean;
   /** Whether the post-session overview card is shown after each run. */
   hud_post_session_visible: boolean;
+  /** Whether AimMod should open the Session Stats window after a run finishes. */
+  open_stats_window_on_session_complete: boolean;
+  /** How long the post-session summary should stay on screen. Zero keeps it open until dismissed. */
+  post_session_summary_duration_secs: number;
   /** Whether authenticated AimMod Hub sync is enabled. */
   hub_sync_enabled: boolean;
   /** Base URL for the AimMod Hub API. */

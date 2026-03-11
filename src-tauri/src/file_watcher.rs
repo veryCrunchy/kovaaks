@@ -394,9 +394,14 @@ fn handle_fs_event(app: &AppHandle, event: &Event) {
                             );
                             // Bring the stats window to the foreground so the
                             // user sees results immediately without manual action.
-                            if let Some(win) = app.get_webview_window("stats") {
-                                let _ = win.show();
-                                let _ = win.set_focus();
+                            let should_open_stats = crate::settings::load(app)
+                                .map(|settings| settings.open_stats_window_on_session_complete)
+                                .unwrap_or(false);
+                            if should_open_stats {
+                                if let Some(win) = app.get_webview_window("stats") {
+                                    let _ = win.show();
+                                    let _ = win.set_focus();
+                                }
                             }
                         }
                         Err(e) => {

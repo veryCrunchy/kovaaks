@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type {
   PersistedStatsPanelSnapshot,
@@ -7,6 +8,7 @@ import type {
   StatsPanelReading,
 } from "../types/overlay";
 import type { BridgeRunSnapshot, MouseMetrics } from "../types/mouse";
+import type { AppSettings } from "../types/settings";
 
 export interface RunCoachingTip {
   id: string;
@@ -110,9 +112,8 @@ interface MutableRunCounts {
   challengeCanceledEvents: number;
 }
 
-/** Auto-dismiss timeout in milliseconds. */
-const AUTO_DISMISS_MS = 20_000;
 const MAX_TIMELINE_POINTS = 1_200;
+const DEFAULT_AUTO_DISMISS_MS = 20_000;
 
 function createEmptyRunMetrics(): MutableRunMetrics {
   return {
@@ -645,6 +646,7 @@ export function useSessionSummary(): {
   const dismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const progressInterval = useRef<ReturnType<typeof setInterval> | null>(null);
   const dismissedAt = useRef<number>(0);
+  const autoDismissMs = useRef<number>(DEFAULT_AUTO_DISMISS_MS);
 
   const stopTimers = () => {
     if (dismissTimer.current) {
@@ -723,6 +725,25 @@ export function useSessionSummary(): {
   };
 
   useEffect(() => {
+    const applySettings = (settings: Pick<AppSettings, "post_session_summary_duration_secs">) => {
+      autoDismissMs.current = Math.max(0, settings.post_session_summary_duration_secs) * 1000;
+    };
+
+    void invoke<AppSettings>("get_settings")
+      .then(applySettings)
+      .catch(() => {
+        autoDismissMs.current = DEFAULT_AUTO_DISMISS_MS;
+      });
+
+    const unlistenSettings = listen("settings-changed", async () => {
+      try {
+        const next = await invoke<AppSettings>("get_settings");
+        applySettings(next);
+      } catch {
+        // Keep the current timeout if settings refresh fails.
+      }
+    });
+
     const unlistenMetrics = listen<MouseMetrics>("mouse-metrics", (e) => {
       latestMetrics.current = e.payload;
     });
@@ -882,11 +903,13 @@ export function useSessionSummary(): {
       resetRunSnapshotRefs();
 
       dismissedAt.current = Date.now();
-      dismissTimer.current = setTimeout(dismiss, AUTO_DISMISS_MS);
-      progressInterval.current = setInterval(() => {
-        const elapsed = Date.now() - dismissedAt.current;
-        setDismissProgress(Math.min(elapsed / AUTO_DISMISS_MS, 1));
-      }, 200);
+      if (autoDismissMs.current > 0) {
+        dismissTimer.current = setTimeout(dismiss, autoDismissMs.current);
+        progressInterval.current = setInterval(() => {
+          const elapsed = Date.now() - dismissedAt.current;
+          setDismissProgress(Math.min(elapsed / autoDismissMs.current, 1));
+        }, 200);
+      }
     });
 
     const unlistenStart = listen<void>("session-start", () => {
@@ -905,6 +928,7 @@ export function useSessionSummary(): {
       unlistenBridgeMetric.then((fn) => fn());
       unlistenComplete.then((fn) => fn());
       unlistenStart.then((fn) => fn());
+      unlistenSettings.then((fn) => fn());
       stopTimers();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

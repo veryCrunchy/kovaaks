@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppSettings, MonitorInfo } from "../types/settings";
 import type { FriendProfile } from "../types/friends";
@@ -10,7 +10,7 @@ import { C } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
-const DEFAULT_HUB_API_BASE_URL = "https://api.aimmod.app";
+const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
 
 type Tab = "general" | "friends" | "stats";
 
@@ -56,6 +56,7 @@ export function Settings({
   const [error, setError]         = useState<string | null>(null);
   const [lastSavedAt, setLastSavedAt] = useState<Date | null>(null);
   const [confirmReset, setConfirmReset] = useState(false);
+  const saveSequence = useRef(0);
   const { status: updateStatus, checkForUpdate, installUpdate } = useUpdater();
 
   useEffect(() => {
@@ -75,23 +76,6 @@ export function Settings({
     if (!settings || !loadedSettings) return false;
     return JSON.stringify(settings) !== JSON.stringify(loadedSettings);
   }, [loadedSettings, settings]);
-
-  const handleSave = useCallback(async () => {
-    if (!settings) return;
-    setSaving(true);
-    setError(null);
-    try {
-      await invoke("save_settings", { newSettings: settings });
-      setLoadedSettings(settings);
-      setSaved(true);
-      setLastSavedAt(new Date());
-      setTimeout(() => setSaved(false), 2000);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  }, [settings]);
 
   const handleReset = useCallback(async () => {
     if (!confirmReset) {
@@ -116,11 +100,43 @@ export function Settings({
     }
   }, [confirmReset]);
 
-  const handleRevert = useCallback(() => {
-    if (!loadedSettings) return;
-    setSettings(loadedSettings);
+  useEffect(() => {
+    if (!settings || !loadedSettings) return;
+    const nextSerialized = JSON.stringify(settings);
+    const loadedSerialized = JSON.stringify(loadedSettings);
+    if (nextSerialized === loadedSerialized) return;
+
+    const sequence = ++saveSequence.current;
+    setSaving(true);
+    setSaved(false);
     setError(null);
-  }, [loadedSettings]);
+
+    const timeout = window.setTimeout(async () => {
+      try {
+        await invoke("save_settings", { newSettings: settings });
+        if (saveSequence.current !== sequence) return;
+        setLoadedSettings(settings);
+        setLastSavedAt(new Date());
+        setSaved(true);
+        window.setTimeout(() => {
+          if (saveSequence.current === sequence) {
+            setSaved(false);
+          }
+        }, 2000);
+      } catch (e) {
+        if (saveSequence.current !== sequence) return;
+        setError(String(e));
+      } finally {
+        if (saveSequence.current === sequence) {
+          setSaving(false);
+        }
+      }
+    }, 450);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [loadedSettings, settings]);
 
   if (!settings) {
     return (
@@ -298,9 +314,7 @@ export function Settings({
               setSettings(next);
               setLoadedSettings(next);
             }}
-            onSave={handleSave}
             onReset={handleReset}
-            onRevert={handleRevert}
             saving={saving}
             saved={saved}
             error={error}
@@ -328,9 +342,7 @@ interface GeneralSettingsProps {
   settings: AppSettings;
   onChange: (s: AppSettings) => void;
   onCommittedSettings: (s: AppSettings) => void;
-  onSave: () => void;
   onReset: () => void;
-  onRevert: () => void;
   saving: boolean;
   saved: boolean;
   error: string | null;
@@ -379,13 +391,41 @@ interface FfmpegStatus {
   path: string | null;
 }
 
+function formatHubUserError(message: string | null | undefined): string | null {
+  const raw = message?.trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("error sending request")
+    || lower.includes("connection refused")
+    || lower.includes("failed to connect")
+    || lower.includes("dns error")
+    || lower.includes("timeout")
+    || lower.includes("timed out")
+    || lower.includes("network")
+    || lower.includes("certificate")
+    || lower.includes("tls")
+  ) {
+    return "Could not connect to AimMod Hub. Retry later.";
+  }
+  return raw;
+}
+
+type GeneralSection = "basics" | "overlay" | "replay" | "hub" | "hud";
+
+const GENERAL_SETTING_SECTIONS: { id: GeneralSection; label: string }[] = [
+  { id: "basics", label: "Basics" },
+  { id: "overlay", label: "Overlay" },
+  { id: "replay", label: "Replay" },
+  { id: "hub", label: "Hub" },
+  { id: "hud", label: "HUD / Post-Run" },
+];
+
 function GeneralSettings({
   settings,
   onChange,
   onCommittedSettings,
-  onSave,
   onReset,
-  onRevert,
   saving,
   saved,
   error,
@@ -405,6 +445,7 @@ function GeneralSettings({
   const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus | null>(null);
   const [ffmpegBusy, setFfmpegBusy] = useState(false);
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<GeneralSection>("basics");
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onChange({ ...settings, [key]: value });
@@ -593,23 +634,28 @@ function GeneralSettings({
           marginBottom: 18,
           padding: "12px 14px",
           borderRadius: 12,
-          background: dirty ? `${C.warn}10` : `${C.accent}10`,
-          border: `1px solid ${dirty ? `${C.warn}40` : C.accentBorder}`,
+          background: error ? `${C.danger}10` : saving ? `${C.warn}10` : `${C.accent}10`,
+          border: `1px solid ${error ? `${C.danger}40` : saving ? `${C.warn}40` : C.accentBorder}`,
         }}
       >
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
           <div>
-            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: dirty ? C.warn : C.accent }}>
-              {dirty ? "Unsaved changes" : "Ready"}
+            <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.1em", textTransform: "uppercase", color: error ? C.danger : saving ? C.warn : C.accent }}>
+              {error ? "Save failed" : saving ? "Saving changes" : saved ? "Saved" : "Changes save automatically"}
             </div>
             <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
-              Changes apply when you save. Settings in this panel do not require an app restart.
+              Most settings apply immediately and save automatically. You only need to step in if something fails.
             </div>
           </div>
           <div style={{ fontSize: 11, color: C.textFaint, whiteSpace: "nowrap" }}>
-            {lastSavedAt ? `Last saved ${lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Not saved in this session"}
+            {lastSavedAt ? `Last saved ${lastSavedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "No changes saved yet"}
           </div>
         </div>
+        {error ? (
+          <div style={{ marginTop: 8, fontSize: 11, color: C.danger, lineHeight: 1.6 }}>
+            {error}
+          </div>
+        ) : null}
       </div>
 
       <h1
@@ -624,9 +670,53 @@ function GeneralSettings({
         General Settings
       </h1>
 
+      <div
+        style={{
+          position: "sticky",
+          top: 0,
+          zIndex: 20,
+          marginBottom: 22,
+          paddingBottom: 10,
+          background: `linear-gradient(180deg, ${C.bg} 0%, ${C.bg} 78%, rgba(0,0,0,0) 100%)`,
+        }}
+      >
+        <div
+          className="flex flex-wrap gap-2"
+          style={{
+            padding: "10px 0 2px",
+            backdropFilter: "blur(10px)",
+          }}
+        >
+          {GENERAL_SETTING_SECTIONS.map((section) => {
+            const active = activeSection === section.id;
+            return (
+              <button
+                key={section.id}
+                type="button"
+                onClick={() => setActiveSection(section.id)}
+                className="am-btn"
+                style={{
+                  padding: "6px 10px",
+                  minHeight: 0,
+                  borderRadius: 8,
+                  fontSize: 11,
+                  background: active ? C.accentDim : C.surface,
+                  border: `1px solid ${active ? C.accentBorder : C.border}`,
+                  color: active ? C.accent : C.textMuted,
+                  fontFamily: "inherit",
+                }}
+              >
+                {section.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="flex flex-col gap-7">
 
         {/* ── Username ──────────────────────────────────────────────── */}
+        {activeSection === "basics" && (
         <FieldGroup label="Display Name" description="Your KovaaK's username — used for VS-mode score comparison">
           <div className="flex gap-2">
             <input
@@ -649,8 +739,10 @@ function GeneralSettings({
           </div>
           {detectError && <p className="text-xs mt-1" style={{ color: C.danger }}>{detectError}</p>}
         </FieldGroup>
+        )}
 
         {/* ── Monitor ───────────────────────────────────────────────── */}
+        {activeSection === "overlay" && (
         <FieldGroup label="AimMod Display" description="Which screen to show AimMod on">
           <div className="flex flex-col gap-1.5">
             {monitors.length === 0 ? (
@@ -693,8 +785,10 @@ function GeneralSettings({
             )}
           </div>
         </FieldGroup>
+        )}
 
         {/* ── Stats directory ───────────────────────────────────────── */}
+        {activeSection === "basics" && (
         <FieldGroup
           label="KovaaK's Stats Directory"
           description="Path where KovaaK's writes session CSV files after each scenario"
@@ -709,8 +803,10 @@ function GeneralSettings({
             Saving restarts the CSV watcher immediately so new sessions import from the updated folder.
           </p>
         </FieldGroup>
+        )}
 
         {/* ── Mouse DPI ─────────────────────────────────────────────── */}
+        {activeSection === "basics" && (
         <FieldGroup
           label="Mouse DPI / CPI"
           description="Your mouse sensor CPI. Used to normalise smoothness metrics across sensitivities."
@@ -753,8 +849,10 @@ function GeneralSettings({
             <span className="text-xs" style={{ color: C.textFaint }}>DPI</span>
           </div>
         </FieldGroup>
+        )}
 
         {/* ── Live Coaching ─────────────────────────────────────────── */}
+        {activeSection === "overlay" && (
         <FieldGroup
           label="Live Coaching"
           description="Real-time on-screen tips based on your mouse movement and stats."
@@ -799,8 +897,10 @@ function GeneralSettings({
             </div>
           </GlassCard>
         </FieldGroup>
+        )}
 
         {/* ── Overlay visibility ────────────────────────────────────── */}
+        {activeSection === "overlay" && (
         <FieldGroup label="AimMod" description="Show or hide AimMod in-game">
           <div className="flex items-center gap-3">
             <Toggle
@@ -812,7 +912,9 @@ function GeneralSettings({
             </span>
           </div>
         </FieldGroup>
+        )}
 
+        {activeSection === "replay" && (
         <FieldGroup
           label="Replay Recording"
           description="Control replay capture smoothness and how many local replays AimMod keeps before pruning older non-favorited ones."
@@ -1054,8 +1156,10 @@ function GeneralSettings({
             </div>
           </GlassCard>
         </FieldGroup>
+        )}
 
         {/* ── AimMod Hub ───────────────────────────────────────────── */}
+        {activeSection === "hub" && (
         <FieldGroup
           label="AimMod Hub Sync"
           description="Link the desktop app to your AimMod Hub account and keep local runs synced automatically."
@@ -1185,32 +1289,171 @@ function GeneralSettings({
                 </div>
               </div>
 
-              {hubStatus?.status.lastError ? (
+              {formatHubUserError(hubStatus?.status.lastError) ? (
                 <p className="text-xs leading-relaxed" style={{ color: C.warn }}>
-                  Last sync issue: {hubStatus.status.lastError}
+                  Last sync issue: {formatHubUserError(hubStatus?.status.lastError)}
                 </p>
               ) : null}
 
-              {hubStatus?.status.lastReplayMediaError ? (
+              {formatHubUserError(hubStatus?.status.lastReplayMediaError) ? (
                 <p className="text-xs leading-relaxed" style={{ color: C.warn }}>
-                  Last replay upload issue: {hubStatus.status.lastReplayMediaError}
+                  Last replay upload issue: {formatHubUserError(hubStatus?.status.lastReplayMediaError)}
                 </p>
               ) : null}
 
-              {hubLinkError ? (
+              {formatHubUserError(hubLinkError) ? (
                 <p className="text-xs leading-relaxed" style={{ color: C.danger }}>
-                  {hubLinkError}
+                  {formatHubUserError(hubLinkError)}
                 </p>
               ) : null}
 
               <p className="text-xs leading-relaxed" style={{ color: C.textFaint }}>
                 AimMod keeps track of which local runs have already been uploaded, retries missing ones automatically, and can requeue everything if the hub schema changes later.
               </p>
+
+              <div
+                style={{
+                  borderTop: `1px solid ${C.borderSub}`,
+                  paddingTop: 12,
+                }}
+                className="flex flex-col gap-3"
+              >
+                <div className="flex flex-col gap-1">
+                  <span className="text-sm" style={{ color: C.textSub }}>Replay media uploads</span>
+                  <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                    Choose which replays get uploaded to AimMod Hub and at what quality. These are the same replay-upload settings available under the Replay tab.
+                  </p>
+                </div>
+
+                <div className="grid gap-3 xl:grid-cols-2">
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs" style={{ color: C.textFaint }}>What to upload</span>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["off", "Off"],
+                        ["favorites", "Favorites"],
+                        ["favorites_and_pb", "Favorites + PBs"],
+                        ["all", "All"],
+                      ] as const).map(([value, label]) => {
+                        const active = settings.replay_media_upload_mode === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            onClick={() => update("replay_media_upload_mode", value)}
+                            className="am-btn am-btn-ghost"
+                            style={{
+                              padding: "6px 10px",
+                              minHeight: 0,
+                              fontSize: 11,
+                              background: active ? C.accentDim : C.surface,
+                              border: `1px solid ${active ? C.accentBorder : C.border}`,
+                              color: active ? C.accent : C.textMuted,
+                              fontFamily: "inherit",
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex flex-col gap-2">
+                    <span className="text-xs" style={{ color: C.textFaint }}>Upload quality</span>
+                    <div className="flex flex-wrap gap-2">
+                      {([
+                        ["standard", "Standard"],
+                        ["high", "High"],
+                        ["ultra", "Ultra"],
+                      ] as const).map(([value, label]) => {
+                        const active = settings.replay_media_upload_quality === value;
+                        return (
+                          <button
+                            key={value}
+                            type="button"
+                            onClick={() => update("replay_media_upload_quality", value)}
+                            className="am-btn am-btn-ghost"
+                            style={{
+                              padding: "6px 10px",
+                              minHeight: 0,
+                              fontSize: 11,
+                              background: active ? C.accentDim : C.surface,
+                              border: `1px solid ${active ? C.accentBorder : C.border}`,
+                              color: active ? C.accent : C.textMuted,
+                              fontFamily: "inherit",
+                            }}
+                          >
+                            {label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                    <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                      Higher quality means bigger files. AimMod can later unlock higher presets automatically for Plus subscriptions.
+                    </p>
+                  </div>
+                </div>
+
+                <div
+                  style={{
+                    borderTop: `1px solid ${C.borderSub}`,
+                    paddingTop: 12,
+                  }}
+                  className="flex flex-col gap-3"
+                >
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div className="flex flex-col gap-1">
+                      <span className="text-sm" style={{ color: C.textSub }}>ffmpeg for replay uploads</span>
+                      <span className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                        AimMod uses system ffmpeg first. If none is available, it can install a local copy just for AimMod so replay uploads and exports work.
+                      </span>
+                    </div>
+                    {!ffmpegStatus?.available || ffmpegStatus.source === "aimmod" ? (
+                      <Btn
+                        variant="ghost"
+                        size="sm"
+                        onClick={handleInstallFfmpeg}
+                        disabled={ffmpegBusy}
+                      >
+                        {ffmpegBusy
+                          ? "Installing…"
+                          : ffmpegStatus?.available
+                            ? "Reinstall local copy"
+                            : "Install locally"}
+                      </Btn>
+                    ) : null}
+                  </div>
+
+                  <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))" }}>
+                    <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                      <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Status</div>
+                      <div className="text-sm mt-1" style={{ color: ffmpegStatus?.available ? C.text : C.warn }}>
+                        {ffmpegStatus?.available ? ffmpegSourceLabel : "Missing"}
+                      </div>
+                    </div>
+                    <div className="rounded-lg border p-3" style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}>
+                      <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Location</div>
+                      <div className="text-xs mt-1 leading-relaxed break-all" style={{ color: C.textSub }}>
+                        {ffmpegStatus?.path ?? "AimMod will install ffmpeg only if replay export or upload needs it."}
+                      </div>
+                    </div>
+                  </div>
+
+                  {ffmpegError ? (
+                    <p className="text-xs leading-relaxed" style={{ color: C.danger }}>
+                      {ffmpegError}
+                    </p>
+                  ) : null}
+                </div>
+              </div>
             </div>
           </GlassCard>
         </FieldGroup>
+        )}
 
         {/* ── HUD visibility ────────────────────────────────────────── */}
+        {activeSection === "hud" && (
         <FieldGroup label="Visible HUDs" description="Show or hide individual overlay elements">
           <GlassCard style={{ padding: "12px 14px" }}>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
@@ -1259,29 +1502,86 @@ function GeneralSettings({
             </div>
           </GlassCard>
         </FieldGroup>
+        )}
+
+        {activeSection === "hud" && (
+        <FieldGroup
+          label="Post-Run Flow"
+          description="Control what AimMod shows after a scenario ends."
+        >
+          <GlassCard style={{ padding: "12px 14px" }}>
+            <div className="flex flex-col gap-5">
+              <div className="flex items-center justify-between gap-4">
+                <div className="flex flex-col gap-1">
+                  <span className="text-sm" style={{ color: C.textSub }}>Open Session Stats after each run</span>
+                  <span className="text-xs" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                    Useful if you want the deep stats window immediately after finishing. Disabled by default.
+                  </span>
+                </div>
+                <Toggle
+                  checked={settings.open_stats_window_on_session_complete}
+                  onChange={(value) => update("open_stats_window_on_session_complete", value)}
+                />
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Post-session summary duration</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[10, 20, 30, 45, 60, 0].map((preset) => {
+                      const active = settings.post_session_summary_duration_secs === preset;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => update("post_session_summary_duration_secs", preset)}
+                          className="am-btn tabular-nums"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {preset === 0 ? "Until dismissed" : `${preset}s`}
+                        </button>
+                      );
+                    })}
+                    <input
+                      type="number"
+                      min={0}
+                      max={600}
+                      step={1}
+                      value={settings.post_session_summary_duration_secs}
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        if (!Number.isNaN(next)) {
+                          update("post_session_summary_duration_secs", Math.min(600, Math.max(0, next)));
+                        }
+                      }}
+                      className="am-input w-24 tabular-nums"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Set this to 0 if you want the summary to stay up until you dismiss it manually.
+                </p>
+              </div>
+            </div>
+          </GlassCard>
+        </FieldGroup>
+        )}
       </div>
 
-      {/* ── Save bar ──────────────────────────────────────────────────── */}
+      {/* ── Footer actions ───────────────────────────────────────────── */}
       <div
         className="flex items-center gap-4 mt-10 pt-6"
         style={{ borderTop: `1px solid ${C.borderSub}` }}
       >
-        <Btn
-          variant="ghost"
-          size="md"
-          onClick={onRevert}
-          disabled={!dirty || saving}
-        >
-          Revert
-        </Btn>
-        <Btn
-          variant={saved ? "accent" : "primary"}
-          size="md"
-          onClick={onSave}
-          disabled={saving || !dirty}
-        >
-          {saving ? "Saving…" : saved ? "✓ Saved" : dirty ? "Save Settings" : "Saved"}
-        </Btn>
         <Btn
           variant={confirmReset ? "danger" : "ghost"}
           size="md"
@@ -1290,7 +1590,17 @@ function GeneralSettings({
         >
           {confirmReset ? "Confirm reset" : "Reset defaults"}
         </Btn>
-        {error && <span className="text-sm" style={{ color: C.danger }}>{error}</span>}
+        <span className="text-xs" style={{ color: error ? C.danger : saved ? C.accent : saving || dirty ? C.warn : C.textFaint }}>
+          {error
+            ? error
+            : saving
+              ? "Saving automatically…"
+              : saved
+                ? "Saved"
+                : dirty
+                  ? "Waiting to save…"
+                  : "Changes save automatically"}
+        </span>
       </div>
     </div>
   );
