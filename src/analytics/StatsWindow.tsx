@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
 import { DebugTab } from "./DebugTab";
+import { HubBrowserPanel } from "./HubBrowser";
 import { MousePathViewer } from "./MousePathViewer";
 import type {
   ReplayPayloadData,
@@ -38,6 +39,7 @@ import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
 import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
 import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
 import { useUpdater } from "../hooks/useUpdater";
+import type { AppSettings } from "../types/settings";
 
 const SettingsTab = lazy(() =>
   import("../settings/Settings").then((m) => ({ default: m.Settings })),
@@ -328,6 +330,8 @@ interface StatsHubSyncStatus {
   lastError: string | null;
   lastErrorAtUnixMs: number | null;
   lastUploadedSessionId: string | null;
+  lastReplayMediaUploadAtUnixMs?: number | null;
+  lastReplayMediaError?: string | null;
   syncInProgress: boolean;
 }
 
@@ -336,6 +340,26 @@ interface StatsHubSyncOverview {
   enabled: boolean;
   accountLabel: string | null;
   status: StatsHubSyncStatus;
+}
+
+function formatHubUserError(message: string | null | undefined): string | null {
+  const raw = message?.trim();
+  if (!raw) return null;
+  const lower = raw.toLowerCase();
+  if (
+    lower.includes("error sending request")
+    || lower.includes("connection refused")
+    || lower.includes("failed to connect")
+    || lower.includes("dns error")
+    || lower.includes("timeout")
+    || lower.includes("timed out")
+    || lower.includes("network")
+    || lower.includes("certificate")
+    || lower.includes("tls")
+  ) {
+    return "Could not connect to AimMod Hub. Retry later.";
+  }
+  return raw;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
@@ -5845,6 +5869,178 @@ function SessionsOverviewPanel({
   );
 }
 
+function formatHubStatusTime(unixMs: number | null | undefined): string {
+  if (!unixMs || !Number.isFinite(unixMs)) return "Never";
+  return new Date(unixMs).toLocaleString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function HubOverviewPanel({
+  settings,
+  overview,
+  replayRecords,
+  onOpenSettings,
+  onOpenReplayHub,
+  onForceResync,
+  resyncBusy,
+}: {
+  settings: AppSettings | null;
+  overview: StatsHubSyncOverview | null;
+  replayRecords: AnalyticsSessionRecord[];
+  onOpenSettings: () => void;
+  onOpenReplayHub: () => void;
+  onForceResync: () => void;
+  resyncBusy: boolean;
+}) {
+  const linkedAccount = settings?.hub_account_label?.trim() || overview?.accountLabel?.trim() || "";
+  const linked = linkedAccount.length > 0 && Boolean(settings?.hub_upload_token?.trim());
+  const replayUploadMode = settings?.replay_media_upload_mode ?? "favorites_and_pb";
+  const replayUploadQuality = settings?.replay_media_upload_quality ?? "standard";
+  const shareableReplays = replayRecords
+    .filter((record) => record.has_replay)
+    .sort((a, b) => b.timestampMs - a.timestampMs)
+    .slice(0, 6);
+
+  const replayUploadLabel =
+    replayUploadMode === "all"
+      ? "All replays"
+      : replayUploadMode === "favorites"
+        ? "Favorites"
+        : replayUploadMode === "favorites_and_pb"
+          ? "Favorites + PBs"
+          : "Off";
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+      <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 14 }}>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 16, flexWrap: "wrap" }}>
+          <div style={{ minWidth: 0 }}>
+            <div style={{ fontSize: 11, color: C.accent, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+              AimMod Hub
+            </div>
+            <div style={{ marginTop: 6, fontSize: 22, fontWeight: 700, color: C.text, letterSpacing: "-0.02em" }}>
+              Your runs, replays, and profile in one place.
+            </div>
+            <div style={{ marginTop: 8, maxWidth: 760, fontSize: 12, color: C.textSub, lineHeight: 1.7 }}>
+              Stay linked to keep your latest runs, replay uploads, and profile up to date automatically.
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <Btn size="sm" variant={linked ? "ghost" : "primary"} onClick={onOpenSettings}>
+              {linked ? "Manage Hub settings" : "Connect account"}
+            </Btn>
+            <Btn size="sm" variant="ghost" onClick={onOpenReplayHub}>
+              Open Replay Hub
+            </Btn>
+            {linked && (
+              <Btn size="sm" variant="ghost" onClick={onForceResync} disabled={resyncBusy}>
+                {resyncBusy ? "Queueing resync…" : "Resync all runs"}
+              </Btn>
+            )}
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          <StatCard
+            label="Account"
+            value={linked ? linkedAccount : "Not linked"}
+            accent={linked ? C.accent : C.warn}
+            sub={linked ? "Connected" : "Link in settings"}
+          />
+            <StatCard
+            label="Waiting"
+            value={String(overview?.status.pendingCount ?? 0)}
+            accent="#00b4ff"
+            sub={overview?.status.syncInProgress ? "Uploading now" : "Ready to upload"}
+          />
+          <StatCard
+            label="Replay uploads"
+            value={replayUploadLabel}
+            accent="#a78bfa"
+            sub={`${replayUploadQuality} quality`}
+          />
+        </div>
+
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Badge color={linked ? "#00f5a0" : "#ffb400"}>
+            {linked ? "Connected" : "Needs linking"}
+          </Badge>
+          {overview?.status.lastSuccessAtUnixMs ? (
+            <span style={{ fontSize: 11, color: C.textFaint }}>
+              Last run sync {formatHubStatusTime(overview.status.lastSuccessAtUnixMs)}
+            </span>
+          ) : null}
+          {overview?.status.lastReplayMediaUploadAtUnixMs ? (
+            <span style={{ fontSize: 11, color: C.textFaint }}>
+              Last replay upload {formatHubStatusTime(overview.status.lastReplayMediaUploadAtUnixMs)}
+            </span>
+          ) : null}
+        </div>
+
+        {formatHubUserError(overview?.status.lastError) ? (
+          <div style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.warn}35`, background: `${C.warn}12`, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              Latest sync issue: {formatHubUserError(overview?.status.lastError)}
+            </div>
+          ) : null}
+        {formatHubUserError(overview?.status.lastReplayMediaError) ? (
+          <div style={{ padding: "10px 12px", borderRadius: 10, border: `1px solid ${C.warn}35`, background: `${C.warn}12`, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              Latest replay upload issue: {formatHubUserError(overview?.status.lastReplayMediaError)}
+            </div>
+          ) : null}
+      </div>
+
+      <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+        <SectionTitle>Replay-ready runs</SectionTitle>
+        <div style={{ fontSize: 12, color: C.textSub, lineHeight: 1.65 }}>
+          These recent runs already have replay data and are ready to share.
+        </div>
+        {shareableReplays.length > 0 ? (
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 10 }}>
+            {shareableReplays.map((record) => (
+              <div
+                key={record.id}
+                style={{
+                  padding: "12px 13px",
+                  borderRadius: 12,
+                  border: `1px solid ${C.borderSub}`,
+                  background: "rgba(255,255,255,0.02)",
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 6,
+                  minWidth: 0,
+                }}
+              >
+                <div style={{ fontSize: 12, fontWeight: 700, color: C.text, lineHeight: 1.45, wordBreak: "break-word" }}>
+                  {record.scenario}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 10, color: C.textFaint }}>
+                  <span>{relativeTime(record.timestamp)}</span>
+                  <span>{fmtScore(record.score)}</span>
+                  <span>{record.duration_secs}s</span>
+                  {record.replay_is_favorite && (
+                    <span style={{ color: "#ffd700", fontWeight: 700 }}>★ Favorite</span>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: C.textFaint }}>
+                  {record.replay_frames_count} frames · {record.replay_positions_count} mouse samples
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ fontSize: 12, color: C.textFaint }}>
+            No replay-ready runs yet. Finish a run with replay capture enabled and it will show up here.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
 function ScenarioDetails({
@@ -6088,7 +6284,7 @@ function ScenarioDetails({
 
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
-type RootMode = "sessions" | "replays" | "leaderboards" | "settings" | "debug";
+type RootMode = "sessions" | "hub" | "replays" | "leaderboards" | "settings" | "debug";
 type ScenarioSortMode = "recent" | "plays" | "type";
 type SessionsPaneMode = "overview" | "scenario";
 
@@ -6106,7 +6302,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [importStatus, setImportStatus] = useState<string | null>(null);
   const [rootMode, setRootMode] = useState<RootMode>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.rootMode);
-    return stored === "replays" || stored === "leaderboards" || stored === "settings" || stored === "debug"
+    return stored === "hub" || stored === "replays" || stored === "leaderboards" || stored === "settings" || stored === "debug"
       ? stored
       : "sessions";
   });
@@ -6132,6 +6328,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [liveBridgeStats, setLiveBridgeStats] = useState<Record<string, number>>({});
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
   const [hubSyncOverview, setHubSyncOverview] = useState<StatsHubSyncOverview | null>(null);
+  const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
   const [hubNoticeDismissed, setHubNoticeDismissed] = useState<boolean>(
     () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.hubNoticeDismissed) === "1",
   );
@@ -6139,6 +6336,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.updateNoticeDismissedVersion),
   );
   const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [hubResyncBusy, setHubResyncBusy] = useState(false);
   const updateCheckStartedRef = useRef(false);
 
   // Always-current ref prevents stale closure in event listener
@@ -6303,6 +6501,12 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     invoke<boolean>("get_is_debug_build")
       .then(setIsDebugBuild)
       .catch(() => setIsDebugBuild(false));
+    const refreshAppSettings = () => {
+      invoke<AppSettings>("get_settings")
+        .then(setAppSettings)
+        .catch(() => setAppSettings(null));
+    };
+    refreshAppSettings();
     let lastBridgeRefresh = 0;
     const maybeRefreshHistory = (force = false) => {
       const now = Date.now();
@@ -6389,12 +6593,17 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     };
     refreshHubSyncOverview();
     const hubStatusInterval = window.setInterval(refreshHubSyncOverview, 10_000);
+    const unlistenSettingsChanged = listen("settings-changed", () => {
+      refreshAppSettings();
+      refreshHubSyncOverview();
+    });
 
     return () => {
       unlistenComplete.then((fn) => fn());
       unlistenBridgeParsed.then((fn) => fn());
       unlistenStatsPanel.then((fn) => fn());
       unlistenBridgeMetric.then((fn) => fn());
+      unlistenSettingsChanged.then((fn) => fn());
       window.clearInterval(hubStatusInterval);
     };
   }, []);
@@ -6470,6 +6679,20 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       setImportStatus(String(error));
     } finally {
       setImportingHistory(false);
+    }
+  }
+
+  async function handleForceHubResync() {
+    setHubResyncBusy(true);
+    try {
+      await invoke("hub_force_full_resync");
+      const refreshed = await invoke<StatsHubSyncOverview>("get_hub_sync_status");
+      setHubSyncOverview(refreshed);
+      setRootMode("hub");
+    } catch (error) {
+      console.error(error);
+    } finally {
+      setHubResyncBusy(false);
     }
   }
 
@@ -6667,6 +6890,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       >
         {([
           "sessions",
+          "hub",
           "replays",
           "leaderboards",
           "settings",
@@ -6694,9 +6918,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             >
               {m === "sessions"
                 ? "Session Stats"
+                : m === "hub"
+                  ? "AimMod Hub"
                 : m === "replays"
                   ? "Replay Hub"
-                : m === "leaderboards"
+                  : m === "leaderboards"
                   ? "Leaderboards"
                   : m === "settings"
                     ? "Settings"
@@ -7374,6 +7600,25 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               void loadHistory(true);
             }}
           />
+        </div>
+      )}
+
+      {rootMode === "hub" && (
+        <div style={{ flex: 1, overflowY: "auto", padding: "24px 28px" }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 18 }}>
+            <HubOverviewPanel
+              settings={appSettings}
+              overview={hubSyncOverview}
+              replayRecords={replayHubRecords}
+              onOpenSettings={() => setRootMode("settings")}
+              onOpenReplayHub={() => setRootMode("replays")}
+              onForceResync={() => {
+                void handleForceHubResync();
+              }}
+              resyncBusy={hubResyncBusy}
+            />
+            <HubBrowserPanel />
+          </div>
         </div>
       )}
 
