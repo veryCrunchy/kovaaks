@@ -16,6 +16,10 @@ pub const BRIDGE_EVENT: &str = "bridge-event";
 pub const BRIDGE_PARSED_EVENT: &str = "bridge-parsed-event";
 #[cfg(target_os = "windows")]
 pub const BRIDGE_METRIC_EVENT: &str = "bridge-metric";
+#[cfg(target_os = "windows")]
+pub const KOVAAKS_USER_EVENT: &str = "kovaaks-user-updated";
+#[cfg(target_os = "windows")]
+pub const KOVAAKS_FRIENDS_EVENT: &str = "kovaaks-friends-updated";
 pub const UE4SS_LOG_EVENT: &str = "ue4ss-log-line";
 const INJECTION_DEFERRED_ERROR_PREFIX: &str = "KovaaK's process is not ready for injection";
 #[cfg(target_os = "windows")]
@@ -218,6 +222,59 @@ pub struct BridgeRunSnapshot {
     pub shot_telemetry: Vec<BridgeShotTelemetryEvent>,
     #[serde(default)]
     pub tick_stream_v1: Option<BridgeTickStreamV1>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BridgeLinkedIdentity {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub provider_account_id: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: String,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BridgeCurrentUserProfile {
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: String,
+    #[serde(default)]
+    pub kovaaks_user_id: String,
+    #[serde(default)]
+    pub external_id: String,
+    #[serde(default)]
+    pub steam_id: String,
+    #[serde(default)]
+    pub steam_name: String,
+    #[serde(default)]
+    pub linked_accounts: Vec<BridgeLinkedIdentity>,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BridgeSocialFriendProfile {
+    #[serde(default)]
+    pub platform: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub avatar_url: String,
+    #[serde(default)]
+    pub steam_id: String,
+    #[serde(default)]
+    pub kovaaks_user_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1105,6 +1162,13 @@ mod imp {
         candidate_count: u8,
     }
 
+    #[derive(Clone, Debug, Default)]
+    struct BridgeIdentityState {
+        current_user: Option<super::BridgeCurrentUserProfile>,
+        friends: Vec<super::BridgeSocialFriendProfile>,
+        last_updated_at: Option<Instant>,
+    }
+
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     enum ChallengeTransition {
         None,
@@ -1349,9 +1413,8 @@ mod imp {
             .checked_sub(Duration::from_secs_f64(hint_secs))
             .unwrap_or(now);
         let hinted_start_ms = unix_now_ms().saturating_sub((hint_secs * 1000.0).round() as u64);
-        let hinted_start_bridge_ts_ms = bridge_ts_ms.map(|ts_ms| {
-            ts_ms.saturating_sub((hint_secs * 1000.0).round().max(0.0) as u64)
-        });
+        let hinted_start_bridge_ts_ms = bridge_ts_ms
+            .map(|ts_ms| ts_ms.saturating_sub((hint_secs * 1000.0).round().max(0.0) as u64));
 
         match state.started_at {
             None => {
@@ -2072,7 +2135,10 @@ mod imp {
                 if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
                     time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
                 }
-                let bridge_ts_ms = obj.get("ts_ms").and_then(replay_json_u32).map(|value| value as u64);
+                let bridge_ts_ms = obj
+                    .get("ts_ms")
+                    .and_then(replay_json_u32)
+                    .map(|value| value as u64);
                 ensure_run_capture_started_locked(&mut state, time_hint, bridge_ts_ms);
                 record_run_timeline_point_locked(&mut state, time_hint);
             }
@@ -2101,7 +2167,10 @@ mod imp {
                 if let Some(scalars_obj) = obj.get("scalars").and_then(|v| v.as_object()) {
                     time_hint = replay_read_scalars_from_payload(scalars_obj, &mut state);
                 }
-                let bridge_ts_ms = obj.get("ts_ms").and_then(replay_json_u32).map(|value| value as u64);
+                let bridge_ts_ms = obj
+                    .get("ts_ms")
+                    .and_then(replay_json_u32)
+                    .map(|value| value as u64);
                 ensure_run_capture_started_locked(&mut state, time_hint, bridge_ts_ms);
                 record_run_timeline_point_locked(&mut state, time_hint);
             }
@@ -2435,6 +2504,50 @@ mod imp {
         STATE.get_or_init(|| Mutex::new(ChallengeHookState::default()))
     }
 
+    fn bridge_identity_state() -> &'static Mutex<BridgeIdentityState> {
+        static STATE: OnceLock<Mutex<BridgeIdentityState>> = OnceLock::new();
+        STATE.get_or_init(|| Mutex::new(BridgeIdentityState::default()))
+    }
+
+    pub(super) fn current_kovaaks_user() -> Option<super::BridgeCurrentUserProfile> {
+        bridge_identity_state()
+            .lock()
+            .ok()
+            .and_then(|state| state.current_user.clone())
+    }
+
+    pub(super) fn current_kovaaks_friends() -> Vec<super::BridgeSocialFriendProfile> {
+        bridge_identity_state()
+            .lock()
+            .ok()
+            .map(|state| state.friends.clone())
+            .unwrap_or_default()
+    }
+
+    fn update_bridge_current_user(app: &AppHandle, user: super::BridgeCurrentUserProfile) {
+        if let Ok(mut state) = bridge_identity_state().lock() {
+            state.current_user = Some(user.clone());
+            state.last_updated_at = Some(Instant::now());
+        }
+        log::info!(
+            "identity: bridge user snapshot username='{}' display='{}' steam_id='{}' kovaaks_user_id='{}'",
+            user.username,
+            user.display_name,
+            user.steam_id,
+            user.kovaaks_user_id
+        );
+        let _ = app.emit(super::KOVAAKS_USER_EVENT, &user);
+    }
+
+    fn update_bridge_friends(app: &AppHandle, friends: Vec<super::BridgeSocialFriendProfile>) {
+        if let Ok(mut state) = bridge_identity_state().lock() {
+            state.friends = friends.clone();
+            state.last_updated_at = Some(Instant::now());
+        }
+        log::info!("identity: bridge friends snapshot count={}", friends.len());
+        let _ = app.emit(super::KOVAAKS_FRIENDS_EVENT, &friends);
+    }
+
     fn reset_bridge_stats_snapshot() {
         if let Ok(mut state) = bridge_compat_state().lock() {
             state.stats = BridgeStatsPanelEvent {
@@ -2487,8 +2600,12 @@ mod imp {
     }
 
     fn emit_current_stats_snapshot(app: &AppHandle) {
-        if let Ok(state) = bridge_compat_state().lock() {
-            emit_stats_panel_update(app, &state.stats);
+        let stats = bridge_compat_state()
+            .lock()
+            .ok()
+            .map(|state| state.stats.clone());
+        if let Some(stats) = stats {
+            emit_stats_panel_update(app, &stats);
         }
     }
 
@@ -2503,6 +2620,7 @@ mod imp {
         } else {
             Some(stats.scenario_type.clone())
         };
+        crate::mouse_hook::set_active_scenario_type(scenario_type.as_deref());
 
         crate::discord_rpc::update_presence_from_bridge(crate::discord_rpc::BridgePresenceState {
             game_state_code: stats.game_state_code,
@@ -3153,7 +3271,11 @@ mod imp {
                 family: "TargetSwitching",
                 subtype: Some(target_switching_subtype(
                     bot_count,
-                    if damage_per_kill > 1.25 { switch_rate.max(0.35) } else { switch_rate },
+                    if damage_per_kill > 1.25 {
+                        switch_rate.max(0.35)
+                    } else {
+                        switch_rate
+                    },
                 )),
             };
         }
@@ -3163,7 +3285,7 @@ mod imp {
                 || ttk_std_secs.map_or(false, |value| value >= 0.16)
                 || stats.kps.map_or(false, |value| {
                     value > 0.0 && value <= 2.25 && shots > kills.saturating_add(5)
-            });
+                });
             if reactive_candidate {
                 return ScenarioClassification {
                     family: "DynamicClicking",
@@ -3281,12 +3403,16 @@ mod imp {
 
     fn apply_scenario_name_update(app: &AppHandle, name: String, source: &str, raw: &str) {
         let mut changed = false;
+        let mut stats_to_emit = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             if state.stats.scenario_name.as_deref() != Some(name.as_str()) {
                 state.stats.scenario_name = Some(name.clone());
                 changed = true;
-                emit_stats_panel_update(app, &state.stats);
+                stats_to_emit = Some(state.stats.clone());
             }
+        }
+        if let Some(stats) = stats_to_emit {
+            emit_stats_panel_update(app, &stats);
         }
         if changed {
             log::info!(
@@ -3352,6 +3478,38 @@ mod imp {
             return;
         }
 
+        if parsed.ev == "kovaaks_user_snapshot" {
+            if let Ok(user) = serde_json::from_str::<super::BridgeCurrentUserProfile>(&parsed.raw) {
+                update_bridge_current_user(app, user);
+            }
+            return;
+        }
+
+        if parsed.ev == "kovaaks_friends_snapshot" {
+            #[derive(serde::Deserialize)]
+            struct BridgeFriendsSnapshot {
+                #[serde(default)]
+                friends: Vec<super::BridgeSocialFriendProfile>,
+            }
+
+            if let Ok(snapshot) = serde_json::from_str::<BridgeFriendsSnapshot>(&parsed.raw) {
+                update_bridge_friends(app, snapshot.friends);
+            }
+            return;
+        }
+
+        if parsed.ev == "kovaaks_user_debug" {
+            #[derive(serde::Deserialize)]
+            struct BridgeUserDebugEvent {
+                message: String,
+            }
+
+            if let Ok(debug_event) = serde_json::from_str::<BridgeUserDebugEvent>(&parsed.raw) {
+                log::info!("identity: mod user-management debug: {}", debug_event.message);
+            }
+            return;
+        }
+
         if let Some((fn_name, ret_u32, ret_i32, _ret_f32)) = parse_class_hook_from_raw(&parsed.raw)
         {
             let bool_sample = ret_u32
@@ -3396,6 +3554,7 @@ mod imp {
 
         if let Some(active) = challenge_transition_active {
             let mut should_emit_stats = false;
+            let mut stats_to_emit = None;
             if let Ok(mut state) = bridge_compat_state().lock() {
                 let now = Instant::now();
                 state.challenge_lifecycle_active = active;
@@ -3425,8 +3584,11 @@ mod imp {
                     should_emit_stats = true;
                 }
                 if should_emit_stats {
-                    emit_stats_panel_update(app, &state.stats);
+                    stats_to_emit = Some(state.stats.clone());
                 }
+            }
+            if let Some(stats) = stats_to_emit {
+                emit_stats_panel_update(app, &stats);
             }
         }
 
@@ -3473,6 +3635,7 @@ mod imp {
 
             let mut should_emit_stats = false;
             let mut classification_inputs_changed = false;
+            let mut stats_to_emit = None;
             if let Ok(mut state) = bridge_compat_state().lock() {
                 let now = Instant::now();
                 let update_bool = |slot: &mut Option<bool>, key: &str| -> bool {
@@ -3629,8 +3792,11 @@ mod imp {
 
                 if should_emit_stats {
                     observe_run_stats_snapshot(&state.stats);
-                    emit_stats_panel_update(app, &state.stats);
+                    stats_to_emit = Some(state.stats.clone());
                 }
+            }
+            if let Some(stats) = stats_to_emit {
+                emit_stats_panel_update(app, &stats);
             }
             return;
         }
@@ -3675,6 +3841,7 @@ mod imp {
         let mut should_emit_stats = false;
         let mut recovery_signal: Option<(bool, bool, bool)> = None;
         let mut classification_inputs_changed = false;
+        let mut stats_to_emit = None;
         if let Ok(mut state) = bridge_compat_state().lock() {
             const ZERO_SUPPRESS: Duration = Duration::from_millis(1500);
             match parsed.ev.as_str() {
@@ -4069,7 +4236,7 @@ mod imp {
 
             if should_emit_stats {
                 observe_run_stats_snapshot(&state.stats);
-                emit_stats_panel_update(app, &state.stats);
+                stats_to_emit = Some(state.stats.clone());
             }
 
             let paused = state.stats.scenario_is_paused == Some(true);
@@ -4093,6 +4260,9 @@ mod imp {
                 recovery_challenge_active,
                 authoritative_active_state,
             ));
+        }
+        if let Some(stats) = stats_to_emit {
+            emit_stats_panel_update(app, &stats);
         }
 
         if let Some((has_active_metrics, challenge_active_hint, authoritative_active_state)) =
@@ -4328,9 +4498,26 @@ mod imp {
                         if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
                             let processed =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    note_in_game_replay_event(s);
-                                    observe_replay_stream_raw(s);
-                                    observe_shot_telemetry_raw(s);
+                                    let maybe_replay_ready =
+                                        s.contains("\"ev\":\"replay_playback_");
+                                    let maybe_replay_stream = s
+                                        .contains("\"ev\":\"replay_context\"")
+                                        || s.contains("\"ev\":\"replay_tick_keyframe\"")
+                                        || s.contains("\"ev\":\"replay_tick_delta\"")
+                                        || s.contains("\"ev\":\"replay_tick_end\"");
+                                    let maybe_shot_telemetry = s
+                                        .contains("\"ev\":\"shot_fired_telemetry\"")
+                                        || s.contains("\"ev\":\"shot_hit_telemetry\"")
+                                        || s.contains("\"ev\":\"shot_telemetry_batch\"");
+                                    if maybe_replay_ready {
+                                        note_in_game_replay_event(s);
+                                    }
+                                    if maybe_replay_stream {
+                                        observe_replay_stream_raw(s);
+                                    }
+                                    if maybe_shot_telemetry {
+                                        observe_shot_telemetry_raw(s);
+                                    }
                                     let parsed_event = super::parse_bridge_payload(s);
                                     let is_noisy_bridge_event = |ev: &str| {
                                         matches!(
@@ -6300,6 +6487,26 @@ pub fn has_recent_state_snapshot_ack() -> bool {
 #[cfg(not(target_os = "windows"))]
 pub fn has_recent_state_snapshot_ack() -> bool {
     false
+}
+
+#[cfg(target_os = "windows")]
+pub fn current_kovaaks_user() -> Option<BridgeCurrentUserProfile> {
+    imp::current_kovaaks_user()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_kovaaks_user() -> Option<BridgeCurrentUserProfile> {
+    None
+}
+
+#[cfg(target_os = "windows")]
+pub fn current_kovaaks_friends() -> Vec<BridgeSocialFriendProfile> {
+    imp::current_kovaaks_friends()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_kovaaks_friends() -> Vec<BridgeSocialFriendProfile> {
+    Vec::new()
 }
 
 #[cfg(target_os = "windows")]
