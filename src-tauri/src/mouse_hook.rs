@@ -517,6 +517,9 @@ fn merge_replay_captures(
         if let Some(capture_start_ms) = capture.started_at_unix_ms {
             positions.extend(capture.positions.into_iter().filter_map(|mut point| {
                 let abs_ms = capture_start_ms.saturating_add(point.timestamp_ms);
+                if abs_ms < base_start_ms {
+                    return None;
+                }
                 if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
                     return None;
                 }
@@ -528,6 +531,9 @@ fn merge_replay_captures(
             }));
             metrics.extend(capture.metrics.into_iter().filter_map(|mut point| {
                 let abs_ms = capture_start_ms.saturating_add(point.timestamp_ms);
+                if abs_ms < base_start_ms {
+                    return None;
+                }
                 if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
                     return None;
                 }

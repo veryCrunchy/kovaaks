@@ -174,6 +174,77 @@ fn repair_run_capture_if_needed(app: &AppHandle, session_id: &str, replay: &Repl
     }
 }
 
+fn repair_replay_timing_if_needed(
+    app: &AppHandle,
+    session_id: &str,
+    replay: &mut ReplayData,
+) {
+    if replay.frames.len() < 2 || replay.positions.len() < 2 {
+        return;
+    }
+
+    let frame_duration_ms = replay.frames.last().map(|frame| frame.timestamp_ms).unwrap_or(0);
+    let position_duration_ms = replay
+        .positions
+        .last()
+        .map(|point| point.timestamp_ms)
+        .unwrap_or(0);
+    let metric_duration_ms = replay
+        .metrics
+        .last()
+        .map(|point| point.timestamp_ms)
+        .unwrap_or(0);
+    let run_duration_ms = replay
+        .run_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.duration_secs)
+        .map(|secs| (secs.max(0.0) * 1000.0).round() as u64)
+        .unwrap_or(0);
+    let target_duration_ms = position_duration_ms
+        .max(metric_duration_ms)
+        .max(run_duration_ms);
+
+    if target_duration_ms == 0 || frame_duration_ms <= target_duration_ms.saturating_add(900) {
+        return;
+    }
+
+    let lead_in_ms = frame_duration_ms.saturating_sub(target_duration_ms);
+    if lead_in_ms < 900 || lead_in_ms > 5_000 {
+        return;
+    }
+
+    let mut trimmed_frames = replay
+        .frames
+        .iter()
+        .filter_map(|frame| {
+            (frame.timestamp_ms >= lead_in_ms).then(|| {
+                let mut next = frame.clone();
+                next.timestamp_ms = next.timestamp_ms.saturating_sub(lead_in_ms);
+                next
+            })
+        })
+        .collect::<Vec<_>>();
+    if trimmed_frames.len() < 2 {
+        return;
+    }
+    trimmed_frames.sort_by_key(|frame| frame.timestamp_ms);
+    let trimmed_duration_ms = trimmed_frames
+        .last()
+        .map(|frame| frame.timestamp_ms)
+        .unwrap_or(0);
+    if trimmed_duration_ms.abs_diff(target_duration_ms) > 1_500 {
+        return;
+    }
+
+    log::info!(
+        "replay_store: repaired replay timing for {} by trimming {}ms of leading video-only frames",
+        session_id,
+        lead_in_ms
+    );
+    replay.frames = trimmed_frames;
+    let _ = backfill_sqlite_replay(app, session_id, replay);
+}
+
 fn replay_keep_count(app: &AppHandle) -> usize {
     crate::settings::load(app)
         .map(|settings| settings.replay_keep_count as usize)
@@ -715,6 +786,8 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
                 purge_invalid_replay_without_video_frames(app, session_id, "sqlite replay", None);
                 return None;
             }
+            let mut replay = replay;
+            repair_replay_timing_if_needed(app, session_id, &mut replay);
             repair_run_capture_if_needed(app, session_id, &replay);
             Some(replay)
         }
@@ -725,6 +798,8 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
                     let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
                     return None;
                 }
+                let mut replay = replay;
+                repair_replay_timing_if_needed(app, session_id, &mut replay);
                 let _ = backfill_sqlite_replay(app, session_id, &replay);
                 let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
                 repair_run_capture_if_needed(app, session_id, &replay);

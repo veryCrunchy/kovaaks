@@ -757,6 +757,9 @@ fn merge_frame_captures(
         if let Some(capture_start_ms) = capture.started_at_unix_ms {
             frames.extend(capture.frames.into_iter().filter_map(|mut frame| {
                 let abs_ms = capture_start_ms.saturating_add(frame.timestamp_ms);
+                if abs_ms < base_start_ms {
+                    return None;
+                }
                 if pause_contains_abs_ms(&snapshot.pause_windows, abs_ms) {
                     return None;
                 }
