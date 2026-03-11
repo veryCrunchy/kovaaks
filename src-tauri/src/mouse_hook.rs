@@ -139,6 +139,7 @@ static FEEDBACK_VERBOSITY: AtomicU8 = AtomicU8::new(1);
 
 /// Stored handle so the rdev callback (static fn) can emit hotkey events.
 static APP_HANDLE: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
+static ACTIVE_SCENARIO_TYPE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("Unknown".to_string()));
 
 struct SharedState {
     events: Vec<RawMouseEvent>,
@@ -622,6 +623,17 @@ pub fn set_feedback_verbosity(level: u8) {
     FEEDBACK_VERBOSITY.store(level.min(2), Ordering::Relaxed);
 }
 
+pub fn set_active_scenario_type(value: Option<&str>) {
+    let normalized = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("Unknown");
+    if let Ok(mut current) = ACTIVE_SCENARIO_TYPE.lock() {
+        current.clear();
+        current.push_str(normalized);
+    }
+}
+
 // ─── Windows Raw Input thread ─────────────────────────────────────────────────
 //
 // WH_MOUSE_LL (used by rdev) reports *absolute* OS cursor coordinates which are
@@ -647,10 +659,8 @@ fn start_raw_input_thread() {
 fn raw_input_loop() {
     use std::mem::size_of;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::UI::Input::{
-        RAWINPUTDEVICE, RIDEV_INPUTSINK, RegisterRawInputDevices,
-    };
     use windows::Win32::UI::Input::KeyboardAndMouse::{HOT_KEY_MODIFIERS, RegisterHotKey};
+    use windows::Win32::UI::Input::{RAWINPUTDEVICE, RIDEV_INPUTSINK, RegisterRawInputDevices};
     use windows::Win32::UI::WindowsAndMessaging::{
         CreateWindowExW, DispatchMessageW, GetMessageW, HWND_MESSAGE, MSG, RegisterClassW,
         TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASS_STYLES, WNDCLASSW,
@@ -826,9 +836,9 @@ unsafe extern "system" fn raw_input_wnd_proc(
                                 s.lmb_down_at = Some(now);
                                 let click_x = s.cursor_x;
                                 let click_y = s.cursor_y;
-                                let ts_ms =
-                                    now.saturating_duration_since(s.session_start).as_millis()
-                                        as u64;
+                                let ts_ms = now
+                                    .saturating_duration_since(s.session_start)
+                                    .as_millis() as u64;
                                 s.raw_positions.push(RawPositionPoint {
                                     x: click_x,
                                     y: click_y,
@@ -933,8 +943,7 @@ fn mouse_event_callback(event: Event) {
         // and SetCursorPos recenter artifacts.
         EventType::MouseMove { .. } => {}
         EventType::ButtonPress(rdev::Button::Left) => {
-            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed)
-            {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed) {
                 let now = Instant::now();
                 if let Ok(mut s) = STATE.lock() {
                     s.click_times.push_back(now);
@@ -956,8 +965,7 @@ fn mouse_event_callback(event: Event) {
             }
         }
         EventType::ButtonRelease(rdev::Button::Left) => {
-            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed)
-            {
+            if TRACKING_ACTIVE.load(Ordering::Relaxed) && !TRACKING_PAUSED.load(Ordering::Relaxed) {
                 if let Ok(mut s) = STATE.lock() {
                     if let Some(down) = s.lmb_down_at.take() {
                         let hold_ms = down.elapsed().as_secs_f32() * 1000.0;
@@ -1068,7 +1076,10 @@ fn metric_emitter_loop(app: AppHandle) {
 
             let dpi = MOUSE_DPI.load(Ordering::Relaxed);
 
-            let scenario = "Unknown".to_string();
+            let scenario = ACTIVE_SCENARIO_TYPE
+                .lock()
+                .map(|current| current.clone())
+                .unwrap_or_else(|_| "Unknown".to_string());
 
             let recent_refs: Vec<&RawMouseEvent> = recent_owned.iter().collect();
             let mut m = compute_metrics(&recent_refs, dpi, &click_intervals_ms, &scenario);
@@ -1639,12 +1650,8 @@ fn compute_metrics(
     //  Unknown   — balanced baseline (original formula).
     let (w_jitter, w_path, w_consistency, w_overshoot): (f64, f64, f64, f64) = match scenario {
         "Tracking" | "PureTracking" => (35.0, 25.0, 30.0, 10.0),
-        "StaticClicking"
-        | "TargetSwitching"
-        | "DynamicClicking"
-        | "OneShotClicking"
-        | "MultiHitClicking"
-        | "ReactiveClicking" => (5.0, 25.0, 10.0, 60.0),
+        "StaticClicking" | "TargetSwitching" | "DynamicClicking" | "OneShotClicking"
+        | "MultiHitClicking" | "ReactiveClicking" => (5.0, 25.0, 10.0, 60.0),
         "AccuracyDrill" => (10.0, 40.0, 10.0, 40.0),
         _ =>
         // Unknown / default
