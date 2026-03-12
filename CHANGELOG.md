@@ -1,5 +1,39 @@
 # Changelog
 
+## [1.7.0](https://github.com/veryCrunchy/aimmod/compare/v1.6.1...v1.7.0) (2026-03-12)
+
+
+### Features
+
+* add robust directory removal and clearing functions ([a64d781](https://github.com/veryCrunchy/aimmod/commit/a64d78113e2be65bc77d63cba5edaa9d2029451c))
+* **appearance:** sync accent color from KovaaK's Palette.ini ([5d9767a](https://github.com/veryCrunchy/aimmod/commit/5d9767aadac533644bf562d46efb6c34c826c893))
+* apply full KovaaK's palette + fix stats window theming + HUD opacity ([8f69a06](https://github.com/veryCrunchy/aimmod/commit/8f69a06c9ed9c1e70b4f4e1b4ae16a2aef413af3))
+* auto-save settings and tune post-run flow ([4aef856](https://github.com/veryCrunchy/aimmod/commit/4aef856e093ecd5491c6788ac4d268f925a59f86))
+* **bridge:** add user identity profile types and event handlers ([00d0de2](https://github.com/veryCrunchy/aimmod/commit/00d0de2ab725a28084153e1b0a1b5b4465607f34))
+* **friend-scores:** refactor serialization and add adjacent scores handling ([ed21a15](https://github.com/veryCrunchy/aimmod/commit/ed21a153f7cd0ee50313979679268f8acd9829d9))
+* **hub-api:** add strip_null_fields function and update struct defaults ([ab9821d](https://github.com/veryCrunchy/aimmod/commit/ab9821d60d38d7257efa7be307ad27fd31f201a9))
+* **hub-sync:** derive upload identity from in-game bridge user ([4665322](https://github.com/veryCrunchy/aimmod/commit/466532227a993be153f97341d4834e6959beaa94))
+* **hub:** add benchmark pages and scenario history ([5cb7883](https://github.com/veryCrunchy/aimmod/commit/5cb7883b31058474222fc8a9404334f48cee68ea))
+* **identity:** use live bridge friends and current user ([3b4b001](https://github.com/veryCrunchy/aimmod/commit/3b4b0016b9b06fd302473e468ea6abe15a08ddd6))
+* **lib:** add hub API commands and identity-aware friend resolution ([8a40601](https://github.com/veryCrunchy/aimmod/commit/8a4060190b91207c3cfa57a0d9e4821f05eec526))
+* **mouse-hook:** track active scenario type for scenario-aware metrics ([e654d0b](https://github.com/veryCrunchy/aimmod/commit/e654d0b408f7058b51561d0d7f842e784757fe6b))
+* **stats:** add AimMod Hub tab with overview and replay browser panels ([8339978](https://github.com/veryCrunchy/aimmod/commit/8339978a998cf154e23e8d14b44ac5be13f867a2))
+* **ue4ss:** batch pull_snapshot event and add user management module ([050c2ae](https://github.com/veryCrunchy/aimmod/commit/050c2ae6e845b9bb464bd6e4be5c95b61f75bbeb))
+* **user-management:** add friend scores caching and comparison functions ([323f24b](https://github.com/veryCrunchy/aimmod/commit/323f24b5e4fa3dbb0695899f7757f9541a344976))
+* **vsmode:** use live in-game identity as VS opponent ([3859b9c](https://github.com/veryCrunchy/aimmod/commit/3859b9c0c05ca94b57a9d37fc5f37f83a246d2dc))
+* wire all KovaaK's palette colors into app UI ([d8db876](https://github.com/veryCrunchy/aimmod/commit/d8db876b8bd59c476c94e1ab69ae419975db688b))
+
+
+### Bug Fixes
+
+* **hub-sync:** enrich upload identity and mouse-path payloads ([f0e08d5](https://github.com/veryCrunchy/aimmod/commit/f0e08d5e294feb5151817444a0035d0efcfa7466))
+* preserve palette alpha and apply it correctly throughout UI ([d3105c2](https://github.com/veryCrunchy/aimmod/commit/d3105c2a171e1dc092d3812b27578fffaa279d31))
+* repair replay timing drift for saved runs ([fe9fa08](https://github.com/veryCrunchy/aimmod/commit/fe9fa0840df764b7d649d9a620dd58853330dd2f))
+* **screen-recorder:** bounded encoder queue and frame-rate pacing ([264ae15](https://github.com/veryCrunchy/aimmod/commit/264ae1569ffe5bb2e34f38dc3f1ae1cfba9dc4d4))
+* solid UI colors + scoped palette sync ([595bd19](https://github.com/veryCrunchy/aimmod/commit/595bd190efb4b33f0d4e105ed03f7316d7650fd6))
+* **ue4ss:** add recursive mutex to rust_bridge API for thread safety ([23712eb](https://github.com/veryCrunchy/aimmod/commit/23712eb9ce964323b5446b1709c993c40e497b1d))
+* **user-management:** remove unused W_Text references and streamline user ID extraction ([02e4eb8](https://github.com/veryCrunchy/aimmod/commit/02e4eb888d22dcfaa1f1309c75732409fad55c1b))
+
 ## [1.6.1](https://github.com/veryCrunchy/aimmod/compare/v1.6.0...v1.6.1) (2026-03-10)
 
 
