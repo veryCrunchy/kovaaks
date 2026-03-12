@@ -37,14 +37,54 @@
   to   { opacity: 1; }
 }
 
-/* ── Accent CSS custom properties (updated at runtime by useAppTheme) ───────── */
+/* ── Theme CSS custom properties (updated at runtime by useAppTheme) ────────── */
 
 :root {
+  /* Accent (Primary) */
   --am-accent:        #00f5a0;
   --am-accent-rgb:    0, 245, 160;
   --am-accent-dim:    rgba(0, 245, 160, 0.12);
   --am-accent-border: rgba(0, 245, 160, 0.25);
   --am-accent-glow:   rgba(0, 245, 160, 0.30);
+
+  /* Semantic palette defaults (overridden by KovaaK's theme when loaded) */
+  --am-surface:       #4E4A54;
+  --am-surface-rgb:   78, 74, 84;
+  --am-bg-deep:       #36323B;
+  --am-bg-deep-rgb:   54, 50, 59;
+  --am-success:       #4FAB5F;
+  --am-success-rgb:   79, 171, 95;
+  --am-danger:        #E65000;
+  --am-danger-rgb:    230, 80, 0;
+  --am-team:          #05CB78;
+  --am-team-rgb:      5, 203, 120;
+  --am-health:        #05CB78;
+  --am-health-rgb:    5, 203, 120;
+  --am-speed:         #AE3400;
+  --am-speed-rgb:     174, 52, 0;
+  --am-gold:          #D4AA4B;
+  --am-gold-rgb:      212, 170, 75;
+  --am-teal:          #388184;
+  --am-teal-rgb:      56, 129, 132;
+  --am-teal-bright:   #3FCCB2;
+  --am-teal-bright-rgb: 63, 204, 178;
+  --am-hud-bg:        #36323B;
+  --am-hud-bg-rgb:    54, 50, 59;
+  --am-bar-bg:        #28243B;
+  --am-bar-bg-rgb:    40, 36, 59;
+  --am-text-sub:      #9B9DB1;
+  --am-text-sub-rgb:  155, 157, 177;
+  --am-info-dodge:    #6666FF;
+  --am-info-dodge-rgb:102, 102, 255;
+  --am-info-weapon:   #66D6D6;
+  --am-info-weapon-rgb:102, 214, 214;
+  --am-countdown:     #00F2B9;
+  --am-countdown-rgb: 0, 242, 185;
+  --am-graph:         #ED4800;
+  --am-graph-rgb:     237, 72, 0;
+
+  /* HUD opacity (0–1, settable per user preference) */
+  --am-hud-opacity:   1;
 }
 
 /* ── Base ───────────────────────────────────────────────────────────────────── */

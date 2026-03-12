@@ -2,14 +2,42 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct KovaaksPalette {
-    /// The "Primary" UI accent color, e.g. "#ED6816".
+    /// Primary UI accent color, e.g. "#ED6816".
     pub primary_hex: Option<String>,
-    /// The "Secondary" surface color.
+    /// Secondary surface / card color.
     pub secondary_hex: Option<String>,
-    /// The "Background" color.
+    /// Background color.
     pub background_hex: Option<String>,
-    /// The "SpecialCallToAction" (green CTA) color.
+    /// SpecialCallToAction — green CTA / success.
     pub special_call_to_action_hex: Option<String>,
+    /// HudEnemyHealthBar — danger / enemy red.
+    pub hud_enemy_health_bar_hex: Option<String>,
+    /// HudTeamHealthBar — team / friendly green.
+    pub hud_team_health_bar_hex: Option<String>,
+    /// HudHealthBar — player health bar.
+    pub hud_health_bar_hex: Option<String>,
+    /// HudSpeedBar — speed indicator.
+    pub hud_speed_bar_hex: Option<String>,
+    /// HudJetPackBar — jetpack / gold.
+    pub hud_jet_pack_bar_hex: Option<String>,
+    /// HudWeaponAmmoBar — ammo teal.
+    pub hud_weapon_ammo_bar_hex: Option<String>,
+    /// HudWeaponChangeBar — weapon change teal-bright.
+    pub hud_weapon_change_bar_hex: Option<String>,
+    /// HudBackground (may include alpha).
+    pub hud_background_hex: Option<String>,
+    /// HudBarBackground (may include alpha).
+    pub hud_bar_background_hex: Option<String>,
+    /// SpecialText — muted/sub text color.
+    pub special_text_hex: Option<String>,
+    /// InfoDodge — dodge info color.
+    pub info_dodge_hex: Option<String>,
+    /// InfoWeapon — weapon info color.
+    pub info_weapon_hex: Option<String>,
+    /// HudCountdownTimer color.
+    pub hud_countdown_timer_hex: Option<String>,
+    /// ChallengeGraph color.
+    pub challenge_graph_hex: Option<String>,
     /// Path that was successfully read (for diagnostics).
     pub path_used: Option<String>,
 }
@@ -119,6 +147,20 @@ pub fn read_palette(path: &str) -> KovaaksPalette {
                 "Secondary" => palette.secondary_hex = Some(hex),
                 "Background" => palette.background_hex = Some(hex),
                 "SpecialCallToAction" => palette.special_call_to_action_hex = Some(hex),
+                "HudEnemyHealthBar" => palette.hud_enemy_health_bar_hex = Some(hex),
+                "HudTeamHealthBar" => palette.hud_team_health_bar_hex = Some(hex),
+                "HudHealthBar" => palette.hud_health_bar_hex = Some(hex),
+                "HudSpeedBar" => palette.hud_speed_bar_hex = Some(hex),
+                "HudJetPackBar" => palette.hud_jet_pack_bar_hex = Some(hex),
+                "HudWeaponAmmoBar" => palette.hud_weapon_ammo_bar_hex = Some(hex),
+                "HudWeaponChangeBar" => palette.hud_weapon_change_bar_hex = Some(hex),
+                "HudBackground" => palette.hud_background_hex = Some(hex),
+                "HudBarBackground" => palette.hud_bar_background_hex = Some(hex),
+                "SpecialText" => palette.special_text_hex = Some(hex),
+                "InfoDodge" => palette.info_dodge_hex = Some(hex),
+                "InfoWeapon" => palette.info_weapon_hex = Some(hex),
+                "HudCountdownTimer" => palette.hud_countdown_timer_hex = Some(hex),
+                "ChallengeGraph" => palette.challenge_graph_hex = Some(hex),
                 _ => {}
             }
         }

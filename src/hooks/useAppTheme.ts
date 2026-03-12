@@ -10,6 +10,20 @@ interface KovaaksPalette {
   secondary_hex: string | null;
   background_hex: string | null;
   special_call_to_action_hex: string | null;
+  hud_enemy_health_bar_hex: string | null;
+  hud_team_health_bar_hex: string | null;
+  hud_health_bar_hex: string | null;
+  hud_speed_bar_hex: string | null;
+  hud_jet_pack_bar_hex: string | null;
+  hud_weapon_ammo_bar_hex: string | null;
+  hud_weapon_change_bar_hex: string | null;
+  hud_background_hex: string | null;
+  hud_bar_background_hex: string | null;
+  special_text_hex: string | null;
+  info_dodge_hex: string | null;
+  info_weapon_hex: string | null;
+  hud_countdown_timer_hex: string | null;
+  challenge_graph_hex: string | null;
   path_used: string | null;
 }
 
@@ -21,6 +35,14 @@ function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
     g: parseInt(clean.slice(2, 4), 16),
     b: parseInt(clean.slice(4, 6), 16),
   };
+}
+
+function setVar(root: HTMLElement, name: string, hex: string) {
+  const rgb = hexToRgb(hex);
+  if (!rgb) return;
+  const { r, g, b } = rgb;
+  root.style.setProperty(name, hex);
+  root.style.setProperty(`${name}-rgb`, `${r}, ${g}, ${b}`);
 }
 
 function applyAccent(hex: string) {
@@ -35,6 +57,35 @@ function applyAccent(hex: string) {
   root.style.setProperty("--am-accent-glow", `rgba(${r}, ${g}, ${b}, 0.30)`);
 }
 
+function applyPalette(palette: KovaaksPalette) {
+  const root = document.documentElement;
+  if (palette.primary_hex) applyAccent(palette.primary_hex);
+  if (palette.secondary_hex) setVar(root, "--am-surface", palette.secondary_hex);
+  if (palette.background_hex) setVar(root, "--am-bg-deep", palette.background_hex);
+  if (palette.special_call_to_action_hex) setVar(root, "--am-success", palette.special_call_to_action_hex);
+  if (palette.hud_enemy_health_bar_hex) setVar(root, "--am-danger", palette.hud_enemy_health_bar_hex);
+  if (palette.hud_team_health_bar_hex) setVar(root, "--am-team", palette.hud_team_health_bar_hex);
+  if (palette.hud_health_bar_hex) setVar(root, "--am-health", palette.hud_health_bar_hex);
+  if (palette.hud_speed_bar_hex) setVar(root, "--am-speed", palette.hud_speed_bar_hex);
+  if (palette.hud_jet_pack_bar_hex) setVar(root, "--am-gold", palette.hud_jet_pack_bar_hex);
+  if (palette.hud_weapon_ammo_bar_hex) setVar(root, "--am-teal", palette.hud_weapon_ammo_bar_hex);
+  if (palette.hud_weapon_change_bar_hex) setVar(root, "--am-teal-bright", palette.hud_weapon_change_bar_hex);
+  if (palette.hud_background_hex) setVar(root, "--am-hud-bg", palette.hud_background_hex);
+  if (palette.hud_bar_background_hex) setVar(root, "--am-bar-bg", palette.hud_bar_background_hex);
+  if (palette.special_text_hex) setVar(root, "--am-text-sub", palette.special_text_hex);
+  if (palette.info_dodge_hex) setVar(root, "--am-info-dodge", palette.info_dodge_hex);
+  if (palette.info_weapon_hex) setVar(root, "--am-info-weapon", palette.info_weapon_hex);
+  if (palette.hud_countdown_timer_hex) setVar(root, "--am-countdown", palette.hud_countdown_timer_hex);
+  if (palette.challenge_graph_hex) setVar(root, "--am-graph", palette.challenge_graph_hex);
+}
+
+function applyHudOpacity(settings: AppSettings) {
+  const opacity = typeof settings.hud_opacity === "number"
+    ? Math.min(1, Math.max(0, settings.hud_opacity))
+    : 1;
+  document.documentElement.style.setProperty("--am-hud-opacity", String(opacity));
+}
+
 async function loadAndApplyTheme() {
   let settings: AppSettings | null = null;
   try {
@@ -44,6 +95,7 @@ async function loadAndApplyTheme() {
     return;
   }
 
+  applyHudOpacity(settings);
   const mode = settings.color_mode ?? "kovaaks";
 
   if (mode === "default") {
@@ -60,7 +112,8 @@ async function loadAndApplyTheme() {
   // mode === "kovaaks" — read from Palette.ini
   try {
     const palette = await invoke<KovaaksPalette>("read_kovaaks_palette");
-    applyAccent(palette.primary_hex ?? DEFAULT_ACCENT);
+    applyPalette(palette);
+    if (!palette.primary_hex) applyAccent(DEFAULT_ACCENT);
   } catch {
     applyAccent(DEFAULT_ACCENT);
   }

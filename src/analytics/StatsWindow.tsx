@@ -1,4 +1,5 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { useAppTheme } from "../hooks/useAppTheme";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Update } from "@tauri-apps/plugin-updater";
@@ -6289,6 +6290,7 @@ type ScenarioSortMode = "recent" | "plays" | "type";
 type SessionsPaneMode = "overview" | "scenario";
 
 export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
+  useAppTheme();
   const { status: updateStatus, checkForUpdate, installUpdate } = useUpdater();
   const [records, setRecords] = useState<SessionRecord[]>([]);
   const [search, setSearch] = useState(() => readStoredValue(STATS_WINDOW_STORAGE_KEYS.search) ?? "");

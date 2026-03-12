@@ -642,6 +642,7 @@ export function DraggableHUD({
         cursor: layoutMode ? (isDragging.current ? "grabbing" : "grab") : "default",
         userSelect: "none",
         zIndex: 50,
+        opacity: layoutMode ? 1 : "var(--am-hud-opacity)" as unknown as number,
         outline: layoutMode ? `2px dashed ${accentAlpha("99")}` : "none",
         outlineOffset: 6,
         borderRadius: layoutMode ? 8 : 0,

@@ -60,6 +60,8 @@ export interface AppSettings {
   custom_accent_color: string;
   /** Override path for KovaaK's Palette.ini. Empty = auto-detect. */
   kovaaks_palette_path: string;
+  /** Overlay HUD opacity (0–1). Default 1.0. */
+  hud_opacity: number;
 }
 
 export interface MonitorInfo {

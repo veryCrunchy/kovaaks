@@ -1777,6 +1777,28 @@ function AppearanceSection({
           <span style={{ fontSize: 12, color: C.textFaint }}>AimMod default green (#00f5a0)</span>
         </div>
       )}
+
+      {/* HUD opacity */}
+      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <label style={{ fontSize: 12, color: C.textSub }}>Overlay HUD opacity</label>
+          <span style={{ fontSize: 11, color: C.accent, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+            {Math.round((settings.hud_opacity ?? 1) * 100)}%
+          </span>
+        </div>
+        <input
+          type="range"
+          min={10}
+          max={100}
+          step={5}
+          value={Math.round((settings.hud_opacity ?? 1) * 100)}
+          onChange={(e) => update("hud_opacity", Number(e.target.value) / 100)}
+          style={{ width: "100%", accentColor: C.accent }}
+        />
+        <span style={{ fontSize: 10, color: C.textFaint }}>
+          Controls the transparency of all overlay HUDs (VS Mode, Stats, Smoothness, Coaching). Does not affect the settings or stats windows.
+        </span>
+      </div>
     </FieldGroup>
   );
 }
