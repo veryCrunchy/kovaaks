@@ -54,6 +54,12 @@ export interface AppSettings {
   replay_media_upload_mode: "off" | "favorites" | "favorites_and_pb" | "all";
   /** Replay media upload quality preset. Higher presets can later be reserved for Plus tiers. */
   replay_media_upload_quality: "standard" | "high" | "ultra";
+  /** Accent color source: "kovaaks" | "custom" | "default". */
+  color_mode: "kovaaks" | "custom" | "default";
+  /** Custom accent hex (used when color_mode is "custom"), e.g. "#ED6816". */
+  custom_accent_color: string;
+  /** Override path for KovaaK's Palette.ini. Empty = auto-detect. */
+  kovaaks_palette_path: string;
 }
 
 export interface MonitorInfo {

@@ -378,6 +378,7 @@ mod file_watcher;
 mod hub_api;
 mod hub_sync;
 mod kovaaks_api;
+mod kovaaks_theme;
 mod logger;
 mod mouse_hook;
 mod replay_store;
@@ -757,6 +758,17 @@ async fn hub_get_aim_fingerprint(
     hub_api::get_aim_fingerprint(&app, handle)
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn read_kovaaks_palette(app: AppHandle) -> kovaaks_theme::KovaaksPalette {
+    let settings = settings::load(&app).unwrap_or_default();
+    let path = if settings.kovaaks_palette_path.trim().is_empty() {
+        kovaaks_theme::default_palette_path()
+    } else {
+        settings.kovaaks_palette_path.trim().to_string()
+    };
+    kovaaks_theme::read_palette(&path)
 }
 
 // ─── Friend / API commands ─────────────────────────────────────────────────────
@@ -1955,6 +1967,7 @@ pub fn run() {
             hub_get_run,
             hub_get_aim_profile,
             hub_get_aim_fingerprint,
+            read_kovaaks_palette,
             get_friends,
             get_current_kovaaks_user,
             add_friend,

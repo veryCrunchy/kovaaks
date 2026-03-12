@@ -5,7 +5,7 @@ import type { FriendProfile } from "../types/friends";
 import { FriendManager } from "./FriendManager";
 import { useUpdater } from "../hooks/useUpdater";
 import { Btn, FieldGroup, GlassCard, Toggle } from "../design/ui";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
@@ -411,11 +411,12 @@ function formatHubUserError(message: string | null | undefined): string | null {
   return raw;
 }
 
-type GeneralSection = "basics" | "overlay" | "replay" | "hub" | "hud";
+type GeneralSection = "basics" | "overlay" | "appearance" | "replay" | "hub" | "hud";
 
 const GENERAL_SETTING_SECTIONS: { id: GeneralSection; label: string }[] = [
   { id: "basics", label: "Basics" },
   { id: "overlay", label: "Overlay" },
+  { id: "appearance", label: "Appearance" },
   { id: "replay", label: "Replay" },
   { id: "hub", label: "Hub" },
   { id: "hud", label: "HUD / Post-Run" },
@@ -634,7 +635,7 @@ function GeneralSettings({
           marginBottom: 18,
           padding: "12px 14px",
           borderRadius: 12,
-          background: error ? `${C.danger}10` : saving ? `${C.warn}10` : `${C.accent}10`,
+          background: error ? `${C.danger}10` : saving ? `${C.warn}10` : accentAlpha("10"),
           border: `1px solid ${error ? `${C.danger}40` : saving ? `${C.warn}40` : C.accentBorder}`,
         }}
       >
@@ -1158,6 +1159,11 @@ function GeneralSettings({
         </FieldGroup>
         )}
 
+        {/* ── Appearance ───────────────────────────────────────────── */}
+        {activeSection === "appearance" && (
+          <AppearanceSection settings={settings} update={update} />
+        )}
+
         {/* ── AimMod Hub ───────────────────────────────────────────── */}
         {activeSection === "hub" && (
         <FieldGroup
@@ -1256,7 +1262,7 @@ function GeneralSettings({
                   style={{
                     padding: "10px 12px",
                     borderRadius: 10,
-                    background: `${C.accent}10`,
+                    background: accentAlpha("10"),
                     border: `1px solid ${C.accentBorder}`,
                   }}
                 >
@@ -1472,7 +1478,7 @@ function GeneralSettings({
                     fontSize: 10,
                     padding: "4px 8px",
                     borderRadius: 999,
-                    background: enabled ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                    background: enabled ? accentAlpha("16") : "rgba(255,255,255,0.04)",
                     border: `1px solid ${enabled ? C.accentBorder : C.borderSub}`,
                     color: enabled ? C.accent : C.textFaint,
                   }}
@@ -1612,6 +1618,167 @@ function GeneralSettings({
 interface VoicePickerProps {
   selectedVoice: string | null;
   onSelect: (voiceName: string | null) => void;
+}
+
+// ─── Appearance section ────────────────────────────────────────────────────────
+
+interface KovaaksPalette {
+  primary_hex: string | null;
+  secondary_hex: string | null;
+  special_call_to_action_hex: string | null;
+  path_used: string | null;
+}
+
+function ColorSwatch({ hex, label }: { hex: string; label: string }) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+      <div
+        style={{
+          width: 20,
+          height: 20,
+          borderRadius: 5,
+          background: hex,
+          border: "1px solid rgba(255,255,255,0.15)",
+          flexShrink: 0,
+        }}
+      />
+      <span style={{ fontSize: 11, color: C.textMuted }}>{label}</span>
+      <span style={{ fontSize: 10, color: C.textFaint, fontFamily: "inherit" }}>{hex}</span>
+    </div>
+  );
+}
+
+function AppearanceSection({
+  settings,
+  update,
+}: {
+  settings: AppSettings;
+  update: <K extends keyof AppSettings>(key: K, value: AppSettings[K]) => void;
+}) {
+  const [palette, setPalette] = useState<KovaaksPalette | null>(null);
+  const [loadingPalette, setLoadingPalette] = useState(false);
+
+  const mode = settings.color_mode ?? "kovaaks";
+
+  useEffect(() => {
+    if (mode !== "kovaaks") return;
+    setLoadingPalette(true);
+    invoke<KovaaksPalette>("read_kovaaks_palette")
+      .then(setPalette)
+      .catch(() => setPalette(null))
+      .finally(() => setLoadingPalette(false));
+  }, [mode, settings.kovaaks_palette_path]);
+
+  return (
+    <FieldGroup
+      label="Accent Color"
+      description="Choose how AimMod picks its accent color across the overlay and stats window."
+    >
+      {/* Mode picker */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {(["kovaaks", "custom", "default"] as const).map((m) => (
+          <button
+            key={m}
+            type="button"
+            onClick={() => update("color_mode", m)}
+            style={{
+              padding: "5px 14px",
+              borderRadius: 7,
+              border: `1px solid ${mode === m ? C.accentBorder : C.border}`,
+              background: mode === m ? accentAlpha("16") : "rgba(255,255,255,0.04)",
+              color: mode === m ? C.accent : C.textMuted,
+              fontSize: 12,
+              fontFamily: "inherit",
+              fontWeight: mode === m ? 700 : 400,
+              cursor: "pointer",
+            }}
+          >
+            {m === "kovaaks" ? "KovaaK's theme" : m === "custom" ? "Custom" : "Default green"}
+          </button>
+        ))}
+      </div>
+
+      {/* KovaaK's mode: show detected palette */}
+      {mode === "kovaaks" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {loadingPalette && (
+            <span style={{ fontSize: 12, color: C.textFaint }}>Reading Palette.ini…</span>
+          )}
+          {!loadingPalette && palette?.primary_hex && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              <span style={{ fontSize: 11, color: C.textSub }}>Detected KovaaK's palette:</span>
+              {palette.primary_hex && <ColorSwatch hex={palette.primary_hex} label="Primary (accent)" />}
+              {palette.special_call_to_action_hex && (
+                <ColorSwatch hex={palette.special_call_to_action_hex} label="Call-to-action" />
+              )}
+              {palette.secondary_hex && <ColorSwatch hex={palette.secondary_hex} label="Secondary" />}
+              {palette.path_used && (
+                <span style={{ fontSize: 10, color: C.textFaint, wordBreak: "break-all" }}>
+                  {palette.path_used}
+                </span>
+              )}
+            </div>
+          )}
+          {!loadingPalette && !palette?.primary_hex && (
+            <span style={{ fontSize: 12, color: C.warn }}>
+              Could not read Palette.ini — falling back to default green. Make sure KovaaK's has been launched at least once.
+            </span>
+          )}
+          <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <label style={{ fontSize: 11, color: C.textMuted }}>
+              Custom Palette.ini path (optional override)
+            </label>
+            <input
+              type="text"
+              className="am-input"
+              value={settings.kovaaks_palette_path ?? ""}
+              onChange={(e) => update("kovaaks_palette_path", e.target.value)}
+              placeholder="Leave blank to auto-detect from %LOCALAPPDATA%"
+              style={{ fontSize: 11 }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Custom mode: color picker */}
+      {mode === "custom" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <input
+            type="color"
+            value={
+              /^#[0-9a-fA-F]{6}$/.test(settings.custom_accent_color ?? "")
+                ? settings.custom_accent_color
+                : "#00f5a0"
+            }
+            onChange={(e) => update("custom_accent_color", e.target.value)}
+            style={{
+              width: 44,
+              height: 36,
+              borderRadius: 7,
+              border: `1px solid ${C.border}`,
+              background: "none",
+              cursor: "pointer",
+              padding: 2,
+            }}
+          />
+          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+            <span style={{ fontSize: 12, color: C.textSub }}>Pick any accent color</span>
+            <span style={{ fontSize: 10, color: C.textFaint }}>
+              Used for all highlighted elements in the overlay and stats window.
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Default mode: just a note */}
+      {mode === "default" && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+          <div style={{ width: 20, height: 20, borderRadius: 5, background: "#00f5a0", border: "1px solid rgba(255,255,255,0.15)" }} />
+          <span style={{ fontSize: 12, color: C.textFaint }}>AimMod default green (#00f5a0)</span>
+        </div>
+      )}
+    </FieldGroup>
+  );
 }
 
 // @ts-ignore -- kept for future use

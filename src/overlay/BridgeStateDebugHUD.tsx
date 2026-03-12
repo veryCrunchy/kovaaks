@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { useLiveScore } from "../hooks/useLiveScore";
 import { useStatsPanel } from "../hooks/useStatsPanel";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 import type { StatsPanelReading } from "../types/overlay";
 
 interface BridgeMetricEvent {
@@ -125,7 +125,7 @@ export function BridgeStateDebugHUD() {
       style={{
         background: C.glass,
         border: `1px solid ${C.accentBorder}`,
-        boxShadow: `0 8px 22px rgba(0,0,0,0.5), 0 0 0 1px ${C.accent}08`,
+        boxShadow: `0 8px 22px rgba(0,0,0,0.5), 0 0 0 1px ${accentAlpha("08")}`,
         color: C.text,
         fontFamily: "'JetBrains Mono', monospace",
         fontSize: 11,

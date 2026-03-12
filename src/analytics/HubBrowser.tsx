@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Btn, Badge } from "../design/ui";
-import { C, SCENARIO_LABELS } from "../design/tokens";
+import { C, SCENARIO_LABELS, accentAlpha } from "../design/tokens";
 
 type HubKind = "profile" | "scenario" | "run" | "replay";
 type HubFilter = "all" | "profiles" | "scenarios" | "runs" | "replays";
@@ -560,8 +560,8 @@ export function HubBrowserPanel() {
                 onClick={() => setFilter(value)}
                 style={{
                   borderRadius: 999,
-                  border: `1px solid ${filter === value ? `${C.accent}55` : C.borderSub}`,
-                  background: filter === value ? `${C.accent}18` : "transparent",
+                  border: `1px solid ${filter === value ? accentAlpha("55") : C.borderSub}`,
+                  background: filter === value ? accentAlpha("18") : "transparent",
                   color: filter === value ? C.accent : C.textFaint,
                   fontSize: 10,
                   padding: "4px 9px",
@@ -674,8 +674,8 @@ export function HubBrowserPanel() {
                           style={{
                             textAlign: "left",
                             borderRadius: 10,
-                            border: `1px solid ${selection?.id === item.id ? `${C.accent}55` : C.borderSub}`,
-                            background: selection?.id === item.id ? `${C.accent}10` : "rgba(255,255,255,0.02)",
+                            border: `1px solid ${selection?.id === item.id ? accentAlpha("55") : C.borderSub}`,
+                            background: selection?.id === item.id ? accentAlpha("10") : "rgba(255,255,255,0.02)",
                             color: C.text,
                             padding: "10px 12px",
                             cursor: "pointer",

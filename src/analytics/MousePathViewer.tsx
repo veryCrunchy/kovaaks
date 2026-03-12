@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 import type { MetricPoint, RawPositionPoint, ScreenFrame } from "../types/mouse";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -933,7 +933,7 @@ export function MousePathViewer({
               onClick={handlePlayPause}
               className="am-btn rounded-lg px-4 py-1.5 text-sm font-semibold"
               style={{
-                background: isPlaying ? C.accentDim : `${C.accent}1f`,
+                background: isPlaying ? C.accentDim : accentAlpha("1f"),
                 border: `1px solid ${C.accentBorder}`,
                 color: C.accent,
                 cursor: "pointer",

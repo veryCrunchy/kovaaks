@@ -36,7 +36,7 @@ import {
   TooltipProps,
 } from "recharts";
 import { Badge, Dot, Btn, SectionLabel } from "../design/ui";
-import { C, scenarioColor, SCENARIO_LABELS } from "../design/tokens";
+import { C, scenarioColor, SCENARIO_LABELS, accentAlpha } from "../design/tokens";
 import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
 import { useUpdater } from "../hooks/useUpdater";
 import type { AppSettings } from "../types/settings";
@@ -3764,7 +3764,7 @@ function ReplayTab({
                   type="button"
                   onClick={() => toggleReplaySort(column)}
                   style={{
-                    background: active ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                    background: active ? accentAlpha("16") : "rgba(255,255,255,0.04)",
                     border: `1px solid ${active ? C.accentBorder : C.border}`,
                     borderRadius: 999,
                     color: active ? C.accent : C.textMuted,
@@ -3986,7 +3986,7 @@ function ReplayTab({
                           type="button"
                           onClick={() => setShotTelemetryDisplayMode(option.key)}
                           style={{
-                            background: active ? `${C.accent}16` : "rgba(255,255,255,0.04)",
+                            background: active ? accentAlpha("16") : "rgba(255,255,255,0.04)",
                             border: `1px solid ${active ? C.accentBorder : C.border}`,
                             borderRadius: 999,
                             color: active ? C.accent : C.textMuted,

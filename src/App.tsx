@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
-import { C } from "./design/tokens";
+import { C, accentAlpha } from "./design/tokens";
+import { useAppTheme } from "./hooks/useAppTheme";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { VSMode } from "./overlay/VSMode";
@@ -271,6 +272,7 @@ function buildHudPreset(name: PresetName, activeKeys: HudKey[], gridStep: number
 }
 
 export default function App() {
+  useAppTheme();
   const [mode, setMode] = useState<Mode>("overlay");
   const [currentScenario, setCurrentScenario] = useState<string | null>(null);
   const [returnMode, setReturnMode] = useState<"overlay" | "settings">("overlay");
@@ -613,8 +615,8 @@ export default function App() {
             pointerEvents: "none",
             zIndex: 1,
             backgroundImage: `
-              linear-gradient(to right, rgba(0,245,160,0.12) 1px, transparent 1px),
-              linear-gradient(to bottom, rgba(0,245,160,0.12) 1px, transparent 1px)
+              linear-gradient(to right, ${accentAlpha("1f")} 1px, transparent 1px),
+              linear-gradient(to bottom, ${accentAlpha("1f")} 1px, transparent 1px)
             `,
             backgroundSize: `${gridSize}px ${gridSize}px`,
             backgroundPosition: "0 0, 0 0",
@@ -668,7 +670,7 @@ export default function App() {
                   key={size}
                   onClick={() => setGridSize(size)}
                   style={{
-                    background: gridSize === size ? `${C.accent}22` : "rgba(255,255,255,0.06)",
+                    background: gridSize === size ? accentAlpha("22") : "rgba(255,255,255,0.06)",
                     border: `1px solid ${gridSize === size ? C.accentBorder : C.border}`,
                     borderRadius: 5,
                     color: gridSize === size ? C.accent : C.textMuted,

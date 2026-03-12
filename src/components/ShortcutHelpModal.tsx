@@ -1,4 +1,4 @@
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 
 export interface ShortcutHelpItem {
   keys: string;
@@ -117,7 +117,7 @@ export function ShortcutHelpModal({
                       style={{
                         fontSize: 11,
                         color: C.accent,
-                        background: `${C.accent}14`,
+                        background: accentAlpha("14"),
                         border: `1px solid ${C.accentBorder}`,
                         borderRadius: 999,
                         padding: "4px 8px",

@@ -37,6 +37,16 @@
   to   { opacity: 1; }
 }
 
+/* ── Accent CSS custom properties (updated at runtime by useAppTheme) ───────── */
+
+:root {
+  --am-accent:        #00f5a0;
+  --am-accent-rgb:    0, 245, 160;
+  --am-accent-dim:    rgba(0, 245, 160, 0.12);
+  --am-accent-border: rgba(0, 245, 160, 0.25);
+  --am-accent-glow:   rgba(0, 245, 160, 0.30);
+}
+
 /* ── Base ───────────────────────────────────────────────────────────────────── */
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -107,14 +117,15 @@ button:active:not(:disabled) { transform: scale(0.97); }
 
 /* primary */
 .am-btn-primary {
-  background: #00f5a0;
+  background: var(--am-accent);
   color:      #000;
   border-color: transparent;
   font-weight: 700;
 }
 .am-btn-primary:hover:not(:disabled) {
-  background: #1fffa8;
-  box-shadow: 0 0 12px rgba(0,245,160,0.35);
+  background: var(--am-accent);
+  filter: brightness(1.12);
+  box-shadow: 0 0 12px var(--am-accent-glow);
 }
 
 /* ghost */
@@ -144,13 +155,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* accent outline */
 .am-btn-accent {
   background:   transparent;
-  color:        #00f5a0;
-  border-color: rgba(0,245,160,0.28);
+  color:        var(--am-accent);
+  border-color: var(--am-accent-border);
 }
 .am-btn-accent:hover:not(:disabled) {
-  background: rgba(0,245,160,0.1);
-  color:      #1fffa8;
-  border-color: rgba(0,245,160,0.45);
+  background: var(--am-accent-dim);
+  color:      var(--am-accent);
+  filter:     brightness(1.1);
+  border-color: var(--am-accent-border);
 }
 
 /* ── Settings sidebar nav items ─────────────────────────────────────────────── */
@@ -178,9 +190,9 @@ button:active:not(:disabled) { transform: scale(0.97); }
   color:      rgba(255,255,255,0.82);
 }
 .am-nav-item.active {
-  background:   rgba(0,245,160,0.1);
-  color:        #00f5a0;
-  border-color: rgba(0,245,160,0.22);
+  background:   var(--am-accent-dim);
+  color:        var(--am-accent);
+  border-color: var(--am-accent-border);
   font-weight:  600;
 }
 
@@ -198,8 +210,8 @@ button:active:not(:disabled) { transform: scale(0.97); }
   transition:   border-color 0.15s ease, box-shadow 0.15s ease;
 }
 .am-input:focus {
-  border-color: rgba(0,245,160,0.4);
-  box-shadow:   0 0 0 2px rgba(0,245,160,0.12);
+  border-color: var(--am-accent-border);
+  box-shadow:   0 0 0 2px var(--am-accent-dim);
 }
 .am-input::placeholder { color: rgba(255,255,255,0.22); }
 
@@ -233,9 +245,9 @@ select.am-input:hover {
 
 select.am-input:focus {
   background-image:
-    linear-gradient(45deg, transparent 50%, rgba(0,245,160,0.9) 50%),
-    linear-gradient(135deg, rgba(0,245,160,0.9) 50%, transparent 50%),
-    linear-gradient(to right, rgba(0,245,160,0.2), rgba(0,245,160,0.2));
+    linear-gradient(45deg, transparent 50%, var(--am-accent) 50%),
+    linear-gradient(135deg, var(--am-accent) 50%, transparent 50%),
+    linear-gradient(to right, var(--am-accent-dim), var(--am-accent-dim));
 }
 
 select.am-input option {

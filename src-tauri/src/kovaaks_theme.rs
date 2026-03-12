@@ -1,0 +1,135 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct KovaaksPalette {
+    /// The "Primary" UI accent color, e.g. "#ED6816".
+    pub primary_hex: Option<String>,
+    /// The "Secondary" surface color.
+    pub secondary_hex: Option<String>,
+    /// The "Background" color.
+    pub background_hex: Option<String>,
+    /// The "SpecialCallToAction" (green CTA) color.
+    pub special_call_to_action_hex: Option<String>,
+    /// Path that was successfully read (for diagnostics).
+    pub path_used: Option<String>,
+}
+
+pub fn default_palette_path() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+        if !local.is_empty() {
+            return format!(
+                r"{}\FPSAimTrainer\Saved\Config\WindowsNoEditor\Palette.ini",
+                local
+            );
+        }
+    }
+    String::new()
+}
+
+fn parse_component(inner: &str, key: &str) -> Option<u8> {
+    let prefix = format!("{}=", key);
+    let pos = inner.find(&prefix)?;
+    let rest = &inner[pos + prefix.len()..];
+    let end = rest
+        .find(|c: char| c == ',' || c == ')' || c.is_whitespace())
+        .unwrap_or(rest.len());
+    rest[..end].trim().parse().ok()
+}
+
+fn bgr_to_hex(r: u8, g: u8, b: u8) -> String {
+    format!("#{:02X}{:02X}{:02X}", r, g, b)
+}
+
+/// Parses a single palette entry like `Primary, (B=22,G=104,R=237,A=255)`.
+fn parse_entry(entry: &str) -> Option<(String, u8, u8, u8)> {
+    let comma = entry.find(',')?;
+    let name = entry[..comma].trim().to_string();
+    let paren = entry.find('(')?;
+    let inner = &entry[paren + 1..];
+    let r = parse_component(inner, "R")?;
+    let g = parse_component(inner, "G")?;
+    let b = parse_component(inner, "B")?;
+    Some((name, r, g, b))
+}
+
+/// Parses all `(Name, (B=xx,G=xx,R=xx,A=xx))` entries from the mPalette line.
+fn parse_mpalette_line(line: &str) -> Vec<(String, u8, u8, u8)> {
+    let mut entries = Vec::new();
+    // Find the outer double-paren start: mPalette=((…))
+    let Some(start_idx) = line.find("((") else {
+        return entries;
+    };
+    let content = &line[start_idx + 1..]; // skip one '(' so we start at '('
+    let chars: Vec<char> = content.chars().collect();
+    let mut depth = 0i32;
+    let mut entry_start = 0;
+
+    for (i, &ch) in chars.iter().enumerate() {
+        match ch {
+            '(' => {
+                if depth == 0 {
+                    entry_start = i;
+                }
+                depth += 1;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    let entry_str: String = chars[entry_start + 1..i].iter().collect();
+                    if let Some(entry) = parse_entry(&entry_str) {
+                        entries.push(entry);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    entries
+}
+
+pub fn read_palette(path: &str) -> KovaaksPalette {
+    if path.is_empty() {
+        return KovaaksPalette::default();
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) => {
+            log::debug!("kovaaks_theme: could not read palette at {path}: {e}");
+            return KovaaksPalette::default();
+        }
+    };
+
+    let mut palette = KovaaksPalette {
+        path_used: Some(path.to_string()),
+        ..Default::default()
+    };
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("mPalette=") {
+            continue;
+        }
+        for (name, r, g, b) in parse_mpalette_line(trimmed) {
+            let hex = bgr_to_hex(r, g, b);
+            match name.as_str() {
+                "Primary" => palette.primary_hex = Some(hex),
+                "Secondary" => palette.secondary_hex = Some(hex),
+                "Background" => palette.background_hex = Some(hex),
+                "SpecialCallToAction" => palette.special_call_to_action_hex = Some(hex),
+                _ => {}
+            }
+        }
+        break; // only one mPalette line
+    }
+
+    log::info!(
+        "kovaaks_theme: palette loaded primary={:?} secondary={:?} cta={:?}",
+        palette.primary_hex,
+        palette.secondary_hex,
+        palette.special_call_to_action_hex,
+    );
+    palette
+}

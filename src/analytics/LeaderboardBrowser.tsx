@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
 
@@ -425,7 +425,7 @@ function ScenarioRow({
       style={{
         padding: "9px 12px",
         cursor: "pointer",
-        background: active ? `${C.accent}14` : "transparent",
+        background: active ? accentAlpha("14") : "transparent",
         borderLeft: active ? `2px solid ${ACCENT}` : "2px solid transparent",
         transition: "background 0.12s",
       }}

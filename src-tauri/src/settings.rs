@@ -110,6 +110,15 @@ pub struct AppSettings {
     /// Replay media upload quality preset. Higher presets can later be gated by subscription tier.
     #[serde(default = "default_replay_media_upload_quality")]
     pub replay_media_upload_quality: String,
+    /// Accent color theme source: "kovaaks" reads Palette.ini, "custom" uses custom_accent_color, "default" uses built-in green.
+    #[serde(default = "default_color_mode")]
+    pub color_mode: String,
+    /// Custom accent color hex string used when color_mode is "custom", e.g. "#ED6816".
+    #[serde(default)]
+    pub custom_accent_color: String,
+    /// Optional override path for KovaaK's Palette.ini. Empty = auto-detect from %LOCALAPPDATA%.
+    #[serde(default)]
+    pub kovaaks_palette_path: String,
 }
 
 impl Default for AppSettings {
@@ -141,6 +150,9 @@ impl Default for AppSettings {
             replay_keep_count: default_replay_keep_count(),
             replay_media_upload_mode: default_replay_media_upload_mode(),
             replay_media_upload_quality: default_replay_media_upload_quality(),
+            color_mode: default_color_mode(),
+            custom_accent_color: String::new(),
+            kovaaks_palette_path: String::new(),
         }
     }
 }
@@ -252,6 +264,9 @@ fn default_replay_media_upload_mode() -> String {
 }
 fn default_replay_media_upload_quality() -> String {
     DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY.to_string()
+}
+fn default_color_mode() -> String {
+    "kovaaks".to_string()
 }
 fn default_post_session_summary_duration_secs() -> u32 {
     DEFAULT_POST_SESSION_SUMMARY_DURATION_SECS

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 
 interface Pos {
   x: number;
@@ -642,7 +642,7 @@ export function DraggableHUD({
         cursor: layoutMode ? (isDragging.current ? "grabbing" : "grab") : "default",
         userSelect: "none",
         zIndex: 50,
-        outline: layoutMode ? `2px dashed ${C.accent}99` : "none",
+        outline: layoutMode ? `2px dashed ${accentAlpha("99")}` : "none",
         outlineOffset: 6,
         borderRadius: layoutMode ? 8 : 0,
         boxShadow: layoutMode && isDragging.current ? `0 0 0 1px ${C.accentBorder}, 0 0 28px rgba(0,245,160,0.18)` : "none",
@@ -663,7 +663,7 @@ export function DraggableHUD({
             fontFamily: "'JetBrains Mono', monospace",
           }}
         >
-          <span style={{ fontSize: 9, color: `${C.accent}99`, letterSpacing: "0.06em", whiteSpace: "nowrap", fontFamily: "'JetBrains Mono', monospace" }}>
+          <span style={{ fontSize: 9, color: accentAlpha("99"), letterSpacing: "0.06em", whiteSpace: "nowrap", fontFamily: "'JetBrains Mono', monospace" }}>
             drag \u00b7 scroll to resize
           </span>
           <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
@@ -705,7 +705,7 @@ export function DraggableHUD({
               style={{
                 fontSize: 9,
                 color: C.accent,
-                background: `${C.accent}14`,
+                background: accentAlpha("14"),
                 border: `1px solid ${C.accentBorder}`,
                 borderRadius: 999,
                 padding: "3px 7px",
@@ -727,8 +727,8 @@ function ScaleBtn({ label, onClick }: { label: string; onClick: (e: React.MouseE
       onPointerDown={(e) => e.stopPropagation()}
       onClick={onClick}
       style={{
-        background: `${C.accent}14`,
-        border: `1px solid ${C.accent}40`,
+        background: accentAlpha("14"),
+        border: `1px solid ${accentAlpha("40")}`,
         borderRadius: 4,
         color: C.accent,
         cursor: "pointer",

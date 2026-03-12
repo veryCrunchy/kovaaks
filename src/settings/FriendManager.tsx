@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { C } from "../design/tokens";
+import { C, accentAlpha } from "../design/tokens";
 import type { AppSettings } from "../types/settings";
 import type { ActiveSteamUser, FriendProfile, MostPlayedEntry } from "../types/friends";
 
@@ -370,7 +370,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           className="am-btn px-4 py-2 rounded-lg text-sm font-semibold"
           style={{
             background: input.trim() ? C.accent : C.accentDim,
-            color: input.trim() ? "#000" : `${C.accent}59`,
+            color: input.trim() ? "#000" : accentAlpha("59"),
             cursor: adding || !input.trim() ? "not-allowed" : "pointer",
             border: "none",
             minWidth: 80,

@@ -40,11 +40,11 @@ export const C = {
   borderSub:    "rgba(255,255,255,0.05)",
   borderBright: "rgba(255,255,255,0.14)",
 
-  // Accent (green)
-  accent:       "#00f5a0",
-  accentDim:    "rgba(0,245,160,0.12)",
-  accentBorder: "rgba(0,245,160,0.25)",
-  accentGlow:   "rgba(0,245,160,0.3)",
+  // Accent — resolved at runtime via CSS custom property --am-accent
+  accent:       "var(--am-accent)",
+  accentDim:    "var(--am-accent-dim)",
+  accentBorder: "var(--am-accent-border)",
+  accentGlow:   "var(--am-accent-glow)",
 
   // Text hierarchy
   text:         "#ffffff",
@@ -64,6 +64,16 @@ export const C = {
 } as const;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────────
+
+/**
+ * Returns an accent color with arbitrary alpha for use in inline styles.
+ * Replaces the `${C.accent}XX` hex-alpha concatenation pattern.
+ * @param hexByte - two hex digits for the alpha channel, e.g. "22" ≈ 13% opacity.
+ */
+export function accentAlpha(hexByte: string): string {
+  const alpha = (parseInt(hexByte, 16) / 255).toFixed(3);
+  return `rgba(var(--am-accent-rgb), ${alpha})`;
+}
 
 export function scenarioColor(type: string): string {
   return SCENARIO_COLORS[type] ?? SCENARIO_COLORS.Unknown;
