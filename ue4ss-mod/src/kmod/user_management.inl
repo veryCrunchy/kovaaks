@@ -40,6 +40,73 @@
         uint64_t requested_at_ms{0};
     };
 
+    struct PersistedFriendScoresCacheEntry {
+        uint64_t leaderboard_id{0};
+        int32_t response_code{200};
+        uint64_t saved_at_ms{0};
+        std::string body_json{};
+    };
+
+    static bool bridge_linked_identity_equals(
+        const BridgeLinkedIdentity& lhs,
+        const BridgeLinkedIdentity& rhs
+    ) {
+        return lhs.provider == rhs.provider
+            && lhs.provider_account_id == rhs.provider_account_id
+            && lhs.username == rhs.username
+            && lhs.display_name == rhs.display_name
+            && lhs.avatar_url == rhs.avatar_url;
+    }
+
+    static bool bridge_current_user_profile_equals(
+        const BridgeCurrentUserProfile& lhs,
+        const BridgeCurrentUserProfile& rhs
+    ) {
+        if (lhs.kovaaks_user_id != rhs.kovaaks_user_id
+            || lhs.external_id != rhs.external_id
+            || lhs.username != rhs.username
+            || lhs.display_name != rhs.display_name
+            || lhs.avatar_url != rhs.avatar_url
+            || lhs.steam_id != rhs.steam_id
+            || lhs.steam_name != rhs.steam_name
+            || lhs.linked_accounts.size() != rhs.linked_accounts.size()) {
+            return false;
+        }
+
+        for (size_t index = 0; index < lhs.linked_accounts.size(); ++index) {
+            if (!bridge_linked_identity_equals(lhs.linked_accounts[index], rhs.linked_accounts[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    static bool bridge_friend_score_entry_equals(
+        const BridgeFriendScoreEntry& lhs,
+        const BridgeFriendScoreEntry& rhs
+    ) {
+        return lhs.steam_id == rhs.steam_id
+            && lhs.display_name == rhs.display_name
+            && lhs.score == rhs.score
+            && lhs.rank == rhs.rank
+            && lhs.kovaaks_plus_active == rhs.kovaaks_plus_active;
+    }
+
+    static bool bridge_friend_score_entries_equal(
+        const std::vector<BridgeFriendScoreEntry>& lhs,
+        const std::vector<BridgeFriendScoreEntry>& rhs
+    ) {
+        if (lhs.size() != rhs.size()) {
+            return false;
+        }
+        for (size_t index = 0; index < lhs.size(); ++index) {
+            if (!bridge_friend_score_entry_equals(lhs[index], rhs[index])) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     RC::Unreal::UClass* uworks_core_user_class_{nullptr};
     RC::Unreal::UClass* uworks_core_friends_class_{nullptr};
     RC::Unreal::UClass* leaderboards_manager_class_{nullptr};
@@ -50,6 +117,7 @@
     RC::Unreal::UObject* uworks_core_friends_{nullptr};
     RC::Unreal::UObject* leaderboards_manager_{nullptr};
     RC::Unreal::UObject* steam_network_model_{nullptr};
+    RC::Unreal::UObject* active_leaderboards_widget_{nullptr};
     RC::Unreal::UFunction* uworks_b_logged_on_fn_{nullptr};
     RC::Unreal::UFunction* uworks_get_steam_id_fn_{nullptr};
     RC::Unreal::UFunction* uworks_get_persona_name_fn_{nullptr};
@@ -64,17 +132,25 @@
     uint64_t next_user_bridge_refresh_ms_{0};
     uint64_t next_friend_scores_refresh_ms_{0};
     uint64_t next_auth_token_request_ms_{0};
+    uint64_t next_active_leaderboards_widget_resolve_ms_{0};
+    uint64_t next_pending_friend_request_prune_ms_{0};
     uint64_t next_user_management_debug_log_ms_{0};
     uint64_t last_friend_scores_response_ms_{0};
     std::string last_user_management_debug_message_{};
     std::string last_emitted_user_snapshot_{};
+    std::string last_emitted_user_source_{};
     std::string last_emitted_friends_snapshot_{};
     std::string last_sa_http_auth_token_{};
     std::string last_friend_scores_scenario_{};
+    std::string last_friend_scores_source_{};
     std::string last_emitted_friend_scores_snapshot_{};
     uint64_t last_friend_scores_leaderboard_id_{0};
+    BridgeCurrentUserProfile last_emitted_user_profile_{};
     std::vector<BridgeFriendScoreEntry> last_friend_scores_entries_{};
     std::unordered_map<RC::Unreal::UObject*, PendingFriendScoresRequest> pending_friend_scores_requests_{};
+    std::unordered_map<std::string, PersistedFriendScoresCacheEntry> persisted_friend_scores_cache_{};
+    std::unordered_map<RC::Unreal::UStruct*, std::unordered_map<std::string, RC::Unreal::FProperty*>> property_lookup_cache_{};
+    bool has_last_emitted_user_profile_{false};
 
     bool should_log_user_management(uint64_t now) {
         if (now < next_user_management_debug_log_ms_) {
@@ -100,12 +176,237 @@
         char buffer[256]{};
         std::snprintf(buffer, sizeof(buffer), "[user_mgmt] %s", message);
         runtime_log_line(buffer);
-        if (kovaaks::RustBridge::is_connected()) {
-            std::string json = "{\"ev\":\"kovaaks_user_debug\",\"message\":\"";
-            json += escape_json_ascii(message);
-            json += "\"}";
-            kovaaks::RustBridge::emit_json(json.c_str());
+    }
+
+    void prune_pending_friend_scores_requests(uint64_t now) {
+        if (now < next_pending_friend_request_prune_ms_) {
+            return;
         }
+        next_pending_friend_request_prune_ms_ = now + 30000;
+
+        constexpr uint64_t kPendingRequestTimeoutMs = 120000;
+        for (auto it = pending_friend_scores_requests_.begin(); it != pending_friend_scores_requests_.end();) {
+            const bool invalid_request_object = !it->first || !is_likely_valid_object_ptr(it->first);
+            const bool expired_request = it->second.requested_at_ms > 0
+                && now > it->second.requested_at_ms
+                && (now - it->second.requested_at_ms) >= kPendingRequestTimeoutMs;
+            if (invalid_request_object || expired_request) {
+                it = pending_friend_scores_requests_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    static uint64_t stable_string_hash64(std::string_view input) {
+        uint64_t hash = 1469598103934665603ull;
+        for (unsigned char ch : input) {
+            hash ^= static_cast<uint64_t>(ch);
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    static auto friend_scores_cache_file_path(const std::string& scenario_name) -> std::filesystem::path {
+        const uint64_t hash = stable_string_hash64(scenario_name);
+        std::array<char, 64> file_name{};
+        std::snprintf(
+            file_name.data(),
+            file_name.size(),
+            "friend_scores_%016llx.cache",
+            static_cast<unsigned long long>(hash)
+        );
+        return std::filesystem::path(game_bin_dir())
+            / L"aimmod_cache"
+            / L"friend_scores"
+            / std::filesystem::path(file_name.data());
+    }
+
+    static auto build_friend_scores_event_payload(
+        const char* source,
+        const std::string& scenario_name,
+        uint64_t leaderboard_id,
+        int32_t response_code,
+        const std::string& body_json
+    ) -> std::string {
+        if (scenario_name.empty() || body_json.empty()) {
+            return {};
+        }
+
+        std::string payload = "{\"ev\":\"kovaaks_friend_scores_snapshot\",\"source\":\"";
+        payload += escape_json_ascii(source ? source : "unknown");
+        payload += "\",\"scenario_name\":\"";
+        payload += escape_json_ascii(scenario_name);
+        payload += "\",\"leaderboard_id\":";
+        payload += std::to_string(leaderboard_id);
+        payload += ",\"response_code\":";
+        payload += std::to_string(response_code);
+        payload += ",\"body\":\"";
+        payload += escape_json_ascii(body_json);
+        payload += "\"}";
+        return payload;
+    }
+
+    static auto serialize_friend_scores_body_json(const std::vector<BridgeFriendScoreEntry>& entries) -> std::string {
+        if (entries.empty()) {
+            return {};
+        }
+
+        std::string body_json = "{\"top_scores\":[";
+        for (size_t index = 0; index < entries.size(); ++index) {
+            const auto& entry = entries[index];
+            if (index > 0) {
+                body_json += ",";
+            }
+            body_json += "{\"steam_id\":\"";
+            body_json += escape_json_ascii(entry.steam_id);
+            body_json += "\",\"steam_account_name\":\"";
+            body_json += escape_json_ascii(entry.display_name);
+            body_json += "\",\"score\":";
+            body_json += std::to_string(entry.score);
+            body_json += ",\"rank\":";
+            body_json += std::to_string(entry.rank);
+            body_json += ",\"kovaaks_plus_active\":";
+            body_json += entry.kovaaks_plus_active ? "true" : "false";
+            body_json += "}";
+        }
+        body_json += "],\"adjacent_scores\":[]}";
+        return body_json;
+    }
+
+    void persist_friend_scores_cache(
+        const std::string& scenario_name,
+        uint64_t leaderboard_id,
+        int32_t response_code,
+        const std::string& body_json,
+        uint64_t now
+    ) {
+        if (scenario_name.empty() || body_json.empty()) {
+            return;
+        }
+
+        persisted_friend_scores_cache_[scenario_name] = PersistedFriendScoresCacheEntry{
+            leaderboard_id,
+            response_code,
+            now,
+            body_json,
+        };
+
+        const auto cache_path = friend_scores_cache_file_path(scenario_name);
+        std::error_code create_error{};
+        std::filesystem::create_directories(cache_path.parent_path(), create_error);
+
+        std::ofstream out{cache_path, std::ios::binary | std::ios::trunc};
+        if (!out.is_open()) {
+            if (should_log_user_management(now)) {
+                log_user_management(now, "failed to persist friend scores cache");
+            }
+            return;
+        }
+
+        out << leaderboard_id << '\n'
+            << response_code << '\n'
+            << static_cast<unsigned long long>(now) << '\n'
+            << body_json;
+    }
+
+    bool load_persisted_friend_scores_cache(
+        const std::string& scenario_name,
+        PersistedFriendScoresCacheEntry& out_entry
+    ) {
+        out_entry = {};
+        if (scenario_name.empty()) {
+            return false;
+        }
+
+        const auto cached = persisted_friend_scores_cache_.find(scenario_name);
+        if (cached != persisted_friend_scores_cache_.end() && !cached->second.body_json.empty()) {
+            out_entry = cached->second;
+            return true;
+        }
+
+        std::ifstream in{friend_scores_cache_file_path(scenario_name), std::ios::binary};
+        if (!in.is_open()) {
+            return false;
+        }
+
+        std::string leaderboard_id_line{};
+        std::string response_code_line{};
+        std::string saved_at_line{};
+        if (!std::getline(in, leaderboard_id_line)
+            || !std::getline(in, response_code_line)
+            || !std::getline(in, saved_at_line)) {
+            return false;
+        }
+
+        PersistedFriendScoresCacheEntry loaded{};
+        loaded.leaderboard_id = static_cast<uint64_t>(std::strtoull(leaderboard_id_line.c_str(), nullptr, 10));
+        loaded.response_code = static_cast<int32_t>(std::strtol(response_code_line.c_str(), nullptr, 10));
+        loaded.saved_at_ms = static_cast<uint64_t>(std::strtoull(saved_at_line.c_str(), nullptr, 10));
+        loaded.body_json.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        if (loaded.body_json.empty()) {
+            return false;
+        }
+
+        persisted_friend_scores_cache_[scenario_name] = loaded;
+        out_entry = std::move(loaded);
+        return true;
+    }
+
+    bool maybe_emit_persisted_friend_scores_snapshot(
+        const std::string& scenario_name,
+        uint64_t requested_leaderboard_id,
+        uint64_t now
+    ) {
+        PersistedFriendScoresCacheEntry cached{};
+        if (!load_persisted_friend_scores_cache(scenario_name, cached)) {
+            return false;
+        }
+        if (cached.body_json.empty()) {
+            return false;
+        }
+        if (requested_leaderboard_id != 0
+            && cached.leaderboard_id != 0
+            && cached.leaderboard_id != requested_leaderboard_id) {
+            return false;
+        }
+
+        const uint64_t leaderboard_id = requested_leaderboard_id != 0 ? requested_leaderboard_id : cached.leaderboard_id;
+        const auto payload = build_friend_scores_event_payload(
+            "persisted_friend_scores_cache",
+            scenario_name,
+            leaderboard_id,
+            cached.response_code > 0 ? cached.response_code : 200,
+            cached.body_json
+        );
+        if (payload.empty()) {
+            return false;
+        }
+        if (payload == last_emitted_friend_scores_snapshot_) {
+            return true;
+        }
+
+        last_friend_scores_response_ms_ = now;
+        last_friend_scores_source_ = "persisted_friend_scores_cache";
+        last_friend_scores_scenario_ = scenario_name;
+        last_friend_scores_leaderboard_id_ = leaderboard_id;
+        last_friend_scores_entries_.clear();
+        last_emitted_friend_scores_snapshot_ = payload;
+        kovaaks::RustBridge::emit_json(payload.c_str());
+
+        char buffer[320]{};
+        std::snprintf(
+            buffer,
+            sizeof(buffer),
+            "emitted persisted friends leaderboard cache scenario='%s' leaderboard_id=%llu age_ms=%llu",
+            scenario_name.c_str(),
+            static_cast<unsigned long long>(leaderboard_id),
+            cached.saved_at_ms > 0 && now > cached.saved_at_ms
+                ? static_cast<unsigned long long>(now - cached.saved_at_ms)
+                : 0ull
+        );
+        log_user_management(now, buffer);
+        return true;
     }
 
     static auto canonicalize_property_name(std::string_view input) -> std::string {
@@ -117,6 +418,42 @@
             }
         }
         return out;
+    }
+
+    static bool property_name_matches_cached_key(RC::Unreal::FProperty* property, const std::string& wanted_key) {
+        return property
+            && is_likely_valid_object_ptr(property)
+            && canonicalize_property_name(normalize_ascii(property->GetName())) == wanted_key;
+    }
+
+    RC::Unreal::FProperty* find_property_in_chain_cached(
+        RC::Unreal::UStruct* owner,
+        const char* wanted_name
+    ) {
+        if (!owner || !is_likely_valid_object_ptr(owner) || !wanted_name || !*wanted_name) {
+            return nullptr;
+        }
+
+        const auto wanted_key = canonicalize_property_name(wanted_name);
+        auto& owner_cache = property_lookup_cache_[owner];
+        const auto cached = owner_cache.find(wanted_key);
+        if (cached != owner_cache.end()) {
+            auto* property = cached->second;
+            if (property_name_matches_cached_key(property, wanted_key)) {
+                return property;
+            }
+            owner_cache.erase(cached);
+        }
+
+        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
+            if (!property_name_matches_cached_key(property, wanted_key)) {
+                continue;
+            }
+            owner_cache[wanted_key] = property;
+            return property;
+        }
+
+        return nullptr;
     }
 
     static bool looks_like_decimal_id(std::string_view value) {
@@ -741,19 +1078,11 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             void* value_ptr = safe_property_value_ptr(property, container);
-            if (!value_ptr) {
-                continue;
+            if (value_ptr) {
+                return write_string_property_value(property, value_ptr, value);
             }
-            return write_string_property_value(property, value_ptr, value);
         }
         return false;
     }
@@ -768,24 +1097,16 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             auto* numeric = RC::Unreal::CastField<RC::Unreal::FNumericProperty>(property);
-            if (!numeric || !is_likely_valid_object_ptr(numeric) || !numeric->IsInteger()) {
-                continue;
+            if (numeric && is_likely_valid_object_ptr(numeric) && numeric->IsInteger()) {
+                void* value_ptr = safe_property_value_ptr(property, container);
+                if (!value_ptr) {
+                    return false;
+                }
+                out = static_cast<uint64_t>(numeric->GetUnsignedIntPropertyValue(value_ptr));
+                return true;
             }
-            void* value_ptr = safe_property_value_ptr(property, container);
-            if (!value_ptr) {
-                continue;
-            }
-            out = static_cast<uint64_t>(numeric->GetUnsignedIntPropertyValue(value_ptr));
-            return true;
         }
         return false;
     }
@@ -818,26 +1139,18 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             auto* str_property = RC::Unreal::CastField<RC::Unreal::FStrProperty>(property);
-            if (!str_property || !is_likely_valid_object_ptr(str_property)) {
-                continue;
+            if (str_property && is_likely_valid_object_ptr(str_property)) {
+                void* value_ptr = safe_property_value_ptr(property, container);
+                if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(RC::Unreal::FString))) {
+                    return false;
+                }
+                out = trim_nonempty_ascii(
+                    utf8_from_fstring(str_property->GetPropertyValue(value_ptr))
+                );
+                return !out.empty();
             }
-            void* value_ptr = safe_property_value_ptr(property, container);
-            if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(RC::Unreal::FString))) {
-                continue;
-            }
-            out = trim_nonempty_ascii(
-                utf8_from_fstring(str_property->GetPropertyValue(value_ptr))
-            );
-            return !out.empty();
         }
         return false;
     }
@@ -851,24 +1164,16 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             auto* numeric = RC::Unreal::CastField<RC::Unreal::FNumericProperty>(property);
-            if (!numeric || !is_likely_valid_object_ptr(numeric) || !numeric->IsInteger()) {
-                continue;
+            if (numeric && is_likely_valid_object_ptr(numeric) && numeric->IsInteger()) {
+                void* value_ptr = safe_property_value_ptr(property, container);
+                if (!value_ptr) {
+                    return false;
+                }
+                out = static_cast<int32_t>(numeric->GetSignedIntPropertyValue(value_ptr));
+                return true;
             }
-            void* value_ptr = safe_property_value_ptr(property, container);
-            if (!value_ptr) {
-                continue;
-            }
-            out = static_cast<int32_t>(numeric->GetSignedIntPropertyValue(value_ptr));
-            return true;
         }
         return false;
     }
@@ -883,21 +1188,14 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             auto* numeric = RC::Unreal::CastField<RC::Unreal::FNumericProperty>(property);
             if (!numeric || !is_likely_valid_object_ptr(numeric)) {
-                continue;
+                return false;
             }
             void* value_ptr = safe_property_value_ptr(property, container);
             if (!value_ptr) {
-                continue;
+                return false;
             }
             if (numeric->IsFloatingPoint()) {
                 out = numeric->GetFloatingPointPropertyValue(value_ptr);
@@ -921,21 +1219,14 @@
         if (!owner || !container || !wanted_name || !*wanted_name) {
             return false;
         }
-        const auto wanted_key = canonicalize_property_name(wanted_name);
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
-                continue;
-            }
+        if (auto* property = find_property_in_chain_cached(owner, wanted_name)) {
             auto* object_property = RC::Unreal::CastField<RC::Unreal::FObjectPropertyBase>(property);
             if (!object_property || !is_likely_valid_object_ptr(object_property)) {
-                continue;
+                return false;
             }
             void* value_ptr = safe_property_value_ptr(property, container);
             if (!value_ptr) {
-                continue;
+                return false;
             }
             out = object_property->GetObjectPropertyValue(value_ptr);
             return out && is_likely_valid_object_ptr(out);
@@ -1206,6 +1497,12 @@
     }
 
     RC::Unreal::UObject* resolve_active_leaderboards_widget(uint64_t now) {
+        if (active_leaderboards_widget_
+            && is_likely_valid_object_ptr(active_leaderboards_widget_)
+            && now < next_active_leaderboards_widget_resolve_ms_) {
+            return active_leaderboards_widget_;
+        }
+
         leaderboards_widget_class_ = resolve_class_cached(
             leaderboards_widget_class_,
             {STR("/Script/GameSkillsTrainer.LeaderboardsWidget")}
@@ -1272,11 +1569,15 @@
             }
         }
         if (!best || !is_likely_valid_object_ptr(best)) {
+            active_leaderboards_widget_ = nullptr;
+            next_active_leaderboards_widget_resolve_ms_ = now + 1000;
             if (should_log_user_management(now)) {
                 log_user_management(now, "active leaderboards widget not found");
             }
             return nullptr;
         }
+        active_leaderboards_widget_ = best;
+        next_active_leaderboards_widget_resolve_ms_ = now + 2000;
         return best;
     }
 
@@ -1291,34 +1592,33 @@
             return false;
         }
 
-        std::string payload = "{\"ev\":\"kovaaks_friend_scores_snapshot\",\"source\":\"";
-        payload += escape_json_ascii(source ? source : "unknown");
-        payload += "\",\"scenario_name\":\"";
-        payload += escape_json_ascii(scenario_name);
-        payload += "\",\"leaderboard_id\":";
-        payload += std::to_string(leaderboard_id);
-        payload += ",\"response_code\":200,\"body\":\"{\\\"top_scores\\\":[";
-        for (size_t index = 0; index < entries.size(); ++index) {
-            const auto& entry = entries[index];
-            if (index > 0) {
-                payload += ",";
-            }
-            payload += "{\\\"steam_id\\\":\\\"";
-            payload += escape_json_ascii(entry.steam_id);
-            payload += "\\\",\\\"steam_account_name\\\":\\\"";
-            payload += escape_json_ascii(entry.display_name);
-            payload += "\\\",\\\"score\\\":";
-            payload += std::to_string(entry.score);
-            payload += ",\\\"rank\\\":";
-            payload += std::to_string(entry.rank);
-            payload += ",\\\"kovaaks_plus_active\\\":";
-            payload += entry.kovaaks_plus_active ? "true" : "false";
-            payload += "}";
-        }
-        payload += "],\\\"adjacent_scores\\\":[]}\"}";
-
+        const std::string source_name = source ? source : "unknown";
         last_friend_scores_response_ms_ = now;
+        if (source_name == last_friend_scores_source_
+            && scenario_name == last_friend_scores_scenario_
+            && leaderboard_id == last_friend_scores_leaderboard_id_
+            && bridge_friend_score_entries_equal(entries, last_friend_scores_entries_)) {
+            return true;
+        }
+
+        const auto body_json = serialize_friend_scores_body_json(entries);
+        const auto payload = build_friend_scores_event_payload(
+            source_name.c_str(),
+            scenario_name,
+            leaderboard_id,
+            200,
+            body_json
+        );
+        if (payload.empty()) {
+            return false;
+        }
+
+        last_friend_scores_source_ = source_name;
+        last_friend_scores_scenario_ = scenario_name;
+        last_friend_scores_leaderboard_id_ = leaderboard_id;
+        last_friend_scores_entries_ = entries;
         last_emitted_friend_scores_snapshot_ = payload;
+        persist_friend_scores_cache(scenario_name, leaderboard_id, 200, body_json, now);
         kovaaks::RustBridge::emit_json(payload.c_str());
         return true;
     }
@@ -1331,6 +1631,14 @@
             return s_last_run_scenario_name;
         }
         return {};
+    }
+
+    bool is_user_management_live_gameplay_active() const {
+        const bool active_scenario = s_last_pull_is_in_scenario == 1
+            && s_last_pull_scenario_is_paused != 1
+            && (!std::isfinite(s_last_pull_queue_time_remaining)
+                || s_last_pull_queue_time_remaining <= 0.0001f);
+        return s_last_pull_is_in_challenge == 1 || active_scenario;
     }
 
     bool read_leaderboard_id_for_scenario(
@@ -1690,6 +1998,9 @@
         }
 
         std::vector<BridgeFriendScoreEntry> entries{};
+        entries.reserve(static_cast<size_t>(pair_count));
+        std::unordered_map<std::string, uint8_t> seen_steam_ids{};
+        seen_steam_ids.reserve(static_cast<size_t>(pair_count) * 2);
         for (int32_t pair_index = 0; pair_index < pair_count; ++pair_index) {
             void* pair_ptr = pair_data + (static_cast<size_t>(pair_index) * pair_element_size);
             RC::Unreal::FProperty* entries_property = nullptr;
@@ -1749,6 +2060,9 @@
                 if (entry.steam_id.empty()) {
                     continue;
                 }
+                if (!seen_steam_ids.emplace(entry.steam_id, 0).second) {
+                    continue;
+                }
                 (void)read_string_property_named(entry_owner, entry_ptr, "playersteamname", entry.display_name);
                 (void)read_i32_property_named(entry_owner, entry_ptr, "score", entry.score);
                 (void)read_i32_property_named(entry_owner, entry_ptr, "globalrank", entry.rank);
@@ -1766,14 +2080,7 @@
                     }
                     break;
                 }
-                const bool duplicate = std::any_of(
-                    entries.begin(),
-                    entries.end(),
-                    [&](const BridgeFriendScoreEntry& existing) { return existing.steam_id == entry.steam_id; }
-                );
-                if (!duplicate) {
-                    entries.emplace_back(std::move(entry));
-                }
+                entries.emplace_back(std::move(entry));
             }
         }
 
@@ -1890,6 +2197,9 @@
         }
 
         std::vector<BridgeFriendScoreEntry> entries{};
+        entries.reserve(static_cast<size_t>(player_count));
+        std::unordered_map<std::string, uint8_t> seen_steam_ids{};
+        seen_steam_ids.reserve(static_cast<size_t>(player_count) * 2);
         for (int32_t index = 0; index < player_count; ++index) {
             void* player_ptr = player_data + (static_cast<size_t>(index) * player_element_size);
             BridgeFriendScoreEntry entry{};
@@ -1902,6 +2212,9 @@
                 entry.steam_id = opaque_steam_id_to_string(steam_id_value);
             }
             if (entry.steam_id.empty()) {
+                continue;
+            }
+            if (!seen_steam_ids.emplace(entry.steam_id, 0).second) {
                 continue;
             }
 
@@ -1925,14 +2238,7 @@
                 }
                 break;
             }
-            const bool duplicate = std::any_of(
-                entries.begin(),
-                entries.end(),
-                [&](const BridgeFriendScoreEntry& existing) { return existing.steam_id == entry.steam_id; }
-            );
-            if (!duplicate) {
-                entries.emplace_back(std::move(entry));
-            }
+            entries.emplace_back(std::move(entry));
         }
 
         if (entries.empty()) {
@@ -2091,44 +2397,28 @@
     }
 
     void maybe_request_active_friend_scores(uint64_t now, bool force) {
+        prune_pending_friend_scores_requests(now);
+
         const auto scenario_name = current_user_management_scenario_name();
         if (scenario_name.empty()) {
             log_user_management(now, "friends leaderboard skipped without active scenario");
             return;
         }
-        {
-            char buffer[256]{};
-            std::snprintf(
-                buffer,
-                sizeof(buffer),
-                "friends leaderboard begin scenario='%s' force=%d",
-                scenario_name.c_str(),
-                force ? 1 : 0
-            );
-            log_user_management(now, buffer);
-        }
         if (now < next_friend_scores_refresh_ms_ && scenario_name == last_friend_scores_scenario_) {
             return;
         }
-        if (!maybe_refresh_sa_http_auth_token(now)) {
-            log_user_management(now, "friends leaderboard request waiting for SA auth token");
+        if (!force && is_user_management_live_gameplay_active()) {
+            (void)maybe_emit_persisted_friend_scores_snapshot(scenario_name, 0, now);
+            next_friend_scores_refresh_ms_ = now + 15000;
             return;
         }
 
         uint64_t leaderboard_id = 0;
         if (!read_leaderboard_id_for_scenario(scenario_name, leaderboard_id, now)) {
+            if (maybe_emit_persisted_friend_scores_snapshot(scenario_name, 0, now)) {
+                next_friend_scores_refresh_ms_ = now + 10000;
+            }
             return;
-        }
-        {
-            char buffer[256]{};
-        std::snprintf(
-            buffer,
-            sizeof(buffer),
-            "resolved friends leaderboard id scenario='%s' leaderboard_id=%llu",
-            scenario_name.c_str(),
-            static_cast<unsigned long long>(leaderboard_id)
-        );
-        log_user_management(now, buffer);
         }
         if (maybe_emit_friend_scores_from_widget(scenario_name, leaderboard_id, now)) {
             last_friend_scores_scenario_ = scenario_name;
@@ -2137,23 +2427,26 @@
             return;
         }
 
+        const bool emitted_persisted_cache = maybe_emit_persisted_friend_scores_snapshot(scenario_name, leaderboard_id, now);
+
+        if (!maybe_refresh_sa_http_auth_token(now)) {
+            if (!emitted_persisted_cache) {
+                log_user_management(now, "friends leaderboard request waiting for SA auth token");
+            }
+            if (emitted_persisted_cache) {
+                next_friend_scores_refresh_ms_ = now + 10000;
+            }
+            return;
+        }
+
         std::string url_path{};
         std::string request_body{};
         std::string verb{};
         if (!build_friend_scores_network_request(leaderboard_id, url_path, request_body, verb, now)) {
+            if (emitted_persisted_cache) {
+                next_friend_scores_refresh_ms_ = now + 10000;
+            }
             return;
-        }
-        {
-            char buffer[320]{};
-            std::snprintf(
-                buffer,
-                sizeof(buffer),
-                "built friends leaderboard request scenario='%s' verb='%s' body_bytes=%zu",
-                scenario_name.c_str(),
-                verb.c_str(),
-                request_body.size()
-            );
-            log_user_management(now, buffer);
         }
 
         if (!send_friend_scores_request(
@@ -2165,6 +2458,9 @@
                 verb,
                 now
             )) {
+            if (emitted_persisted_cache) {
+                next_friend_scores_refresh_ms_ = now + 10000;
+            }
             return;
         }
 
@@ -2204,16 +2500,25 @@
         }
 
         std::string payload = "{\"ev\":\"kovaaks_friend_scores_snapshot\",\"source\":\"steam_sa_friends_leaderboard\",\"scenario_name\":\"";
-        payload += escape_json_ascii(request.scenario_name);
-        payload += "\",\"leaderboard_id\":";
-        payload += std::to_string(request.leaderboard_id);
-        payload += ",\"response_code\":";
-        payload += std::to_string(response_code);
-        payload += ",\"body\":\"";
-        payload += escape_json_ascii(response_contents);
-        payload += "\"}";
+        payload = build_friend_scores_event_payload(
+            "steam_sa_friends_leaderboard",
+            request.scenario_name,
+            request.leaderboard_id,
+            response_code,
+            response_contents
+        );
+        if (payload.empty()) {
+            return;
+        }
 
         last_friend_scores_response_ms_ = now;
+        persist_friend_scores_cache(
+            request.scenario_name,
+            request.leaderboard_id,
+            response_code,
+            response_contents,
+            now
+        );
         if (payload != last_emitted_friend_scores_snapshot_) {
             last_emitted_friend_scores_snapshot_ = payload;
             kovaaks::RustBridge::emit_json(payload.c_str());
@@ -2314,16 +2619,6 @@
         steam_account.display_name = out_user.display_name;
         out_user.linked_accounts.emplace_back(std::move(steam_account));
         (void)enrich_user_from_auth_token_claims(out_user, now);
-
-        char buffer[256]{};
-        std::snprintf(
-            buffer,
-            sizeof(buffer),
-            "resolved current user via UWorks steam_id='%s' steam_name='%s'",
-            out_user.steam_id.c_str(),
-            out_user.steam_name.c_str()
-        );
-        log_user_management(now, buffer);
         return true;
     }
 
@@ -2392,6 +2687,8 @@
         }
 
         out_friends.reserve(static_cast<size_t>(friend_count));
+        std::unordered_map<std::string, uint8_t> seen_steam_ids{};
+        seen_steam_ids.reserve(static_cast<size_t>(friend_count) * 2);
         for (int32_t index = 0; index < friend_count; ++index) {
             uint8_t flag_storage[1]{active_friend_flag};
             OpaqueSteamId friend_id_value{};
@@ -2420,13 +2717,7 @@
             if (friend_profile.steam_id.empty()) {
                 continue;
             }
-            if (std::any_of(
-                    out_friends.begin(),
-                    out_friends.end(),
-                    [&](const BridgeSocialFriendProfile& existing) {
-                        return existing.steam_id == friend_profile.steam_id;
-                    }
-                )) {
+            if (!seen_steam_ids.emplace(friend_profile.steam_id, 0).second) {
                 continue;
             }
 
@@ -2453,15 +2744,6 @@
             log_user_management(now, "UWorks returned no readable Steam friends");
             return false;
         }
-
-        char buffer[256]{};
-        std::snprintf(
-            buffer,
-            sizeof(buffer),
-            "resolved %zu Steam friends via UWorks",
-            out_friends.size()
-        );
-        log_user_management(now, buffer);
         return true;
     }
 
@@ -2550,8 +2832,13 @@
         if (!force && now < next_user_bridge_refresh_ms_) {
             return;
         }
-        next_user_bridge_refresh_ms_ = now + (force ? 1000 : 5000);
-        log_user_management(now, force ? "tick force=1" : "tick force=0");
+        const bool live_gameplay_active = !force && is_user_management_live_gameplay_active();
+        next_user_bridge_refresh_ms_ = now + (force ? 1000 : (live_gameplay_active ? 15000 : 5000));
+
+        if (live_gameplay_active) {
+            maybe_request_active_friend_scores(now, false);
+            return;
+        }
 
         BridgeCurrentUserProfile user{};
         const char* user_source = "";
@@ -2560,37 +2847,16 @@
             have_user = true;
             user_source = "steam_uworks";
         }
-        {
-            char summary[384]{};
-            std::snprintf(
-                summary,
-                sizeof(summary),
-                "state user=%d user_source='%s' friends_pending=? username='%s' steam_id='%s' kovaaks_user_id='%s' linked=%zu",
-                have_user ? 1 : 0,
-                user_source,
-                user.username.c_str(),
-                user.steam_id.c_str(),
-                user.kovaaks_user_id.c_str(),
-                user.linked_accounts.size()
-            );
-            log_user_management(now, summary);
-        }
         if (have_user) {
-            const auto payload = serialize_bridge_user_snapshot(user, user_source);
-            char emit_user_summary[320]{};
-            std::snprintf(
-                emit_user_summary,
-                sizeof(emit_user_summary),
-                "emit user snapshot source='%s' bytes=%zu username='%s' steam_id='%s' kovaaks_user_id='%s'",
-                user_source,
-                payload.size(),
-                user.username.c_str(),
-                user.steam_id.c_str(),
-                user.kovaaks_user_id.c_str()
-            );
-            log_user_management(now, emit_user_summary);
-            if (force || payload != last_emitted_user_snapshot_) {
+            if (force
+                || !has_last_emitted_user_profile_
+                || last_emitted_user_source_ != user_source
+                || !bridge_current_user_profile_equals(user, last_emitted_user_profile_)) {
+                const auto payload = serialize_bridge_user_snapshot(user, user_source);
                 last_emitted_user_snapshot_ = payload;
+                last_emitted_user_source_ = user_source;
+                last_emitted_user_profile_ = user;
+                has_last_emitted_user_profile_ = true;
                 kovaaks::RustBridge::emit_json(payload.c_str());
             }
         }

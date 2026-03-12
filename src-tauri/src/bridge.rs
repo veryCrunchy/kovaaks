@@ -1005,7 +1005,7 @@ mod imp {
         now.checked_sub(created_at)
     }
 
-    fn ensure_game_ready_for_injection(pid: u32) -> Result<(), String> {
+    pub(super) fn ensure_game_ready_for_injection(pid: u32) -> Result<(), String> {
         let Some(main_hwnd) = find_main_window_for_pid(pid) else {
             return Err(format!(
                 "{}: waiting for KovaaK's main window",
@@ -6584,6 +6584,18 @@ pub fn is_ue4ss_loaded_for_pid(pid: u32) -> bool {
 
 #[cfg(not(target_os = "windows"))]
 pub fn is_ue4ss_loaded_for_pid(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+pub fn is_current_game_ready_for_injection() -> bool {
+    current_game_pid()
+        .map(|pid| imp::ensure_game_ready_for_injection(pid).is_ok())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_current_game_ready_for_injection() -> bool {
     false
 }
 

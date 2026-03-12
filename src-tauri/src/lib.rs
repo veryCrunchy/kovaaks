@@ -160,10 +160,11 @@ fn current_overlay_runtime_notice() -> OverlayRuntimeNotice {
 
     let pid_age = overlay_notice_game_pid_age(pid);
     let startup_grace = Duration::from_secs(6);
+    let runtime_load_grace = Duration::from_secs(12);
 
     let runtime_loaded = bridge::is_ue4ss_loaded_for_pid(pid);
     if !runtime_loaded {
-        if pid_age < startup_grace {
+        if pid_age < runtime_load_grace || !bridge::is_current_game_ready_for_injection() {
             return hidden_overlay_runtime_notice();
         }
         return OverlayRuntimeNotice {
