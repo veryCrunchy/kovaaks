@@ -50,8 +50,25 @@ where
     Ok(de_u64ish(deserializer).unwrap_or(0))
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+fn strip_null_fields(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for entry in map.values_mut() {
+                strip_null_fields(entry);
+            }
+            map.retain(|_, entry| !entry.is_null());
+        }
+        serde_json::Value::Array(items) => {
+            for entry in items {
+                strip_null_fields(entry);
+            }
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubRunPreview {
     #[serde(default)]
     pub session_id: String,
@@ -73,8 +90,8 @@ pub struct HubRunPreview {
     pub run_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubTopScenario {
     #[serde(default)]
     pub scenario_name: String,
@@ -85,8 +102,8 @@ pub struct HubTopScenario {
     pub run_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkRankVisual {
     #[serde(default)]
     pub rank_index: u32,
@@ -100,8 +117,8 @@ pub struct HubBenchmarkRankVisual {
     pub frame_url: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkSummary {
     #[serde(default)]
     pub benchmark_id: u32,
@@ -116,8 +133,8 @@ pub struct HubBenchmarkSummary {
     pub overall_rank: Option<HubBenchmarkRankVisual>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubScenarioBenchmarkRank {
     #[serde(default)]
     pub benchmark_id: u32,
@@ -135,8 +152,8 @@ pub struct HubScenarioBenchmarkRank {
     pub scenario_rank: Option<HubBenchmarkRankVisual>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkThreshold {
     #[serde(default)]
     pub rank_index: u32,
@@ -149,8 +166,8 @@ pub struct HubBenchmarkThreshold {
     pub color: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkScenarioEntry {
     #[serde(default)]
     pub scenario_name: String,
@@ -164,8 +181,8 @@ pub struct HubBenchmarkScenarioEntry {
     pub thresholds: Vec<HubBenchmarkThreshold>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkCategoryPage {
     #[serde(default)]
     pub category_name: String,
@@ -173,8 +190,8 @@ pub struct HubBenchmarkCategoryPage {
     pub scenarios: Vec<HubBenchmarkScenarioEntry>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubBenchmarkPageResponse {
     #[serde(default)]
     pub user_handle: String,
@@ -195,8 +212,8 @@ pub struct HubBenchmarkPageResponse {
     pub categories: Vec<HubBenchmarkCategoryPage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubCommunityProfilePreview {
     #[serde(default)]
     pub user_handle: String,
@@ -210,8 +227,8 @@ pub struct HubCommunityProfilePreview {
     pub primary_scenario_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubOverviewResponse {
     pub total_runs: u32,
     pub total_scenarios: u32,
@@ -221,8 +238,8 @@ pub struct HubOverviewResponse {
     pub active_profiles: Vec<HubCommunityProfilePreview>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubSearchScenarioResult {
     #[serde(default)]
     pub scenario_name: String,
@@ -233,8 +250,8 @@ pub struct HubSearchScenarioResult {
     pub run_count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubSearchProfileResult {
     #[serde(default)]
     pub user_handle: String,
@@ -248,8 +265,8 @@ pub struct HubSearchProfileResult {
     pub primary_scenario_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubReplayPreview {
     #[serde(default)]
     pub public_run_id: String,
@@ -277,8 +294,8 @@ pub struct HubReplayPreview {
     pub replay_quality: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubSearchResponse {
     #[serde(default)]
     pub query: String,
@@ -292,8 +309,8 @@ pub struct HubSearchResponse {
     pub replays: Vec<HubReplayPreview>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubReplayListResponse {
     #[serde(default)]
     pub query: String,
@@ -305,16 +322,16 @@ pub struct HubReplayListResponse {
     pub items: Vec<HubReplayPreview>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubScoreBin {
     pub lo: f64,
     pub hi: f64,
     pub count: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubScenarioPageResponse {
     #[serde(default)]
     pub scenario_name: String,
@@ -336,8 +353,8 @@ pub struct HubScenarioPageResponse {
     pub score_distribution: Vec<HubScoreBin>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubProfileResponse {
     #[serde(default)]
     pub user_external_id: String,
@@ -363,8 +380,8 @@ pub struct HubProfileResponse {
     pub benchmarks: Vec<HubBenchmarkSummary>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubSummaryValueKind {
     #[serde(default)]
     pub string_value: Option<String>,
@@ -374,15 +391,15 @@ pub struct HubSummaryValueKind {
     pub bool_value: Option<bool>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubSummaryValue {
     #[serde(flatten)]
     pub kind: HashMap<String, serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubTimelineSecond {
     pub t_sec: u32,
     pub score: f64,
@@ -395,8 +412,8 @@ pub struct HubTimelineSecond {
     pub paused: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubContextWindow {
     #[serde(default, deserialize_with = "de_u64ish_default")]
     pub start_ms: u64,
@@ -412,8 +429,8 @@ pub struct HubContextWindow {
     pub coaching_tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubRunResponse {
     pub session_id: String,
     pub scenario_name: String,
@@ -440,8 +457,8 @@ pub struct HubRunResponse {
     pub benchmark_ranks: Vec<HubScenarioBenchmarkRank>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubPlayerScenarioHistoryResponse {
     #[serde(default)]
     pub scenario_name: String,
@@ -460,8 +477,8 @@ pub struct HubPlayerScenarioHistoryResponse {
     pub benchmark_ranks: Vec<HubScenarioBenchmarkRank>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubTypeProfileBand {
     pub scenario_type: String,
     pub run_count: i32,
@@ -474,8 +491,8 @@ pub struct HubTypeProfileBand {
     pub avg_smoothness: f64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubAimProfileResponse {
     pub user_handle: String,
     pub user_display_name: String,
@@ -487,8 +504,8 @@ pub struct HubAimProfileResponse {
     pub most_practiced_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubAimFingerprintAxis {
     pub key: String,
     pub label: String,
@@ -496,8 +513,8 @@ pub struct HubAimFingerprintAxis {
     pub volatility: i32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubAimFingerprint {
     pub precision: i32,
     pub speed: i32,
@@ -516,8 +533,8 @@ pub struct HubAimFingerprint {
     pub dominant_scenario_type: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct HubAimFingerprintResponse {
     pub overall: Option<HubAimFingerprint>,
 }
@@ -599,10 +616,14 @@ async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
         anyhow::bail!("hub request returned {status}: {body}");
     }
 
-    response
-        .json::<TResp>()
+    let body = response
+        .text()
         .await
-        .context("error decoding response body")
+        .context("error reading response body")?;
+    let mut value: serde_json::Value = serde_json::from_str(&body)
+        .with_context(|| format!("error decoding response body: {body}"))?;
+    strip_null_fields(&mut value);
+    serde_json::from_value::<TResp>(value).context("error decoding response body")
 }
 
 pub async fn get_overview(app: &AppHandle) -> anyhow::Result<HubOverviewResponse> {
