@@ -558,8 +558,7 @@
 
         RC::Unreal::UClass* player_ui_class = nullptr;
         RC::StringType player_ui_class_path{};
-        const std::array<const wchar_t*, 8> spawn_class_paths{
-            STR("/Xsolla/Common/Components/Primitives/W_Text.W_Text_C"),
+        const std::array<const wchar_t*, 7> spawn_class_paths{
             STR("/Game/FirstPersonBP/Blueprints/UI/WBP_HUD.WBP_HUD_C"),
             STR("/Game/FirstPersonBP/Blueprints/UI/GameUI/PlayerUI.PlayerUI_C"),
             STR("/Script/GameSkillsTrainer.PlayerUiWidget"),
@@ -605,12 +604,6 @@
             nullptr,
             STR("/Script/Engine.PlayerController:GetViewportSize")
         );
-        auto* w_text_set_text_fn = RC::Unreal::UObjectGlobals::StaticFindObject<RC::Unreal::UFunction*>(
-            nullptr,
-            nullptr,
-            STR("/Xsolla/Common/Components/Primitives/W_Text.W_Text_C:SetText")
-        );
-
         const bool spawn_ready = is_runtime_object_usable(controller)
             && player_ui_class
             && is_likely_valid_object_ptr(player_ui_class)
@@ -769,16 +762,6 @@
             }
             s_spawn_success = is_runtime_object_usable(s_spawned_widget);
             if (s_spawn_success) {
-                if (s_last_spawn_class.find(STR("/Xsolla/Common/Components/Primitives/W_Text.W_Text_C")) != RC::StringType::npos
-                    && is_runtime_function_usable(w_text_set_text_fn)) {
-                    s_text_set_attempted = true;
-                    s_text_set_success = ui_widget_probe_set_w_text(
-                        s_spawned_widget,
-                        w_text_set_text_fn,
-                        STR("KOVAAKS UI PROBE")
-                    );
-                }
-
                 const bool is_script_class = s_last_spawn_class_source == STR("script");
                 const bool allow_add_for_class = !is_script_class;
                 if (allow_add_for_class && is_runtime_function_usable(add_to_viewport_fn)) {

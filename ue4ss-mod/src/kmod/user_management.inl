@@ -273,7 +273,7 @@
         }
 
         std::string user_id{};
-        for (const auto* key : {"xl_uid", "xluid", "user_id", "userid", "uid", "sub"}) {
+        for (const auto* key : {"user_id", "userid", "uid", "sub"}) {
             if (extract_json_string_field(payload_json, key, user_id) && !looks_like_decimal_id(user_id)) {
                 break;
             }
@@ -1031,146 +1031,6 @@
         return subsystem;
     }
 
-    bool read_string_array_struct_field(
-        RC::Unreal::FProperty* property,
-        void* value_ptr,
-        const char* field_name,
-        std::vector<BridgeLinkedIdentity>& out_accounts
-    ) {
-        auto* array_property = RC::Unreal::CastField<RC::Unreal::FArrayProperty>(property);
-        if (!array_property || !is_likely_valid_object_ptr(array_property)) {
-            return false;
-        }
-        auto* inner_struct = RC::Unreal::CastField<RC::Unreal::FStructProperty>(array_property->GetInner());
-        if (!inner_struct || !is_likely_valid_object_ptr(inner_struct)) {
-            return false;
-        }
-        auto* script_struct = RC::Unreal::ToRawPtr(inner_struct->GetStruct());
-        if (!script_struct || !is_likely_valid_object_ptr(script_struct)) {
-            return false;
-        }
-        auto* struct_owner = reinterpret_cast<RC::Unreal::UStruct*>(script_struct);
-
-        auto* inner_property = array_property->GetInner();
-        if (!inner_property || !is_likely_valid_object_ptr(inner_property)) {
-            return false;
-        }
-        const auto element_size = static_cast<size_t>(inner_property->GetElementSize());
-        if (element_size == 0) {
-            return false;
-        }
-
-        auto* script_array = reinterpret_cast<RC::Unreal::FScriptArray*>(value_ptr);
-        if (!script_array || !is_likely_readable_region(script_array, sizeof(RC::Unreal::FScriptArray))) {
-            return false;
-        }
-        auto* data_ptr = static_cast<uint8_t*>(script_array->GetData());
-        const int32_t item_count = script_array->Num();
-        if (item_count > 0 && !data_ptr) {
-            return false;
-        }
-        for (int32_t index = 0; index < item_count; ++index) {
-            auto* item_ptr = data_ptr + (static_cast<size_t>(index) * element_size);
-            if (!item_ptr) {
-                continue;
-            }
-            BridgeLinkedIdentity account{};
-            read_string_property_named(struct_owner, item_ptr, "provider", account.provider);
-            read_string_property_named(struct_owner, item_ptr, "socialid", account.provider_account_id);
-            read_string_property_named(struct_owner, item_ptr, "nickname", account.username);
-            read_string_property_named(struct_owner, item_ptr, "fullname", account.display_name);
-            read_string_property_named(struct_owner, item_ptr, "picture", account.avatar_url);
-            if (account.provider.empty() || account.provider_account_id.empty()) {
-                continue;
-            }
-            if (account.display_name.empty()) {
-                account.display_name = account.username;
-            }
-            out_accounts.emplace_back(std::move(account));
-        }
-        return !out_accounts.empty();
-    }
-
-    bool read_social_friends_from_struct(
-        RC::Unreal::UStruct* owner,
-        void* container,
-        std::vector<BridgeSocialFriendProfile>& out_friends
-    ) {
-        if (!owner || !container) {
-            return false;
-        }
-        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
-            if (!property || !is_likely_valid_object_ptr(property)) {
-                continue;
-            }
-            if (normalize_ascii(property->GetName()) != "data") {
-                continue;
-            }
-            auto* array_property = RC::Unreal::CastField<RC::Unreal::FArrayProperty>(property);
-            if (!array_property || !is_likely_valid_object_ptr(array_property)) {
-                continue;
-            }
-            void* value_ptr = safe_property_value_ptr(property, container);
-            if (!value_ptr) {
-                continue;
-            }
-            auto* inner_struct = RC::Unreal::CastField<RC::Unreal::FStructProperty>(array_property->GetInner());
-            if (!inner_struct || !is_likely_valid_object_ptr(inner_struct)) {
-                continue;
-            }
-            auto* script_struct = RC::Unreal::ToRawPtr(inner_struct->GetStruct());
-            if (!script_struct || !is_likely_valid_object_ptr(script_struct)) {
-                continue;
-            }
-            auto* struct_owner = reinterpret_cast<RC::Unreal::UStruct*>(script_struct);
-            auto* inner_property = array_property->GetInner();
-            if (!inner_property || !is_likely_valid_object_ptr(inner_property)) {
-                continue;
-            }
-            const auto element_size = static_cast<size_t>(inner_property->GetElementSize());
-            if (element_size == 0) {
-                continue;
-            }
-            auto* script_array = reinterpret_cast<RC::Unreal::FScriptArray*>(value_ptr);
-            if (!script_array || !is_likely_readable_region(script_array, sizeof(RC::Unreal::FScriptArray))) {
-                continue;
-            }
-            auto* data_ptr = static_cast<uint8_t*>(script_array->GetData());
-            const int32_t item_count = script_array->Num();
-            if (item_count > 0 && !data_ptr) {
-                continue;
-            }
-            for (int32_t index = 0; index < item_count; ++index) {
-                auto* item_ptr = data_ptr + (static_cast<size_t>(index) * element_size);
-                if (!item_ptr) {
-                    continue;
-                }
-                BridgeSocialFriendProfile friend_profile{};
-                read_string_property_named(struct_owner, item_ptr, "platform", friend_profile.platform);
-                read_string_property_named(struct_owner, item_ptr, "name", friend_profile.display_name);
-                read_string_property_named(struct_owner, item_ptr, "avatar", friend_profile.avatar_url);
-                read_string_property_named(struct_owner, item_ptr, "userid", friend_profile.steam_id);
-                read_string_property_named(struct_owner, item_ptr, "xluid", friend_profile.kovaaks_user_id);
-                read_string_property_named(struct_owner, item_ptr, "tag", friend_profile.username);
-                if (friend_profile.username.empty()) {
-                    friend_profile.username = friend_profile.steam_id;
-                }
-                if (friend_profile.display_name.empty()) {
-                    friend_profile.display_name = friend_profile.username;
-                }
-                if (friend_profile.platform.empty() || friend_profile.display_name.empty()) {
-                    continue;
-                }
-                if (normalize_ascii(string_type_from_utf8(friend_profile.platform.c_str())) != "steam") {
-                    continue;
-                }
-                out_friends.emplace_back(std::move(friend_profile));
-            }
-            break;
-        }
-        return !out_friends.empty();
-    }
-
     RC::Unreal::UObject* resolve_uworks_core_user(uint64_t now) {
         if (uworks_core_user_ && is_likely_valid_object_ptr(uworks_core_user_)) {
             return uworks_core_user_;
@@ -1377,7 +1237,7 @@
                 if (is_rejected_runtime_object_name(full_name)) {
                     continue;
                 }
-                auto* pause_owner = reinterpret_cast<RC::Unreal::UStruct*>(pause_widget->GetClassPrivate());
+                auto* pause_owner = static_cast<RC::Unreal::UStruct*>(pause_widget->GetClassPrivate());
                 if (!pause_owner || !is_likely_valid_object_ptr(pause_owner)) {
                     continue;
                 }
@@ -1768,7 +1628,7 @@
             return false;
         }
 
-        auto* manager_owner = reinterpret_cast<RC::Unreal::UStruct*>(manager->GetClassPrivate());
+        auto* manager_owner = static_cast<RC::Unreal::UStruct*>(manager->GetClassPrivate());
         if (!manager_owner || !is_likely_valid_object_ptr(manager_owner)) {
             return false;
         }
@@ -1782,7 +1642,7 @@
             log_user_management(now, "friends leaderboard cache pointer invalid");
             return false;
         }
-        auto* cache_owner = reinterpret_cast<RC::Unreal::UStruct*>(entries_cache->GetClassPrivate());
+        auto* cache_owner = static_cast<RC::Unreal::UStruct*>(entries_cache->GetClassPrivate());
         if (!cache_owner || !is_likely_valid_object_ptr(cache_owner)) {
             return false;
         }
@@ -1959,7 +1819,7 @@
         if (!widget || !is_likely_valid_object_ptr(widget)) {
             return false;
         }
-        auto* widget_owner = reinterpret_cast<RC::Unreal::UStruct*>(widget->GetClassPrivate());
+        auto* widget_owner = static_cast<RC::Unreal::UStruct*>(widget->GetClassPrivate());
         if (!widget_owner || !is_likely_valid_object_ptr(widget_owner)) {
             return false;
         }
