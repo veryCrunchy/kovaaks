@@ -1746,25 +1746,21 @@ function AppearanceSection({
     update("palette_color_overrides", {});
   }
 
+  const hasAnyOverride = Object.keys(overrides).length > 0;
+
   async function syncToKovaaks() {
-    // Merge palette + overrides → write everything to Palette.ini
-    const toWrite: Record<string, string> = {};
-    for (const entry of PALETTE_ENTRIES) {
-      const hex = effectiveHex(entry);
-      if (hex) toWrite[entry.key] = hex;
-    }
+    // Only write colors the user explicitly overrode — leave untouched entries alone
+    if (!hasAnyOverride) return;
     setWritingBack(true);
     setWriteError(null);
     try {
-      await invoke("write_kovaaks_palette_colors", { colors: toWrite });
+      await invoke("write_kovaaks_palette_colors", { colors: overrides });
     } catch (e) {
       setWriteError(String(e));
     } finally {
       setWritingBack(false);
     }
   }
-
-  const hasAnyOverride = Object.keys(overrides).length > 0;
 
   return (
     <>
@@ -1959,7 +1955,7 @@ function AppearanceSection({
           <button
             type="button"
             onClick={syncToKovaaks}
-            disabled={writingBack}
+            disabled={writingBack || !hasAnyOverride}
             style={{
               padding: "5px 14px",
               borderRadius: 7,
@@ -1969,8 +1965,8 @@ function AppearanceSection({
               fontSize: 12,
               fontFamily: "inherit",
               fontWeight: 600,
-              cursor: writingBack ? "default" : "pointer",
-              opacity: writingBack ? 0.6 : 1,
+              cursor: writingBack || !hasAnyOverride ? "default" : "pointer",
+              opacity: writingBack || !hasAnyOverride ? 0.4 : 1,
             }}
           >
             {writingBack ? "Writing…" : "Sync to KovaaK's"}
@@ -1997,7 +1993,7 @@ function AppearanceSection({
             <span style={{ fontSize: 11, color: C.warn }}>{writeError}</span>
           )}
           <span style={{ fontSize: 10, color: C.textFaint }}>
-            Changes apply instantly in AimMod. "Sync to KovaaK's" also writes them to Palette.ini.
+            Color changes apply instantly in AimMod.{hasAnyOverride ? " Sync writes your overrides to Palette.ini — restart KovaaK's for the game to pick them up." : " Override a color above to enable sync."}
           </span>
         </div>
       </FieldGroup>

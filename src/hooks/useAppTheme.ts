@@ -41,17 +41,15 @@ function hexToRgba(hex: string): { r: number; g: number; b: number; a: number } 
 
 /**
  * Sets a CSS color var plus its companion -rgb var.
- * Uses rgba() when alpha < 1 so semi-transparent palette entries stay soft.
+ * Always uses the solid RGB — KovaaK's alpha is for the game renderer only
+ * and would make our UI look washed out if applied to backgrounds.
  */
 function setVar(root: HTMLElement, name: string, hex: string) {
   const rgba = hexToRgba(hex);
   if (!rgba) return;
-  const { r, g, b, a } = rgba;
-  const colorVal =
-    a < 0.999
-      ? `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`
-      : `#${hex.replace("#", "").slice(0, 6)}`;
-  root.style.setProperty(name, colorVal);
+  const { r, g, b } = rgba;
+  const solidHex = `#${hex.replace("#", "").slice(0, 6)}`;
+  root.style.setProperty(name, solidHex);
   root.style.setProperty(`${name}-rgb`, `${r}, ${g}, ${b}`);
 }
 
