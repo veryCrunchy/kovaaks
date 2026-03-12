@@ -247,31 +247,18 @@
         return payload;
     }
 
-    static auto serialize_friend_scores_body_json(const std::vector<BridgeFriendScoreEntry>& entries) -> std::string {
-        if (entries.empty()) {
-            return {};
-        }
-
-        std::string body_json = "{\"top_scores\":[";
-        for (size_t index = 0; index < entries.size(); ++index) {
-            const auto& entry = entries[index];
-            if (index > 0) {
-                body_json += ",";
-            }
-            body_json += "{\"steam_id\":\"";
-            body_json += escape_json_ascii(entry.steam_id);
-            body_json += "\",\"steam_account_name\":\"";
-            body_json += escape_json_ascii(entry.display_name);
-            body_json += "\",\"score\":";
-            body_json += std::to_string(entry.score);
-            body_json += ",\"rank\":";
-            body_json += std::to_string(entry.rank);
-            body_json += ",\"kovaaks_plus_active\":";
-            body_json += entry.kovaaks_plus_active ? "true" : "false";
-            body_json += "}";
-        }
-        body_json += "],\"adjacent_scores\":[]}";
-        return body_json;
+    static void append_friend_score_entry_json(std::string& body_json, const BridgeFriendScoreEntry& entry) {
+        body_json += "{\"steam_id\":\"";
+        body_json += escape_json_ascii(entry.steam_id);
+        body_json += "\",\"steam_account_name\":\"";
+        body_json += escape_json_ascii(entry.display_name);
+        body_json += "\",\"score\":";
+        body_json += std::to_string(entry.score);
+        body_json += ",\"rank\":";
+        body_json += std::to_string(entry.rank);
+        body_json += ",\"kovaaks_plus_active\":";
+        body_json += entry.kovaaks_plus_active ? "true" : "false";
+        body_json += "}";
     }
 
     void persist_friend_scores_cache(
@@ -351,6 +338,123 @@
         persisted_friend_scores_cache_[scenario_name] = loaded;
         out_entry = std::move(loaded);
         return true;
+    }
+
+    static bool extract_json_array_field(std::string_view json, std::string_view key, std::string& out) {
+        out.clear();
+        if (json.empty() || key.empty()) {
+            return false;
+        }
+
+        std::string needle;
+        needle.reserve(key.size() + 2);
+        needle.push_back('"');
+        needle.append(key.begin(), key.end());
+        needle.push_back('"');
+
+        size_t pos = json.find(needle);
+        if (pos == std::string_view::npos) {
+            return false;
+        }
+        pos = json.find(':', pos + needle.size());
+        if (pos == std::string_view::npos) {
+            return false;
+        }
+        ++pos;
+        while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) {
+            ++pos;
+        }
+        if (pos >= json.size() || json[pos] != '[') {
+            return false;
+        }
+
+        const size_t array_start = pos;
+        int depth = 0;
+        bool in_string = false;
+        bool escaped = false;
+        for (; pos < json.size(); ++pos) {
+            const char ch = json[pos];
+            if (in_string) {
+                if (escaped) {
+                    escaped = false;
+                    continue;
+                }
+                if (ch == '\\') {
+                    escaped = true;
+                    continue;
+                }
+                if (ch == '"') {
+                    in_string = false;
+                }
+                continue;
+            }
+
+            if (ch == '"') {
+                in_string = true;
+                continue;
+            }
+            if (ch == '[') {
+                ++depth;
+                continue;
+            }
+            if (ch == ']') {
+                --depth;
+                if (depth == 0) {
+                    out.assign(json.substr(array_start, (pos - array_start) + 1));
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool try_build_cached_self_score_json(const std::string& scenario_name, std::string& out_adjacent_scores_json) {
+        out_adjacent_scores_json.clear();
+        PersistedFriendScoresCacheEntry cached{};
+        if (!load_persisted_friend_scores_cache(scenario_name, cached) || cached.body_json.empty()) {
+            return false;
+        }
+        return extract_json_array_field(cached.body_json, "adjacent_scores", out_adjacent_scores_json)
+            && !out_adjacent_scores_json.empty();
+    }
+
+    std::string serialize_friend_scores_body_json(
+        const std::string& scenario_name,
+        const std::vector<BridgeFriendScoreEntry>& entries
+    ) {
+        if (entries.empty()) {
+            return {};
+        }
+
+        std::string adjacent_scores_json{};
+        if (!try_build_cached_self_score_json(scenario_name, adjacent_scores_json) || adjacent_scores_json == "[]") {
+            if (has_last_emitted_user_profile_ && !last_emitted_user_profile_.steam_id.empty()) {
+                for (const auto& entry : entries) {
+                    if (entry.steam_id != last_emitted_user_profile_.steam_id) {
+                        continue;
+                    }
+                    adjacent_scores_json = "[";
+                    append_friend_score_entry_json(adjacent_scores_json, entry);
+                    adjacent_scores_json += "]";
+                    break;
+                }
+            }
+        }
+        if (adjacent_scores_json.empty()) {
+            adjacent_scores_json = "[]";
+        }
+
+        std::string body_json = "{\"top_scores\":[";
+        for (size_t index = 0; index < entries.size(); ++index) {
+            if (index > 0) {
+                body_json += ",";
+            }
+            append_friend_score_entry_json(body_json, entries[index]);
+        }
+        body_json += "],\"adjacent_scores\":";
+        body_json += adjacent_scores_json;
+        body_json += "}";
+        return body_json;
     }
 
     bool maybe_emit_persisted_friend_scores_snapshot(
@@ -1601,7 +1705,7 @@
             return true;
         }
 
-        const auto body_json = serialize_friend_scores_body_json(entries);
+        const auto body_json = serialize_friend_scores_body_json(scenario_name, entries);
         const auto payload = build_friend_scores_event_payload(
             source_name.c_str(),
             scenario_name,
@@ -1639,6 +1743,14 @@
             && (!std::isfinite(s_last_pull_queue_time_remaining)
                 || s_last_pull_queue_time_remaining <= 0.0001f);
         return s_last_pull_is_in_challenge == 1 || active_scenario;
+    }
+
+    bool should_refresh_user_management_user_profile() const {
+        if (!has_last_emitted_user_profile_) {
+            return true;
+        }
+        return !last_sa_http_auth_token_.empty()
+            && last_emitted_user_profile_.kovaaks_user_id.empty();
     }
 
     bool read_leaderboard_id_for_scenario(
@@ -2837,6 +2949,11 @@
 
         if (live_gameplay_active) {
             maybe_request_active_friend_scores(now, false);
+            return;
+        }
+
+        if (!should_refresh_user_management_user_profile()) {
+            maybe_request_active_friend_scores(now, force);
             return;
         }
 
