@@ -123,8 +123,8 @@ pub fn write_palette_colors(
     if path.is_empty() || colors.is_empty() {
         return Ok(());
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| format!("could not read {path}: {e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
     let trailing_newline = content.ends_with('\n');
     let new_lines: Vec<String> = content
         .lines()
@@ -141,7 +141,10 @@ pub fn write_palette_colors(
         new_content.push('\n');
     }
     std::fs::write(path, new_content).map_err(|e| format!("could not write {path}: {e}"))?;
-    log::info!("kovaaks_theme: wrote {} color override(s) to {path}", colors.len());
+    log::info!(
+        "kovaaks_theme: wrote {} color override(s) to {path}",
+        colors.len()
+    );
     Ok(())
 }
 
