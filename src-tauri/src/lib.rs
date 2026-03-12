@@ -734,8 +734,30 @@ async fn hub_get_scenario(
 }
 
 #[tauri::command]
+async fn hub_get_benchmark_page(
+    app: AppHandle,
+    handle: String,
+    benchmark_id: u32,
+) -> Result<hub_api::HubBenchmarkPageResponse, String> {
+    hub_api::get_benchmark_page(&app, handle, benchmark_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn hub_get_run(app: AppHandle, run_id: String) -> Result<hub_api::HubRunResponse, String> {
     hub_api::get_run(&app, run_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn hub_get_player_scenario_history(
+    app: AppHandle,
+    handle: String,
+    scenario_slug: String,
+) -> Result<hub_api::HubPlayerScenarioHistoryResponse, String> {
+    hub_api::get_player_scenario_history(&app, handle, scenario_slug)
         .await
         .map_err(|e| e.to_string())
 }
@@ -1982,7 +2004,9 @@ pub fn run() {
             hub_list_replays,
             hub_get_profile,
             hub_get_scenario,
+            hub_get_benchmark_page,
             hub_get_run,
+            hub_get_player_scenario_history,
             hub_get_aim_profile,
             hub_get_aim_fingerprint,
             read_kovaaks_palette,

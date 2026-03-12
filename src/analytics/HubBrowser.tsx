@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Btn, Badge } from "../design/ui";
 import { C, SCENARIO_LABELS, accentAlpha } from "../design/tokens";
 
-type HubKind = "profile" | "scenario" | "run" | "replay";
+type HubKind = "profile" | "scenario" | "benchmark" | "playerScenario" | "run" | "replay";
 type HubFilter = "all" | "profiles" | "scenarios" | "runs" | "replays";
 
 interface HubRunPreview {
@@ -24,6 +24,68 @@ interface HubTopScenario {
   scenarioSlug: string;
   scenarioType: string;
   runCount: number;
+}
+
+interface HubBenchmarkRankVisual {
+  rankIndex: number;
+  rankName: string;
+  iconUrl: string;
+  color: string;
+  frameUrl: string;
+}
+
+interface HubBenchmarkSummary {
+  benchmarkId: number;
+  benchmarkName: string;
+  benchmarkIconUrl: string;
+  benchmarkAuthor: string;
+  benchmarkType: string;
+  overallRank: HubBenchmarkRankVisual | null;
+}
+
+interface HubBenchmarkThreshold {
+  rankIndex: number;
+  rankName: string;
+  score: number;
+  iconUrl: string;
+  color: string;
+}
+
+interface HubBenchmarkScenarioEntry {
+  scenarioName: string;
+  scenarioSlug: string;
+  score: number;
+  leaderboardRank: number;
+  scenarioRank: HubBenchmarkRankVisual | null;
+  thresholds: HubBenchmarkThreshold[];
+}
+
+interface HubBenchmarkCategoryPage {
+  categoryName: string;
+  scenarios: HubBenchmarkScenarioEntry[];
+}
+
+interface HubBenchmarkPageResponse {
+  userHandle: string;
+  userDisplayName: string;
+  benchmarkId: number;
+  benchmarkName: string;
+  benchmarkAuthor: string;
+  benchmarkType: string;
+  benchmarkIconUrl: string;
+  overallRank: HubBenchmarkRankVisual | null;
+  categories: HubBenchmarkCategoryPage[];
+}
+
+interface HubScenarioBenchmarkRank {
+  benchmarkId: number;
+  benchmarkName: string;
+  benchmarkIconUrl: string;
+  categoryName: string;
+  scenarioScore: number;
+  leaderboardRank: number;
+  leaderboardId: number;
+  scenarioRank: HubBenchmarkRankVisual | null;
 }
 
 interface HubCommunityProfilePreview {
@@ -111,6 +173,7 @@ interface HubProfileResponse {
   topScenarios: HubTopScenario[];
   recentRuns: HubRunPreview[];
   personalBests: HubRunPreview[];
+  benchmarks: HubBenchmarkSummary[];
 }
 
 interface HubTimelineSecond {
@@ -149,6 +212,20 @@ interface HubRunResponse {
   contextWindows: HubContextWindow[];
   runId: string;
   scenarioRuns: HubRunPreview[];
+  benchmarkRanks: HubScenarioBenchmarkRank[];
+}
+
+interface HubPlayerScenarioHistoryResponse {
+  scenarioName: string;
+  scenarioSlug: string;
+  scenarioType: string;
+  runs: HubRunPreview[];
+  bestScore: number;
+  averageScore: number;
+  bestAccuracy: number;
+  averageAccuracy: number;
+  runCount: number;
+  benchmarkRanks: HubScenarioBenchmarkRank[];
 }
 
 interface HubTypeProfileBand {
@@ -206,6 +283,7 @@ interface HubSelection {
   kind: HubKind;
   id: string;
   label: string;
+  handle?: string;
 }
 
 interface HubResultCard {
@@ -272,6 +350,11 @@ function displayScenarioType(value?: string | null) {
   const normalized = value?.trim();
   if (!normalized || normalized === "Unknown") return null;
   return SCENARIO_LABELS[normalized] ?? normalized;
+}
+
+function hasBenchmarkRank(rank?: HubBenchmarkRankVisual | null) {
+  const label = rank?.rankName?.trim();
+  return Boolean(label && label.toLowerCase() !== "no rank");
 }
 
 function isNetworkStyleHubError(message: string) {
@@ -358,6 +441,8 @@ export function HubBrowserPanel() {
   const [detailError, setDetailError] = useState<string | null>(null);
   const [profileDetail, setProfileDetail] = useState<HubProfileResponse | null>(null);
   const [scenarioDetail, setScenarioDetail] = useState<HubScenarioPageResponse | null>(null);
+  const [benchmarkDetail, setBenchmarkDetail] = useState<HubBenchmarkPageResponse | null>(null);
+  const [playerScenarioDetail, setPlayerScenarioDetail] = useState<HubPlayerScenarioHistoryResponse | null>(null);
   const [runDetail, setRunDetail] = useState<HubRunResponse | null>(null);
   const [aimProfile, setAimProfile] = useState<HubAimProfileResponse | null>(null);
   const [aimFingerprint, setAimFingerprint] = useState<HubAimFingerprint | null>(null);
@@ -390,6 +475,8 @@ export function HubBrowserPanel() {
       setDetailError(null);
       setProfileDetail(null);
       setScenarioDetail(null);
+      setBenchmarkDetail(null);
+      setPlayerScenarioDetail(null);
       setRunDetail(null);
       setAimProfile(null);
       setAimFingerprint(null);
@@ -401,6 +488,8 @@ export function HubBrowserPanel() {
     setDetailError(null);
     setProfileDetail(null);
     setScenarioDetail(null);
+    setBenchmarkDetail(null);
+    setPlayerScenarioDetail(null);
     setRunDetail(null);
     setAimProfile(null);
     setAimFingerprint(null);
@@ -417,10 +506,24 @@ export function HubBrowserPanel() {
           setProfileDetail(profile);
           setAimProfile(aimProfileResp);
           setAimFingerprint(fingerprintResp.overall ?? null);
+        } else if (selection.kind === "benchmark") {
+          const page = await invoke<HubBenchmarkPageResponse>("hub_get_benchmark_page", {
+            handle: selection.handle,
+            benchmarkId: Number(selection.id),
+          });
+          if (cancelled) return;
+          setBenchmarkDetail(page);
         } else if (selection.kind === "scenario") {
           const page = await invoke<HubScenarioPageResponse>("hub_get_scenario", { slug: selection.id });
           if (cancelled) return;
           setScenarioDetail(page);
+        } else if (selection.kind === "playerScenario") {
+          const history = await invoke<HubPlayerScenarioHistoryResponse>("hub_get_player_scenario_history", {
+            handle: selection.handle,
+            scenarioSlug: selection.id,
+          });
+          if (cancelled) return;
+          setPlayerScenarioDetail(history);
         } else {
           const run = await invoke<HubRunResponse>("hub_get_run", { runId: selection.id });
           if (cancelled) return;
@@ -706,11 +809,15 @@ export function HubBrowserPanel() {
               <div style={{ minWidth: 0 }}>
                 <div style={{ fontSize: 10, color: C.accent, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
                   {selection.kind === "profile"
-                    ? "Player"
-                    : selection.kind === "scenario"
+                  ? "Player"
+                  : selection.kind === "scenario"
                       ? "Scenario"
-                      : selection.kind === "replay"
-                        ? "Replay"
+                      : selection.kind === "benchmark"
+                        ? "Benchmark"
+                      : selection.kind === "playerScenario"
+                        ? "Scenario history"
+                        : selection.kind === "replay"
+                          ? "Replay"
                         : "Run"}
                 </div>
                 <div style={{ marginTop: 4, fontSize: 14, color: C.text, fontWeight: 700, lineHeight: 1.4, wordBreak: "break-word" }}>
@@ -733,7 +840,16 @@ export function HubBrowserPanel() {
               profile={profileDetail}
               aimProfile={aimProfile}
               aimFingerprint={aimFingerprint}
-              onSelectScenario={(slug, label) => setSelection({ kind: "scenario", id: slug, label })}
+              onSelectBenchmark={(benchmarkId, label) =>
+                setSelection({
+                  kind: "benchmark",
+                  id: String(benchmarkId),
+                  label,
+                  handle: profileDetail.userHandle,
+                })}
+              onSelectScenario={(slug, label) =>
+                setSelection({ kind: "playerScenario", id: slug, label, handle: profileDetail.userHandle })
+              }
               onSelectRun={(runId, label) => setSelection({ kind: "run", id: runId, label })}
             />
           ) : scenarioDetail ? (
@@ -741,9 +857,40 @@ export function HubBrowserPanel() {
               scenario={scenarioDetail}
               onSelectRun={(runId, label) => setSelection({ kind: "run", id: runId, label })}
             />
+          ) : benchmarkDetail ? (
+            <BenchmarkDetailCard
+              page={benchmarkDetail}
+              onSelectScenario={(slug, label) =>
+                setSelection({
+                  kind: "playerScenario",
+                  id: slug,
+                  label,
+                  handle: benchmarkDetail.userHandle,
+                })}
+            />
+          ) : playerScenarioDetail ? (
+            <PlayerScenarioDetailCard
+              history={playerScenarioDetail}
+              handle={selection.handle || ""}
+              onSelectBenchmark={(benchmarkId, label) =>
+                setSelection({
+                  kind: "benchmark",
+                  id: String(benchmarkId),
+                  label,
+                  handle: selection.handle,
+                })}
+              onSelectRun={(runId, label) => setSelection({ kind: "run", id: runId, label })}
+            />
           ) : runDetail ? (
             <RunDetailCard
               run={runDetail}
+              onSelectBenchmark={(benchmarkId, label) =>
+                setSelection({
+                  kind: "benchmark",
+                  id: String(benchmarkId),
+                  label,
+                  handle: runDetail.userHandle,
+                })}
               onSelectProfile={(handle, label) => setSelection({ kind: "profile", id: handle, label })}
             />
           ) : (
@@ -815,12 +962,14 @@ function ProfileDetailCard({
   profile,
   aimProfile,
   aimFingerprint,
+  onSelectBenchmark,
   onSelectScenario,
   onSelectRun,
 }: {
   profile: HubProfileResponse;
   aimProfile: HubAimProfileResponse | null;
   aimFingerprint: HubAimFingerprint | null;
+  onSelectBenchmark: (benchmarkId: number, label: string) => void;
   onSelectScenario: (slug: string, label: string) => void;
   onSelectRun: (runId: string, label: string) => void;
 }) {
@@ -843,6 +992,20 @@ function ProfileDetailCard({
         <StatTile label="Average accuracy" value={fmtPct(profile.averageAccuracy)} />
         <StatTile label="Main focus" value={displayScenarioType(profile.primaryScenarioType) || "Mixed"} />
       </div>
+
+      {profile.benchmarks.some((benchmark) => hasBenchmarkRank(benchmark.overallRank)) && (
+        <BenchmarkRankList
+          title="Benchmarks"
+          items={profile.benchmarks.filter((benchmark) => hasBenchmarkRank(benchmark.overallRank)).map((benchmark) => ({
+            key: `${benchmark.benchmarkId}:${benchmark.benchmarkName}`,
+            title: benchmark.benchmarkName,
+            meta: benchmark.benchmarkType || benchmark.benchmarkAuthor || "Benchmark",
+            iconUrl: benchmark.overallRank?.iconUrl || benchmark.benchmarkIconUrl,
+            value: benchmark.overallRank?.rankName || "",
+            onClick: () => onSelectBenchmark(benchmark.benchmarkId, benchmark.benchmarkName),
+          }))}
+        />
+      )}
 
       {aimProfile && (
         <div>
@@ -966,11 +1129,71 @@ function ScenarioDetailCard({
   );
 }
 
+function PlayerScenarioDetailCard({
+  history,
+  handle,
+  onSelectBenchmark,
+  onSelectRun,
+}: {
+  history: HubPlayerScenarioHistoryResponse;
+  handle: string;
+  onSelectBenchmark: (benchmarkId: number, label: string) => void;
+  onSelectRun: (runId: string, label: string) => void;
+}) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <div style={{ fontSize: 11, color: C.accent, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+          Scenario history
+        </div>
+        <div style={{ marginTop: 6, fontSize: 24, fontWeight: 700, color: C.text }}>{history.scenarioName}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: C.textSub }}>
+          @{handle} · {history.runCount.toLocaleString()} runs · {displayScenarioType(history.scenarioType) || "Mixed"}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+        <StatTile label="Best" value={fmtScore(history.bestScore)} />
+        <StatTile label="Average" value={fmtScore(history.averageScore)} />
+        <StatTile label="Best accuracy" value={fmtPct(history.bestAccuracy)} />
+        <StatTile label="Average accuracy" value={fmtPct(history.averageAccuracy)} />
+      </div>
+
+      {history.benchmarkRanks.some((rank) => hasBenchmarkRank(rank.scenarioRank)) && (
+        <BenchmarkRankList
+          title="Benchmark ranks"
+          items={history.benchmarkRanks.filter((rank) => hasBenchmarkRank(rank.scenarioRank)).map((rank) => ({
+            key: `${rank.benchmarkId}:${rank.categoryName}`,
+            title: rank.benchmarkName,
+            meta: `${rank.categoryName} · Score ${fmtScore(rank.scenarioScore)}${rank.leaderboardRank > 0 ? ` · Top ${rank.leaderboardRank}` : ""}`,
+            iconUrl: rank.scenarioRank?.iconUrl || rank.benchmarkIconUrl,
+            value: rank.scenarioRank?.rankName || "",
+            onClick: () => onSelectBenchmark(rank.benchmarkId, rank.benchmarkName),
+          }))}
+        />
+      )}
+
+      <HubList
+        title="Recent runs"
+        items={history.runs.slice(0, 10).map((item) => ({
+          key: item.runId || item.sessionId,
+          title: `${fmtScore(item.score)} · ${fmtPct(item.accuracy)}`,
+          meta: `${fmtDurationMs(item.durationMs)} · ${relativeHubTime(item.playedAtIso)}`,
+          tag: null,
+          onClick: () => onSelectRun(item.runId || item.sessionId, history.scenarioName),
+        }))}
+      />
+    </div>
+  );
+}
+
 function RunDetailCard({
   run,
+  onSelectBenchmark,
   onSelectProfile,
 }: {
   run: HubRunResponse;
+  onSelectBenchmark: (benchmarkId: number, label: string) => void;
   onSelectProfile: (handle: string, label: string) => void;
 }) {
   const scorePerMinute = summaryNumber(run.summary, "scorePerMinute");
@@ -1010,6 +1233,20 @@ function RunDetailCard({
         <MiniInfo label="Key moments" value={String(run.contextWindows.length)} />
       </div>
 
+      {run.benchmarkRanks.some((rank) => hasBenchmarkRank(rank.scenarioRank)) && (
+        <BenchmarkRankList
+          title="Benchmark ranks"
+          items={run.benchmarkRanks.filter((rank) => hasBenchmarkRank(rank.scenarioRank)).map((rank) => ({
+            key: `${rank.benchmarkId}:${rank.categoryName}`,
+            title: rank.benchmarkName,
+            meta: `${rank.categoryName} · Score ${fmtScore(rank.scenarioScore)}${rank.leaderboardRank > 0 ? ` · Top ${rank.leaderboardRank}` : ""}`,
+            iconUrl: rank.scenarioRank?.iconUrl || rank.benchmarkIconUrl,
+            value: rank.scenarioRank?.rankName || "",
+            onClick: () => onSelectBenchmark(rank.benchmarkId, rank.benchmarkName),
+          }))}
+        />
+      )}
+
       {run.contextWindows.length > 0 && (
         <div>
           <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>Key moments</div>
@@ -1025,6 +1262,183 @@ function RunDetailCard({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function BenchmarkDetailCard({
+  page,
+  onSelectScenario,
+}: {
+  page: HubBenchmarkPageResponse;
+  onSelectScenario: (slug: string, label: string) => void;
+}) {
+  const categories = page.categories
+    .map((category) => ({
+      ...category,
+      scenarios: category.scenarios.filter((scenario) => hasBenchmarkRank(scenario.scenarioRank)),
+    }))
+    .filter((category) => category.scenarios.length > 0);
+
+  const rankedScenarioCount = categories.reduce((sum, category) => sum + category.scenarios.length, 0);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      <div>
+        <div style={{ fontSize: 11, color: C.accent, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 700 }}>
+          Benchmark
+        </div>
+        <div style={{ marginTop: 6, fontSize: 24, fontWeight: 700, color: C.text }}>{page.benchmarkName}</div>
+        <div style={{ marginTop: 6, fontSize: 12, color: C.textSub }}>
+          {page.userDisplayName || page.userHandle}
+          {page.benchmarkType ? ` · ${page.benchmarkType}` : ""}
+          {page.benchmarkAuthor ? ` · ${page.benchmarkAuthor}` : ""}
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 10 }}>
+        <StatTile label="Current rank" value={page.overallRank?.rankName || "Unranked"} />
+        <StatTile label="Categories" value={String(categories.length)} />
+        <StatTile label="Ranked scenarios" value={String(rankedScenarioCount)} />
+        <StatTile label="Player" value={page.userDisplayName || page.userHandle} />
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 12, maxHeight: 760, overflowY: "auto", paddingRight: 4 }}>
+        {categories.map((category) => (
+          <div
+            key={category.categoryName}
+            style={{
+              borderRadius: 12,
+              border: `1px solid ${C.borderSub}`,
+              background: "rgba(255,255,255,0.02)",
+              overflow: "hidden",
+            }}
+          >
+            <div
+              style={{
+                padding: "12px 14px",
+                borderBottom: `1px solid ${C.borderSub}`,
+                background: "rgba(255,255,255,0.02)",
+              }}
+            >
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{category.categoryName}</div>
+              <div style={{ marginTop: 4, fontSize: 10, color: C.textFaint }}>
+                {category.scenarios.length} ranked scenario{category.scenarios.length === 1 ? "" : "s"}
+              </div>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column" }}>
+              {category.scenarios.map((scenario) => (
+                <button
+                  key={`${category.categoryName}:${scenario.scenarioSlug || scenario.scenarioName}`}
+                  type="button"
+                  onClick={() => onSelectScenario(scenario.scenarioSlug || scenario.scenarioName, scenario.scenarioName)}
+                  style={{
+                    textAlign: "left",
+                    padding: "12px 14px",
+                    background: "transparent",
+                    border: 0,
+                    borderTop: `1px solid ${C.borderSub}`,
+                    color: C.text,
+                    cursor: "pointer",
+                  }}
+                >
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+                    <div style={{ minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 700, lineHeight: 1.5 }}>{scenario.scenarioName}</div>
+                      <div style={{ marginTop: 4, fontSize: 10, color: C.textFaint }}>
+                        {fmtScore(scenario.score)}
+                        {scenario.leaderboardRank > 0 ? ` · Top ${scenario.leaderboardRank}` : ""}
+                      </div>
+                    </div>
+                    <Badge color={C.accent}>{scenario.scenarioRank?.rankName || "Unranked"}</Badge>
+                  </div>
+                  {scenario.thresholds.length > 0 ? (
+                    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+                      {scenario.thresholds.map((threshold) => {
+                        const progress = threshold.score > 0 ? Math.max(0, Math.min(100, (scenario.score / threshold.score) * 100)) : 0;
+                        return (
+                          <div
+                            key={`${scenario.scenarioSlug || scenario.scenarioName}:${threshold.rankIndex}`}
+                            style={{ display: "grid", gridTemplateColumns: "120px minmax(0,1fr) 68px", gap: 8, alignItems: "center" }}
+                          >
+                            <div style={{ fontSize: 10, color: C.text }}>{threshold.rankName}</div>
+                            <div style={{ height: 8, borderRadius: 999, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
+                              <div
+                                style={{
+                                  width: `${progress}%`,
+                                  height: "100%",
+                                  borderRadius: 999,
+                                  background: "linear-gradient(90deg, rgba(87,247,194,0.9), rgba(0,180,255,0.8))",
+                                }}
+                              />
+                            </div>
+                            <div style={{ fontSize: 10, color: C.textFaint, textAlign: "right" }}>{fmtScore(threshold.score)}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BenchmarkRankList({
+  title,
+  items,
+}: {
+  title: string;
+  items: Array<{ key: string; title: string; meta: string; value: string; iconUrl: string; onClick?: () => void }>;
+}) {
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{title}</div>
+      <div style={{ marginTop: 10, display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 8, maxHeight: 320, overflowY: "auto", paddingRight: 4 }}>
+        {items.map((item) => (
+          <button
+            key={item.key}
+            type="button"
+            onClick={item.onClick}
+            style={{
+              borderRadius: 10,
+              border: `1px solid ${C.borderSub}`,
+              background: "rgba(255,255,255,0.02)",
+              padding: "10px 12px",
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              width: "100%",
+              textAlign: "left",
+              cursor: item.onClick ? "pointer" : "default",
+            }}
+          >
+            {item.iconUrl ? (
+              <img
+                src={item.iconUrl}
+                alt=""
+                style={{
+                  width: 34,
+                  height: 34,
+                  borderRadius: 8,
+                  objectFit: "cover",
+                  border: `1px solid ${C.borderSub}`,
+                  background: "rgba(255,255,255,0.04)",
+                }}
+              />
+            ) : null}
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: C.text, lineHeight: 1.4 }}>{item.title}</div>
+              <div style={{ marginTop: 2, fontSize: 11, color: C.textSub, lineHeight: 1.5 }}>{item.value}</div>
+              <div style={{ marginTop: 2, fontSize: 10, color: C.textFaint, lineHeight: 1.5 }}>{item.meta}</div>
+            </div>
+          </button>
+        ))}
+      </div>
     </div>
   );
 }

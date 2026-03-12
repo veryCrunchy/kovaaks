@@ -21,9 +21,11 @@ const SEARCH_PATH: &str = "/aimmod.hub.v1.HubService/Search";
 const LIST_REPLAYS_PATH: &str = "/aimmod.hub.v1.HubService/ListReplays";
 const GET_PROFILE_PATH: &str = "/aimmod.hub.v1.HubService/GetProfile";
 const GET_SCENARIO_PATH: &str = "/aimmod.hub.v1.HubService/GetScenarioPage";
+const GET_BENCHMARK_PAGE_PATH: &str = "/aimmod.hub.v1.HubService/GetBenchmarkPage";
 const GET_RUN_PATH: &str = "/aimmod.hub.v1.HubService/GetRun";
 const GET_AIM_PROFILE_PATH: &str = "/aimmod.hub.v1.HubService/GetAimProfile";
 const GET_AIM_FINGERPRINT_PATH: &str = "/aimmod.hub.v1.HubService/GetAimFingerprint";
+const GET_PLAYER_SCENARIO_HISTORY_PATH: &str = "/aimmod.hub.v1.HubService/GetPlayerScenarioHistory";
 
 fn de_u64ish<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -81,6 +83,116 @@ pub struct HubTopScenario {
     #[serde(default)]
     pub scenario_type: String,
     pub run_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkRankVisual {
+    #[serde(default)]
+    pub rank_index: u32,
+    #[serde(default)]
+    pub rank_name: String,
+    #[serde(default)]
+    pub icon_url: String,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub frame_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkSummary {
+    #[serde(default)]
+    pub benchmark_id: u32,
+    #[serde(default)]
+    pub benchmark_name: String,
+    #[serde(default)]
+    pub benchmark_icon_url: String,
+    #[serde(default)]
+    pub benchmark_author: String,
+    #[serde(default)]
+    pub benchmark_type: String,
+    pub overall_rank: Option<HubBenchmarkRankVisual>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubScenarioBenchmarkRank {
+    #[serde(default)]
+    pub benchmark_id: u32,
+    #[serde(default)]
+    pub benchmark_name: String,
+    #[serde(default)]
+    pub benchmark_icon_url: String,
+    #[serde(default)]
+    pub category_name: String,
+    pub scenario_score: f64,
+    #[serde(default)]
+    pub leaderboard_rank: u32,
+    #[serde(default)]
+    pub leaderboard_id: u32,
+    pub scenario_rank: Option<HubBenchmarkRankVisual>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkThreshold {
+    #[serde(default)]
+    pub rank_index: u32,
+    #[serde(default)]
+    pub rank_name: String,
+    pub score: f64,
+    #[serde(default)]
+    pub icon_url: String,
+    #[serde(default)]
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkScenarioEntry {
+    #[serde(default)]
+    pub scenario_name: String,
+    #[serde(default)]
+    pub scenario_slug: String,
+    pub score: f64,
+    #[serde(default)]
+    pub leaderboard_rank: u32,
+    pub scenario_rank: Option<HubBenchmarkRankVisual>,
+    #[serde(default)]
+    pub thresholds: Vec<HubBenchmarkThreshold>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkCategoryPage {
+    #[serde(default)]
+    pub category_name: String,
+    #[serde(default)]
+    pub scenarios: Vec<HubBenchmarkScenarioEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubBenchmarkPageResponse {
+    #[serde(default)]
+    pub user_handle: String,
+    #[serde(default)]
+    pub user_display_name: String,
+    #[serde(default)]
+    pub benchmark_id: u32,
+    #[serde(default)]
+    pub benchmark_name: String,
+    #[serde(default)]
+    pub benchmark_author: String,
+    #[serde(default)]
+    pub benchmark_type: String,
+    #[serde(default)]
+    pub benchmark_icon_url: String,
+    pub overall_rank: Option<HubBenchmarkRankVisual>,
+    #[serde(default)]
+    pub categories: Vec<HubBenchmarkCategoryPage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +359,8 @@ pub struct HubProfileResponse {
     pub recent_runs: Vec<HubRunPreview>,
     #[serde(default)]
     pub personal_bests: Vec<HubRunPreview>,
+    #[serde(default)]
+    pub benchmarks: Vec<HubBenchmarkSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +436,28 @@ pub struct HubRunResponse {
     pub run_id: String,
     #[serde(default)]
     pub scenario_runs: Vec<HubRunPreview>,
+    #[serde(default)]
+    pub benchmark_ranks: Vec<HubScenarioBenchmarkRank>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HubPlayerScenarioHistoryResponse {
+    #[serde(default)]
+    pub scenario_name: String,
+    #[serde(default)]
+    pub scenario_slug: String,
+    #[serde(default)]
+    pub scenario_type: String,
+    #[serde(default)]
+    pub runs: Vec<HubRunPreview>,
+    pub best_score: f64,
+    pub average_score: f64,
+    pub best_accuracy: f64,
+    pub average_accuracy: f64,
+    pub run_count: i32,
+    #[serde(default)]
+    pub benchmark_ranks: Vec<HubScenarioBenchmarkRank>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -415,6 +551,20 @@ struct SlugRequestPayload {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct BenchmarkPageRequestPayload {
+    handle: String,
+    benchmark_id: u32,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PlayerScenarioHistoryRequestPayload {
+    handle: String,
+    scenario_slug: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RunRequestPayload {
     run_id: String,
 }
@@ -494,8 +644,40 @@ pub async fn get_scenario(
     post_connect_json(app, GET_SCENARIO_PATH, &SlugRequestPayload { slug }).await
 }
 
+pub async fn get_benchmark_page(
+    app: &AppHandle,
+    handle: String,
+    benchmark_id: u32,
+) -> anyhow::Result<HubBenchmarkPageResponse> {
+    post_connect_json(
+        app,
+        GET_BENCHMARK_PAGE_PATH,
+        &BenchmarkPageRequestPayload {
+            handle,
+            benchmark_id,
+        },
+    )
+    .await
+}
+
 pub async fn get_run(app: &AppHandle, run_id: String) -> anyhow::Result<HubRunResponse> {
     post_connect_json(app, GET_RUN_PATH, &RunRequestPayload { run_id }).await
+}
+
+pub async fn get_player_scenario_history(
+    app: &AppHandle,
+    handle: String,
+    scenario_slug: String,
+) -> anyhow::Result<HubPlayerScenarioHistoryResponse> {
+    post_connect_json(
+        app,
+        GET_PLAYER_SCENARIO_HISTORY_PATH,
+        &PlayerScenarioHistoryRequestPayload {
+            handle,
+            scenario_slug,
+        },
+    )
+    .await
 }
 
 pub async fn get_aim_profile(
