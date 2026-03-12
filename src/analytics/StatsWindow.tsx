@@ -6594,7 +6594,10 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
         .catch(() => setHubSyncOverview(null));
     };
     refreshHubSyncOverview();
-    const hubStatusInterval = window.setInterval(refreshHubSyncOverview, 10_000);
+    const hubStatusInterval = window.setInterval(refreshHubSyncOverview, 5_000);
+    const unlistenHubSyncStatus = listen<StatsHubSyncOverview>("hub-sync-status", (event) => {
+      setHubSyncOverview(event.payload);
+    });
     const unlistenSettingsChanged = listen("settings-changed", () => {
       refreshAppSettings();
       refreshHubSyncOverview();
@@ -6605,6 +6608,7 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
       unlistenBridgeParsed.then((fn) => fn());
       unlistenStatsPanel.then((fn) => fn());
       unlistenBridgeMetric.then((fn) => fn());
+      unlistenHubSyncStatus.then((fn) => fn());
       unlistenSettingsChanged.then((fn) => fn());
       window.clearInterval(hubStatusInterval);
     };
