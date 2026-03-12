@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import type { AppSettings, MonitorInfo } from "../types/settings";
 import type { FriendProfile } from "../types/friends";
 import { FriendManager } from "./FriendManager";
@@ -508,6 +509,15 @@ function GeneralSettings({
     }, 5000);
     return () => window.clearInterval(interval);
   }, [refreshHubStatus]);
+
+  useEffect(() => {
+    const unlistenPromise = listen<HubSyncOverview>("hub-sync-status", (event) => {
+      setHubStatus(event.payload);
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   useEffect(() => {
     if (!hubLinkSession) return;
@@ -1299,7 +1309,12 @@ function GeneralSettings({
                         >
                           {hubResyncBusy ? "Queueing resync…" : "Resync all runs"}
                         </Btn>
-                        <Btn variant="ghost" size="sm" onClick={handleDisconnectHub} disabled={hubLinkBusy || hubResyncBusy}>
+                        <Btn
+                          variant="ghost"
+                          size="sm"
+                          onClick={handleDisconnectHub}
+                          disabled={hubLinkBusy || hubResyncBusy}
+                        >
                           Disconnect
                         </Btn>
                       </>

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -8,7 +9,7 @@ use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::bridge::{BridgeRunSnapshot, BridgeRunTimelinePoint};
 use crate::file_watcher::SessionResult;
@@ -16,12 +17,14 @@ use crate::session_store::{ShotTimingSnapshot, SmoothnessSnapshot, StatsPanelSna
 
 pub const HUB_SCHEMA_VERSION: u32 = 11;
 pub const HUB_REPLAY_MEDIA_SCHEMA_VERSION: u32 = 2;
+pub const HUB_MOUSE_PATH_SCHEMA_VERSION: u32 = 2;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const INGEST_PATH: &str = "/aimmod.hub.v1.HubService/IngestSession";
 const BATCH_INGEST_PATH: &str = "/ingest/batch";
 const REPLAY_MEDIA_UPLOAD_PATH: &str = "/media/replays/upload";
 const REPLAY_MOUSE_PATH_UPLOAD_PATH: &str = "/replays/mouse-path/upload";
 const BATCH_SYNC_CHUNK_SIZE: usize = 25;
+pub const HUB_SYNC_STATUS_EVENT: &str = "hub-sync-status";
 
 static CLIENT: Lazy<Client> = Lazy::new(|| {
     Client::builder()
@@ -31,6 +34,7 @@ static CLIENT: Lazy<Client> = Lazy::new(|| {
         .expect("failed to build AimMod Hub client")
 });
 static PENDING_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
+static MOUSE_PATH_SYNC_RUNNING: AtomicBool = AtomicBool::new(false);
 static SYNC_STATUS: Lazy<Mutex<HubSyncStatus>> = Lazy::new(|| {
     Mutex::new(HubSyncStatus {
         sync_in_progress: false,
@@ -47,6 +51,8 @@ static SYNC_STATUS: Lazy<Mutex<HubSyncStatus>> = Lazy::new(|| {
 });
 static UPLOAD_IDENTITY_CACHE: Lazy<Mutex<HashMap<String, UploadIdentityCacheEntry>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+static AUX_UPLOAD_SEMAPHORE: Lazy<Arc<tokio::sync::Semaphore>> =
+    Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
 
 #[derive(Clone)]
 pub struct SessionUploadInput {
@@ -142,39 +148,94 @@ fn now_unix_ms() -> u64 {
     Utc::now().timestamp_millis().max(0) as u64
 }
 
-fn set_sync_in_progress(value: bool) {
-    SYNC_STATUS.lock().sync_in_progress = value;
+fn build_sync_overview(app: &AppHandle, refresh_pending: bool) -> anyhow::Result<HubSyncOverview> {
+    let settings = crate::settings::load(app)?;
+    if refresh_pending {
+        let pending_count = crate::session_store::get_pending_hub_upload_page(app, 0, 1).total;
+        SYNC_STATUS.lock().pending_count = pending_count;
+    }
+    let status = SYNC_STATUS.lock().clone();
+    let discovered_identity = derive_bridge_upload_identity();
+    let can_upload_without_link = discovered_identity.is_some();
+    let account_label = if settings.hub_account_label.trim().is_empty() {
+        discovered_identity.as_ref().and_then(|identity| {
+            let label = first_nonempty_owned(&[
+                identity.user_display_name.as_str(),
+                identity.kovaaks_username.as_str(),
+                identity.steam_display_name.as_str(),
+                identity.steam_id.as_str(),
+            ]);
+            (!label.is_empty()).then_some(label)
+        })
+    } else {
+        Some(settings.hub_account_label.trim().to_string())
+    };
+    Ok(HubSyncOverview {
+        configured: !normalize_base_url(&settings.hub_api_base_url).is_empty()
+            && (!settings.hub_upload_token.trim().is_empty() || can_upload_without_link),
+        enabled: settings.hub_sync_enabled,
+        account_label,
+        status,
+    })
 }
 
-fn record_sync_success(session_id: Option<&str>) {
+fn emit_sync_status(app: &AppHandle) {
+    match build_sync_overview(app, false) {
+        Ok(overview) => {
+            let _ = app.emit(HUB_SYNC_STATUS_EVENT, &overview);
+        }
+        Err(error) => {
+            log::debug!("hub_sync: could not emit sync status update: {error}");
+        }
+    }
+}
+
+fn set_sync_in_progress(app: &AppHandle, value: bool) {
+    SYNC_STATUS.lock().sync_in_progress = value;
+    emit_sync_status(app);
+}
+
+fn record_sync_success(app: &AppHandle, session_id: Option<&str>) {
     let mut status = SYNC_STATUS.lock();
     status.sync_in_progress = false;
     status.last_success_at_unix_ms = Some(now_unix_ms());
     status.last_error = None;
     status.last_error_at_unix_ms = None;
     status.last_uploaded_session_id = session_id.map(ToOwned::to_owned);
+    drop(status);
+    emit_sync_status(app);
 }
 
-fn record_sync_error(message: impl Into<String>) {
+fn record_sync_error(app: &AppHandle, message: impl Into<String>) {
     let mut status = SYNC_STATUS.lock();
     status.sync_in_progress = false;
     status.last_error = Some(message.into());
     status.last_error_at_unix_ms = Some(now_unix_ms());
+    drop(status);
+    emit_sync_status(app);
 }
 
-fn record_replay_media_upload_success(session_id: &str) {
+fn record_replay_media_upload_success(app: &AppHandle, session_id: &str) {
     let mut status = SYNC_STATUS.lock();
     status.last_replay_media_upload_at_unix_ms = Some(now_unix_ms());
     status.last_replay_media_error = None;
     status.last_replay_media_error_at_unix_ms = None;
     status.last_replay_media_session_id = Some(session_id.to_string());
+    drop(status);
+    emit_sync_status(app);
 }
 
-fn record_replay_media_upload_error(session_id: &str, message: impl Into<String>) {
+fn record_replay_media_upload_error(app: &AppHandle, session_id: &str, message: impl Into<String>) {
     let mut status = SYNC_STATUS.lock();
     status.last_replay_media_error = Some(message.into());
     status.last_replay_media_error_at_unix_ms = Some(now_unix_ms());
     status.last_replay_media_session_id = Some(session_id.to_string());
+    drop(status);
+    emit_sync_status(app);
+}
+
+fn verbose_transport_error(error: &anyhow::Error) -> String {
+    format!("{error:#}")
 }
 
 fn record_pending_upload_failure(app: &AppHandle, session_id: &str, message: &str) {
@@ -184,6 +245,7 @@ fn record_pending_upload_failure(app: &AppHandle, session_id: &str, message: &st
 fn refresh_pending_count(app: &AppHandle) {
     let pending_count = crate::session_store::get_pending_hub_upload_page(app, 0, 1).total;
     SYNC_STATUS.lock().pending_count = pending_count;
+    emit_sync_status(app);
 }
 
 fn first_nonempty_owned(candidates: &[&str]) -> String {
@@ -250,8 +312,52 @@ fn derive_bridge_upload_identity() -> Option<UploadIdentity> {
     })
 }
 
+fn derive_upload_identity_from_profile(
+    profile: &crate::settings::FriendProfile,
+) -> Option<UploadIdentity> {
+    let steam_id = profile.steam_id.trim().to_string();
+    let kovaaks_username = if profile.bridge_managed {
+        let username = profile.username.trim();
+        if username.is_empty() || looks_like_steam_id(username) {
+            String::new()
+        } else {
+            username.to_string()
+        }
+    } else {
+        String::new()
+    };
+
+    if steam_id.is_empty() && kovaaks_username.is_empty() {
+        return None;
+    }
+
+    let user_display_name = first_nonempty_owned(&[
+        profile.steam_account_name.as_str(),
+        profile.username.as_str(),
+        steam_id.as_str(),
+    ]);
+    let steam_display_name = first_nonempty_owned(&[
+        profile.steam_account_name.as_str(),
+        user_display_name.as_str(),
+        steam_id.as_str(),
+    ]);
+
+    Some(UploadIdentity {
+        user_external_id: build_upload_external_id("", &kovaaks_username, &steam_id),
+        kovaaks_user_id: String::new(),
+        kovaaks_username,
+        user_display_name,
+        avatar_url: profile.avatar_url.trim().to_string(),
+        steam_id,
+        steam_display_name,
+    })
+}
+
 async fn resolve_upload_identity() -> Option<UploadIdentity> {
-    let mut identity = derive_bridge_upload_identity()?;
+    let Some(mut identity) = derive_bridge_upload_identity() else {
+        let profile = crate::resolve_current_identity_profile().await?;
+        return derive_upload_identity_from_profile(&profile);
+    };
     let steam_id = identity.steam_id.trim().to_string();
     let needs_enrichment = identity.kovaaks_username.trim().is_empty()
         || looks_like_steam_id(&identity.kovaaks_username);
@@ -352,31 +458,7 @@ fn log_upload_identity(context: &str, upload_identity: Option<&UploadIdentity>) 
 }
 
 pub fn get_sync_overview(app: &AppHandle) -> anyhow::Result<HubSyncOverview> {
-    let settings = crate::settings::load(app)?;
-    refresh_pending_count(app);
-    let status = SYNC_STATUS.lock().clone();
-    let discovered_identity = derive_bridge_upload_identity();
-    let can_upload_without_link = discovered_identity.is_some();
-    let account_label = if settings.hub_account_label.trim().is_empty() {
-        discovered_identity.as_ref().and_then(|identity| {
-            let label = first_nonempty_owned(&[
-                identity.user_display_name.as_str(),
-                identity.kovaaks_username.as_str(),
-                identity.steam_display_name.as_str(),
-                identity.steam_id.as_str(),
-            ]);
-            (!label.is_empty()).then_some(label)
-        })
-    } else {
-        Some(settings.hub_account_label.trim().to_string())
-    };
-    Ok(HubSyncOverview {
-        configured: !normalize_base_url(&settings.hub_api_base_url).is_empty()
-            && (!settings.hub_upload_token.trim().is_empty() || can_upload_without_link),
-        enabled: settings.hub_sync_enabled,
-        account_label,
-        status,
-    })
+    build_sync_overview(app, true)
 }
 
 fn open_external_url(url: &str) -> anyhow::Result<()> {
@@ -499,6 +581,7 @@ pub async fn poll_device_link(
             *locked = next_settings;
         }
         queue_pending_session_sync(app);
+        queue_pending_mouse_path_sync(app);
     }
 
     Ok(HubDeviceLinkPollStatus {
@@ -548,8 +631,12 @@ pub fn force_full_resync(app: &AppHandle) -> anyhow::Result<()> {
             "hub_sync: could not clear replay media upload marks before full resync: {error}"
         );
     }
+    if let Err(error) = crate::stats_db::clear_mouse_path_upload_marks(app) {
+        log::warn!("hub_sync: could not clear mouse path upload marks before full resync: {error}");
+    }
     refresh_pending_count(app);
     queue_pending_session_sync(app);
+    queue_pending_mouse_path_sync(app);
     Ok(())
 }
 
@@ -659,13 +746,13 @@ struct UploadIdentityCacheEntry {
 }
 
 pub fn queue_session_upload(app: &AppHandle, input: SessionUploadInput) {
-    set_sync_in_progress(true);
+    set_sync_in_progress(app, true);
     let session_id = input.session_id.clone();
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         if let Err(error) = upload_session(&app, input).await {
             record_pending_upload_failure(&app, &session_id, &error.to_string());
-            record_sync_error(error.to_string());
+            record_sync_error(&app, error.to_string());
             log::warn!("hub_sync: upload failed: {error}");
         }
         refresh_pending_count(&app);
@@ -685,10 +772,7 @@ pub fn queue_pending_session_sync(app: &AppHandle) {
         return;
     }
 
-    let upload_identity_available = derive_bridge_upload_identity().is_some();
-    if normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || (!upload_identity_available && settings.hub_upload_token.trim().is_empty())
-    {
+    if normalize_base_url(&settings.hub_api_base_url).is_empty() {
         return;
     }
 
@@ -696,24 +780,122 @@ pub fn queue_pending_session_sync(app: &AppHandle) {
         return;
     }
 
-    set_sync_in_progress(true);
+    set_sync_in_progress(app, true);
     refresh_pending_count(app);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let result = sync_pending_sessions(&app).await;
         PENDING_SYNC_RUNNING.store(false, Ordering::SeqCst);
         if let Err(error) = result {
-            record_sync_error(error.to_string());
+            record_sync_error(&app, error.to_string());
             log::warn!("hub_sync: pending sync failed: {error}");
         }
         refresh_pending_count(&app);
     });
 }
 
+pub fn queue_pending_mouse_path_sync(app: &AppHandle) {
+    let settings = match crate::settings::load(app) {
+        Ok(settings) => settings,
+        Err(error) => {
+            log::warn!("hub_sync: could not load settings for mouse path sync check: {error}");
+            return;
+        }
+    };
+
+    if !settings.hub_sync_enabled {
+        return;
+    }
+
+    if normalize_base_url(&settings.hub_api_base_url).is_empty() {
+        return;
+    }
+
+    if settings.hub_upload_token.trim().is_empty() {
+        return;
+    }
+
+    if MOUSE_PATH_SYNC_RUNNING.swap(true, Ordering::SeqCst) {
+        return;
+    }
+
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let result = sync_pending_mouse_paths(&app).await;
+        MOUSE_PATH_SYNC_RUNNING.store(false, Ordering::SeqCst);
+        if let Err(error) = result {
+            log::warn!("hub_sync: mouse path sync failed: {error}");
+        }
+    });
+}
+
+async fn sync_pending_mouse_paths(app: &AppHandle) -> anyhow::Result<()> {
+    const MOUSE_PATH_SYNC_PAGE_SIZE: usize = 200;
+    let mut session_ids = Vec::new();
+    let mut offset = 0usize;
+    loop {
+        let batch = crate::stats_db::get_pending_mouse_path_upload_session_ids(
+            app,
+            offset,
+            MOUSE_PATH_SYNC_PAGE_SIZE,
+            HUB_MOUSE_PATH_SCHEMA_VERSION,
+        )?;
+        if batch.is_empty() {
+            break;
+        }
+        offset += batch.len();
+        session_ids.extend(batch);
+    }
+
+    if session_ids.is_empty() {
+        return Ok(());
+    }
+
+    log::info!(
+        "hub_sync: queued automatic mouse path resync for {} local session(s)",
+        session_ids.len()
+    );
+
+    let total = session_ids.len();
+    let mut uploaded = 0usize;
+    let mut failed = 0usize;
+    for (index, session_id) in session_ids.into_iter().enumerate() {
+        match upload_mouse_path_for_session(app, &session_id).await {
+            Ok(_) => uploaded += 1,
+            Err(error) => {
+                failed += 1;
+                log::warn!(
+                    "hub_sync: automatic mouse path resync skipped for {}: {}",
+                    session_id,
+                    verbose_transport_error(&error)
+                );
+            }
+        }
+        let processed = index + 1;
+        if processed % 25 == 0 || processed == total {
+            log::info!(
+                "hub_sync: automatic mouse path resync progress processed={} uploaded={} failed={} total={}",
+                processed,
+                uploaded,
+                failed,
+                total
+            );
+        }
+    }
+
+    log::info!(
+        "hub_sync: automatic mouse path resync complete uploaded={} failed={} total={}",
+        uploaded,
+        failed,
+        total
+    );
+    Ok(())
+}
+
 async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::Result<()> {
     let settings = crate::settings::load(app)?;
     if !settings.hub_sync_enabled {
-        record_sync_success(None);
+        record_sync_success(app, None);
         return Ok(());
     }
 
@@ -725,7 +907,7 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
             "hub_sync: skipping upload for {} because hub sync is not fully configured",
             input.session_id
         );
-        record_sync_success(None);
+        record_sync_success(app, None);
         return Ok(());
     }
     log_upload_identity(
@@ -837,7 +1019,7 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
     crate::session_store::mark_session_hub_uploaded(app, &input.session_id);
     try_upload_replay_media_for_session(app, &input.result, &input.session_id).await;
     try_upload_mouse_path_for_session(app, &input.session_id).await;
-    record_sync_success(Some(&input.session_id));
+    record_sync_success(app, Some(&input.session_id));
     refresh_pending_count(app);
     log::info!("hub_sync: uploaded session {}", input.session_id);
     Ok(())
@@ -845,18 +1027,18 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
 
 async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
     let settings = crate::settings::load(app)?;
-    let upload_identity_available = derive_bridge_upload_identity().is_some();
+    let upload_identity = resolve_upload_identity().await;
     if !settings.hub_sync_enabled
         || normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || (settings.hub_upload_token.trim().is_empty() && !upload_identity_available)
+        || (settings.hub_upload_token.trim().is_empty() && upload_identity.is_none())
     {
-        record_sync_success(None);
+        record_sync_success(app, None);
         return Ok(());
     }
 
     let overview = crate::session_store::get_pending_hub_upload_page(app, 0, 1);
     if overview.total == 0 {
-        record_sync_success(None);
+        record_sync_success(app, None);
         return Ok(());
     }
 
@@ -880,6 +1062,13 @@ async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
                 Ok(batch_result) => {
                     uploaded += batch_result.uploaded_count;
                     failed += batch_result.failed_count;
+                    refresh_pending_count(app);
+                    log::info!(
+                        "hub_sync: pending sync progress uploaded={} failed={} remaining_estimate={}",
+                        uploaded,
+                        failed,
+                        crate::session_store::get_pending_hub_upload_page(app, 0, 1).total
+                    );
                     for failure in batch_result.failures {
                         record_pending_upload_failure(app, &failure.session_id, &failure.message);
                         log::warn!(
@@ -891,6 +1080,7 @@ async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
                 }
                 Err(error) => {
                     failed += chunk.len();
+                    refresh_pending_count(app);
                     for record in chunk {
                         record_pending_upload_failure(app, &record.id, &error.to_string());
                         log::warn!(
@@ -913,9 +1103,9 @@ async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
         failed
     );
     if failed == 0 {
-        record_sync_success(None);
+        record_sync_success(app, None);
     } else {
-        record_sync_error(format!("{} pending upload(s) failed", failed));
+        record_sync_error(app, format!("{} pending upload(s) failed", failed));
     }
     refresh_pending_count(app);
     Ok(())
@@ -1108,6 +1298,12 @@ async fn upload_session_batch(
         anyhow::bail!("hub batch ingest returned {status} with an empty result body");
     }
 
+    log::info!(
+        "hub_sync: batch ingest accepted uploaded={} failed={}",
+        payload.uploaded_session_ids.len(),
+        payload.failures.len()
+    );
+
     let mut next_fallback_index = 0usize;
     for failure in &mut payload.failures {
         if !failure.session_id.trim().is_empty() {
@@ -1144,24 +1340,26 @@ async fn upload_session_batch(
             .iter()
             .any(|id| id == &record.id)
         {
-            let result = SessionResult {
-                scenario: record.scenario.clone(),
-                score: record.score,
-                accuracy: record.accuracy,
-                kills: record.kills,
-                deaths: record.deaths,
-                duration_secs: record.duration_secs,
-                avg_ttk: record.avg_ttk,
-                damage_done: record.damage_done,
-                timestamp: record.timestamp.clone(),
-                csv_path: String::new(),
-            };
-            try_upload_replay_media_for_session(app, &result, &record.id).await;
-            try_upload_mouse_path_for_session(app, &record.id).await;
+            queue_post_ingest_aux_uploads(
+                app,
+                SessionResult {
+                    scenario: record.scenario.clone(),
+                    score: record.score,
+                    accuracy: record.accuracy,
+                    kills: record.kills,
+                    deaths: record.deaths,
+                    duration_secs: record.duration_secs,
+                    avg_ttk: record.avg_ttk,
+                    damage_done: record.damage_done,
+                    timestamp: record.timestamp.clone(),
+                    csv_path: String::new(),
+                },
+                record.id.clone(),
+            );
         }
     }
     if let Some(last) = payload.uploaded_session_ids.last() {
-        record_sync_success(Some(last));
+        record_sync_success(app, Some(last));
     }
     refresh_pending_count(app);
     Ok(payload)
@@ -1173,13 +1371,25 @@ async fn try_upload_replay_media_for_session(
     session_id: &str,
 ) {
     if let Err(error) = upload_replay_media_for_session(app, result, session_id).await {
-        record_replay_media_upload_error(session_id, error.to_string());
+        let message = verbose_transport_error(&error);
+        record_replay_media_upload_error(app, session_id, message.clone());
         log::warn!(
             "hub_sync: replay media upload skipped for {}: {}",
             session_id,
-            error
+            message
         );
     }
+}
+
+fn queue_post_ingest_aux_uploads(app: &AppHandle, result: SessionResult, session_id: String) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Ok(_permit) = AUX_UPLOAD_SEMAPHORE.clone().acquire_owned().await else {
+            return;
+        };
+        try_upload_replay_media_for_session(&app, &result, &session_id).await;
+        try_upload_mouse_path_for_session(&app, &session_id).await;
+    });
 }
 
 async fn upload_replay_media_for_session(
@@ -1241,7 +1451,7 @@ async fn upload_replay_media_for_session(
         HUB_REPLAY_MEDIA_SCHEMA_VERSION,
         &settings.replay_media_upload_quality,
     )?;
-    record_replay_media_upload_success(session_id);
+    record_replay_media_upload_success(app, session_id);
     Ok(())
 }
 
@@ -1259,14 +1469,130 @@ struct MousePathUploadPoint {
 struct MousePathUploadPayload {
     points: Vec<MousePathUploadPoint>,
     hit_timestamps_ms: Vec<u64>,
+    playback_offset_ms: u64,
+    video_offset_ms: u64,
+}
+
+fn canonicalize_mouse_path_timeline(
+    mut positions: Vec<crate::mouse_hook::RawPositionPoint>,
+    mut hit_timestamps_ms: Vec<u64>,
+    target_duration_ms: u64,
+) -> (Vec<crate::mouse_hook::RawPositionPoint>, Vec<u64>, u64) {
+    if positions.is_empty() {
+        return (positions, hit_timestamps_ms, 0);
+    }
+
+    positions.sort_by_key(|point| point.timestamp_ms);
+    hit_timestamps_ms.sort_unstable();
+
+    let start_offset_ms = positions
+        .first()
+        .map(|point| point.timestamp_ms)
+        .unwrap_or(0);
+    if start_offset_ms > 0 {
+        for point in &mut positions {
+            point.timestamp_ms = point.timestamp_ms.saturating_sub(start_offset_ms);
+        }
+        hit_timestamps_ms.retain(|hit_ms| *hit_ms >= start_offset_ms);
+        for hit_ms in &mut hit_timestamps_ms {
+            *hit_ms = hit_ms.saturating_sub(start_offset_ms);
+        }
+    }
+
+    let local_point_end_ms = positions
+        .last()
+        .map(|point| point.timestamp_ms)
+        .unwrap_or(0);
+    if local_point_end_ms > 0 {
+        let local_hit_limit_ms = if target_duration_ms > 0 {
+            local_point_end_ms
+                .min(target_duration_ms)
+                .saturating_add(250)
+        } else {
+            local_point_end_ms.saturating_add(250)
+        };
+        hit_timestamps_ms.retain(|timestamp_ms| *timestamp_ms <= local_hit_limit_ms);
+    }
+
+    let observed_duration_ms = positions
+        .last()
+        .map(|point| point.timestamp_ms)
+        .unwrap_or(0)
+        .max(hit_timestamps_ms.last().copied().unwrap_or(0));
+
+    if target_duration_ms > 0
+        && observed_duration_ms > target_duration_ms.saturating_add(1_500)
+        && observed_duration_ms > target_duration_ms.saturating_mul(12) / 10
+    {
+        let scale = target_duration_ms as f64 / observed_duration_ms as f64;
+        for point in &mut positions {
+            point.timestamp_ms = ((point.timestamp_ms as f64) * scale).round().max(0.0) as u64;
+        }
+        for hit_ms in &mut hit_timestamps_ms {
+            *hit_ms = ((*hit_ms as f64) * scale).round().max(0.0) as u64;
+        }
+    }
+
+    if target_duration_ms > 0 {
+        let limit_ms = target_duration_ms.saturating_add(250);
+        positions.retain(|point| point.timestamp_ms <= limit_ms);
+        hit_timestamps_ms.retain(|timestamp_ms| *timestamp_ms <= limit_ms);
+    }
+
+    positions.sort_by_key(|point| point.timestamp_ms);
+    hit_timestamps_ms.sort_unstable();
+    (positions, hit_timestamps_ms, start_offset_ms)
+}
+
+fn build_relative_hit_timestamps(
+    raw_hit_event_ts: &[u64],
+    replay_base_ts: Option<u64>,
+) -> Vec<u64> {
+    if raw_hit_event_ts.is_empty() {
+        return Vec::new();
+    }
+
+    let mut raw = raw_hit_event_ts.to_vec();
+    raw.sort_unstable();
+
+    let earliest = raw[0];
+    let raw_span_ms = raw
+        .last()
+        .copied()
+        .unwrap_or(earliest)
+        .saturating_sub(earliest);
+
+    let normalize = |base_ts: u64| {
+        raw.iter()
+            .map(|ts_ms| ts_ms.saturating_sub(base_ts))
+            .collect::<Vec<_>>()
+    };
+
+    let mut normalized = normalize(replay_base_ts.unwrap_or(earliest));
+    let normalized_span_ms = normalized.last().copied().unwrap_or(0);
+    let unique_count = normalized
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    let clearly_pathological =
+        raw_span_ms > 250 && (normalized_span_ms < raw_span_ms / 2 || unique_count <= 1);
+
+    if clearly_pathological {
+        normalized = normalize(earliest);
+    }
+
+    normalized
 }
 
 async fn try_upload_mouse_path_for_session(app: &AppHandle, session_id: &str) {
     if let Err(error) = upload_mouse_path_for_session(app, session_id).await {
+        let message = verbose_transport_error(&error);
         log::warn!(
             "hub_sync: mouse path upload skipped for {}: {}",
             session_id,
-            error
+            message
         );
     }
 }
@@ -1278,6 +1604,9 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
     if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
         return Ok(());
     }
+    if !should_upload_mouse_path(app, session_id)? {
+        return Ok(());
+    }
 
     let Some(replay) = crate::replay_store::load_mouse_path_payload(app, session_id) else {
         anyhow::bail!("no mouse path payload is available for this run");
@@ -1286,17 +1615,6 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
         anyhow::bail!("this replay has no saved mouse path data");
     }
 
-    let points = replay
-        .positions
-        .into_iter()
-        .take(4000)
-        .map(|point| MousePathUploadPoint {
-            x: point.x,
-            y: point.y,
-            timestamp_ms: point.timestamp_ms,
-            is_click: point.is_click,
-        })
-        .collect::<Vec<_>>();
     let persisted_run = crate::stats_db::get_run_summary(app, session_id).unwrap_or(None);
     let persisted_timeline = crate::stats_db::get_run_timeline(app, session_id).unwrap_or_default();
     let shot_telemetry = crate::stats_db::get_shot_telemetry(app, session_id).unwrap_or_default();
@@ -1304,13 +1622,70 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
         .as_ref()
         .and_then(|run| run.started_at_bridge_ts_ms)
         .or_else(|| estimate_replay_bridge_base_ts(&shot_telemetry, &persisted_timeline))
-        .unwrap_or(0);
-    let hit_timestamps_ms = shot_telemetry
+        .filter(|value| *value > 0);
+    let raw_hit_event_ts = shot_telemetry
         .into_iter()
         .filter(|event| event.event == "shot_hit")
-        .map(|event| event.ts_ms.saturating_sub(replay_base_ts))
-        .take(2000)
+        .map(|event| event.ts_ms)
         .collect::<Vec<_>>();
+    let hit_timestamps_ms = build_relative_hit_timestamps(&raw_hit_event_ts, replay_base_ts);
+    let target_duration_ms = persisted_run
+        .as_ref()
+        .and_then(|run| run.duration_secs)
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .map(|value| (value * 1000.0).round() as u64)
+        .unwrap_or_else(|| {
+            replay
+                .metrics
+                .last()
+                .map(|point| point.timestamp_ms)
+                .unwrap_or_else(|| {
+                    replay
+                        .positions
+                        .last()
+                        .map(|point| point.timestamp_ms)
+                        .unwrap_or(0)
+                })
+        });
+    let (positions, hit_timestamps_ms, playback_offset_ms) =
+        canonicalize_mouse_path_timeline(replay.positions, hit_timestamps_ms, target_duration_ms);
+    let video_offset_ms = replay
+        .frames
+        .iter()
+        .map(|frame| frame.timestamp_ms)
+        .min()
+        .unwrap_or(0);
+    let points = positions
+        .into_iter()
+        .take(8000)
+        .map(|point| MousePathUploadPoint {
+            x: point.x,
+            y: point.y,
+            timestamp_ms: point.timestamp_ms,
+            is_click: point.is_click,
+        })
+        .collect::<Vec<_>>();
+    let hit_timestamps_ms = hit_timestamps_ms.into_iter().take(4000).collect::<Vec<_>>();
+    if points.is_empty() {
+        anyhow::bail!("mouse path timeline normalization produced no usable points");
+    }
+    let first_point_ms = points.first().map(|point| point.timestamp_ms).unwrap_or(0);
+    let last_point_ms = points.last().map(|point| point.timestamp_ms).unwrap_or(0);
+    let first_hit_ms = hit_timestamps_ms.first().copied().unwrap_or(0);
+    let last_hit_ms = hit_timestamps_ms.last().copied().unwrap_or(0);
+    log::info!(
+        "hub_sync: mouse path upload payload session='{}' points={} hits={} offset_ms={} video_offset_ms={} first_point_ms={} last_point_ms={} first_hit_ms={} last_hit_ms={} replay_base_ts={:?}",
+        session_id,
+        points.len(),
+        hit_timestamps_ms.len(),
+        playback_offset_ms,
+        video_offset_ms,
+        first_point_ms,
+        last_point_ms,
+        first_hit_ms,
+        last_hit_ms,
+        replay_base_ts
+    );
 
     let response = CLIENT
         .post(format!(
@@ -1326,6 +1701,8 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
         .json(&MousePathUploadPayload {
             points,
             hit_timestamps_ms,
+            playback_offset_ms,
+            video_offset_ms,
         })
         .send()
         .await
@@ -1339,6 +1716,7 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
         anyhow::bail!("hub mouse path upload returned {status}: {body}");
     }
 
+    crate::stats_db::mark_mouse_path_uploaded(app, session_id, HUB_MOUSE_PATH_SCHEMA_VERSION)?;
     Ok(())
 }
 
@@ -1373,6 +1751,16 @@ fn should_upload_replay_media(
         _ => false,
     };
     Ok(should)
+}
+
+fn should_upload_mouse_path(app: &AppHandle, session_id: &str) -> anyhow::Result<bool> {
+    let Some(state) = crate::stats_db::get_replay_upload_state(app, session_id)? else {
+        return Ok(false);
+    };
+    Ok(
+        state.hub_mouse_path_schema_version < HUB_MOUSE_PATH_SCHEMA_VERSION
+            || state.hub_mouse_path_uploaded_at_unix_ms.is_none(),
+    )
 }
 
 pub(crate) fn normalize_base_url(value: &str) -> String {

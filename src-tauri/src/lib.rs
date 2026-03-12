@@ -1138,10 +1138,60 @@ fn first_nonempty_string(candidates: &[&str]) -> String {
     String::new()
 }
 
+#[derive(Clone)]
+struct CurrentIdentityCacheEntry {
+    cache_key: String,
+    profile: Option<FriendProfile>,
+    cached_at: Instant,
+}
+
+fn current_identity_cache() -> &'static Mutex<Option<CurrentIdentityCacheEntry>> {
+    static CACHE: OnceLock<Mutex<Option<CurrentIdentityCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn cached_current_identity(cache_key: &str, max_age: Duration) -> Option<Option<FriendProfile>> {
+    let Ok(cache) = current_identity_cache().lock() else {
+        return None;
+    };
+    let entry = cache.as_ref()?;
+    if entry.cache_key != cache_key || entry.cached_at.elapsed() > max_age {
+        return None;
+    }
+    Some(entry.profile.clone())
+}
+
+fn store_current_identity_cache(cache_key: String, profile: Option<FriendProfile>) {
+    if let Ok(mut cache) = current_identity_cache().lock() {
+        *cache = Some(CurrentIdentityCacheEntry {
+            cache_key,
+            profile,
+            cached_at: Instant::now(),
+        });
+    }
+}
+
+fn bridge_identity_cache_key(user: &bridge::BridgeCurrentUserProfile) -> String {
+    let linked_count = user.linked_accounts.len();
+    format!(
+        "bridge:{}:{}:{}:{}:{}",
+        user.username.trim(),
+        user.display_name.trim(),
+        user.kovaaks_user_id.trim(),
+        user.steam_id.trim(),
+        linked_count
+    )
+}
+
 async fn resolve_current_identity_profile() -> Option<FriendProfile> {
     if let Some(user) = bridge::current_kovaaks_user().as_ref() {
+        let cache_key = bridge_identity_cache_key(user);
+        if let Some(profile) = cached_current_identity(&cache_key, Duration::from_secs(15)) {
+            return profile;
+        }
         if let Some(user) = friend_profile_from_bridge_user(user) {
             let user = enrich_friend_profile_from_steam(user).await;
+            store_current_identity_cache(cache_key, Some(user.clone()));
             log::info!(
                 "identity: resolved current user from bridge username='{}' steam_id='{}'",
                 user.username,
@@ -1151,8 +1201,6 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
         }
     }
 
-    log::info!("identity: no live bridge user snapshot; falling back to Steam lookup");
-
     let steam_id = match steam_integration::get_active_steam_id() {
         Some(value) => value,
         None => {
@@ -1160,6 +1208,12 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
             return None;
         }
     };
+    let cache_key = format!("steam:{steam_id}");
+    if let Some(profile) = cached_current_identity(&cache_key, Duration::from_secs(30)) {
+        return profile;
+    }
+
+    log::info!("identity: no live bridge user snapshot; falling back to Steam lookup");
 
     let steam = match steam_api::resolve_steam_user(&steam_id).await {
         Ok(profile) => profile,
@@ -1179,6 +1233,7 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
         bridge_managed: false,
     };
 
+    store_current_identity_cache(cache_key, Some(profile.clone()));
     log::info!(
         "identity: resolved fallback current user username='{}' steam_id='{}'",
         profile.username,
@@ -1194,16 +1249,7 @@ fn get_live_friend_scores() -> Option<bridge::BridgeFriendScoresSnapshot> {
 
 #[tauri::command]
 async fn get_current_kovaaks_user() -> Option<FriendProfile> {
-    let profile = resolve_current_identity_profile().await;
-    match profile.as_ref() {
-        Some(profile) => log::info!(
-            "vsmode: get_current_kovaaks_user -> username='{}' steam_id='{}'",
-            profile.username,
-            profile.steam_id
-        ),
-        None => log::info!("vsmode: get_current_kovaaks_user -> none"),
-    }
-    profile
+    resolve_current_identity_profile().await
 }
 
 /// Look up a user and persist them as a friend.
@@ -2169,6 +2215,7 @@ pub fn run() {
                             }
                         }
                         hub_sync::queue_pending_session_sync(&app_handle);
+                        hub_sync::queue_pending_mouse_path_sync(&app_handle);
                     });
             }
             {
@@ -2177,6 +2224,7 @@ pub fn run() {
                     .name("hub-sync-pending".into())
                     .spawn(move || loop {
                         hub_sync::queue_pending_session_sync(&app_handle);
+                        hub_sync::queue_pending_mouse_path_sync(&app_handle);
                         std::thread::sleep(Duration::from_secs(300));
                     });
             }

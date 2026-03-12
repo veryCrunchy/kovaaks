@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 16;
+const SCHEMA_VERSION: i32 = 17;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -23,6 +23,8 @@ pub struct ReplayUploadState {
     pub hub_media_uploaded_at_unix_ms: Option<u64>,
     pub hub_media_schema_version: u32,
     pub hub_media_uploaded_quality: Option<String>,
+    pub hub_mouse_path_uploaded_at_unix_ms: Option<u64>,
+    pub hub_mouse_path_schema_version: u32,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -79,14 +81,16 @@ pub fn upsert_replay_asset(app: &AppHandle, record: &ReplayAssetRecord<'_>) -> R
             positions_count,
             metrics_count,
             frames_count,
-            has_run_snapshot,
-            is_favorite,
-            hub_media_uploaded_at_unix_ms,
-            hub_media_schema_version,
-            hub_media_uploaded_quality,
-            updated_at_unix_ms
-        )
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, NULL, ?7)
+                has_run_snapshot,
+                is_favorite,
+                hub_media_uploaded_at_unix_ms,
+                hub_media_schema_version,
+                hub_media_uploaded_quality,
+                hub_mouse_path_uploaded_at_unix_ms,
+                hub_mouse_path_schema_version,
+                updated_at_unix_ms
+            )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, NULL, NULL, 0, ?7)
         ON CONFLICT(session_id) DO UPDATE SET
             file_path = excluded.file_path,
             positions_count = excluded.positions_count,
@@ -153,6 +157,25 @@ pub fn mark_replay_media_uploaded(
     Ok(())
 }
 
+pub fn mark_mouse_path_uploaded(
+    app: &AppHandle,
+    session_id: &str,
+    schema_version: u32,
+) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        UPDATE replay_assets
+        SET hub_mouse_path_uploaded_at_unix_ms = ?2,
+            hub_mouse_path_schema_version = ?3,
+            updated_at_unix_ms = ?2
+        WHERE session_id = ?1
+        ",
+        params![session_id, current_unix_ms(), schema_version as i64],
+    )?;
+    Ok(())
+}
+
 pub fn clear_replay_media_upload_marks(app: &AppHandle) -> Result<()> {
     let conn = connect(app)?;
     conn.execute(
@@ -167,6 +190,47 @@ pub fn clear_replay_media_upload_marks(app: &AppHandle) -> Result<()> {
     Ok(())
 }
 
+pub fn clear_mouse_path_upload_marks(app: &AppHandle) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        UPDATE replay_assets
+        SET hub_mouse_path_uploaded_at_unix_ms = NULL,
+            hub_mouse_path_schema_version = 0
+        ",
+        [],
+    )?;
+    Ok(())
+}
+
+pub fn get_pending_mouse_path_upload_session_ids(
+    app: &AppHandle,
+    offset: usize,
+    limit: usize,
+    current_schema_version: u32,
+) -> Result<Vec<String>> {
+    let conn = connect(app)?;
+    let mut stmt = conn.prepare(
+        "
+        SELECT session_id
+        FROM replay_assets
+        WHERE positions_count > 0
+          AND (
+                hub_mouse_path_uploaded_at_unix_ms IS NULL
+                OR COALESCE(hub_mouse_path_schema_version, 0) < ?3
+              )
+        ORDER BY updated_at_unix_ms DESC, session_id DESC
+        LIMIT ?1 OFFSET ?2
+        ",
+    )?;
+    let rows = stmt.query_map(
+        params![limit as i64, offset as i64, current_schema_version as i64],
+        |row| row.get::<_, String>(0),
+    )?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
 pub fn get_replay_upload_state(
     app: &AppHandle,
     session_id: &str,
@@ -178,7 +242,9 @@ pub fn get_replay_upload_state(
             is_favorite,
             hub_media_uploaded_at_unix_ms,
             COALESCE(hub_media_schema_version, 0),
-            hub_media_uploaded_quality
+            hub_media_uploaded_quality,
+            hub_mouse_path_uploaded_at_unix_ms,
+            COALESCE(hub_mouse_path_schema_version, 0)
         FROM replay_assets
         WHERE session_id = ?1
         ",
@@ -191,6 +257,10 @@ pub fn get_replay_upload_state(
                     .map(|value| value as u64),
                 hub_media_schema_version: row.get::<_, i64>(2)? as u32,
                 hub_media_uploaded_quality: row.get::<_, Option<String>>(3)?,
+                hub_mouse_path_uploaded_at_unix_ms: row
+                    .get::<_, Option<i64>>(4)?
+                    .map(|value| value as u64),
+                hub_mouse_path_schema_version: row.get::<_, i64>(5)? as u32,
             })
         },
     )
@@ -549,6 +619,8 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
                 hub_media_uploaded_at_unix_ms INTEGER,
                 hub_media_schema_version INTEGER NOT NULL DEFAULT 0,
                 hub_media_uploaded_quality TEXT,
+                hub_mouse_path_uploaded_at_unix_ms INTEGER,
+                hub_mouse_path_schema_version INTEGER NOT NULL DEFAULT 0,
                 updated_at_unix_ms INTEGER NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_replay_assets_updated_at ON replay_assets(updated_at_unix_ms);
@@ -979,6 +1051,22 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
             for statement in
                 ["ALTER TABLE session_run_summaries ADD COLUMN started_at_bridge_ts_ms INTEGER;"]
             {
+                if let Err(error) = tx.execute_batch(statement) {
+                    if !migration_already_applied(&error) {
+                        return Err(error.into());
+                    }
+                }
+            }
+            Ok(())
+        })?;
+    }
+
+    if user_version < 17 {
+        run_schema_migration(conn, 17, |tx| {
+            for statement in [
+                "ALTER TABLE replay_assets ADD COLUMN hub_mouse_path_uploaded_at_unix_ms INTEGER;",
+                "ALTER TABLE replay_assets ADD COLUMN hub_mouse_path_schema_version INTEGER NOT NULL DEFAULT 0;",
+            ] {
                 if let Err(error) = tx.execute_batch(statement) {
                     if !migration_already_applied(&error) {
                         return Err(error.into());
