@@ -1705,6 +1705,32 @@ function AppearanceSection({
     return overrides[entry.key] || (palette?.[entry.paletteField] as string | null) || "";
   }
 
+  // Strip to 6-char RGB for use with <input type="color"> (no alpha support)
+  function hexTo6(hex: string): string {
+    const clean = hex.replace("#", "");
+    return clean.length >= 6 ? `#${clean.slice(0, 6)}` : "#888888";
+  }
+
+  // Convert 6 or 8-char hex to a CSS-ready rgba() or hex string for display
+  function hexToCss(hex: string): string {
+    const clean = hex.replace("#", "");
+    if (clean.length === 8) {
+      const r = parseInt(clean.slice(0, 2), 16);
+      const g = parseInt(clean.slice(2, 4), 16);
+      const b = parseInt(clean.slice(4, 6), 16);
+      const a = (parseInt(clean.slice(6, 8), 16) / 255).toFixed(3);
+      return `rgba(${r},${g},${b},${a})`;
+    }
+    return hex;
+  }
+
+  // Extract alpha percentage from 6 or 8-char hex (100 if no alpha byte)
+  function hexAlphaPct(hex: string): number {
+    const clean = hex.replace("#", "");
+    if (clean.length !== 8) return 100;
+    return Math.round((parseInt(clean.slice(6, 8), 16) / 255) * 100);
+  }
+
   function setColorOverride(key: string, hex: string) {
     const next = { ...overrides, [key]: hex };
     update("palette_color_overrides", next);
@@ -1848,7 +1874,10 @@ function AppearanceSection({
               {PALETTE_ENTRIES.filter((e) => e.group === group).map((entry) => {
                 const hex = effectiveHex(entry);
                 const isOverridden = !!overrides[entry.key];
-                const validHex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#888888";
+                const hasHex = /^#[0-9a-fA-F]{6,8}$/.test(hex);
+                const pickerHex = hasHex ? hexTo6(hex) : "#888888";
+                const cssColor = hasHex ? hexToCss(hex) : "rgba(136,136,136,0.5)";
+                const alphaPct = hasHex ? hexAlphaPct(hex) : 100;
                 return (
                   <div
                     key={entry.key}
@@ -1862,28 +1891,41 @@ function AppearanceSection({
                       border: `1px solid ${isOverridden ? C.accentBorder : "transparent"}`,
                     }}
                   >
-                    <input
-                      type="color"
-                      value={validHex}
-                      onChange={(e) => setColorOverride(entry.key, e.target.value)}
-                      title={entry.key}
-                      style={{
-                        width: 28,
-                        height: 28,
-                        borderRadius: 5,
+                    {/* Swatch + picker — stacked so the swatch previews actual alpha */}
+                    <div style={{ position: "relative", width: 28, height: 28, flexShrink: 0 }}>
+                      {/* Checkerboard background shows through when alpha < 1 */}
+                      <div style={{
+                        position: "absolute", inset: 0, borderRadius: 5,
+                        backgroundImage: "linear-gradient(45deg,#555 25%,transparent 25%),linear-gradient(-45deg,#555 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#555 75%),linear-gradient(-45deg,transparent 75%,#555 75%)",
+                        backgroundSize: "6px 6px",
+                        backgroundPosition: "0 0,0 3px,3px -3px,-3px 0",
+                      }} />
+                      <div style={{
+                        position: "absolute", inset: 0, borderRadius: 5,
+                        background: cssColor,
                         border: `1px solid ${C.border}`,
-                        background: "none",
-                        cursor: "pointer",
-                        padding: 2,
-                        flexShrink: 0,
-                      }}
-                    />
+                      }} />
+                      <input
+                        type="color"
+                        value={pickerHex}
+                        onChange={(e) => setColorOverride(entry.key, e.target.value)}
+                        title={`${entry.key} — click to override`}
+                        style={{
+                          position: "absolute", inset: 0,
+                          width: "100%", height: "100%",
+                          opacity: 0, cursor: "pointer",
+                        }}
+                      />
+                    </div>
                     <div style={{ flex: 1, minWidth: 0 }}>
                       <div style={{ fontSize: 11, color: isOverridden ? C.accent : C.textMuted, fontWeight: isOverridden ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                         {entry.label}
                       </div>
-                      <div style={{ fontSize: 9, color: C.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>
-                        {validHex.toUpperCase()}
+                      <div style={{ fontSize: 9, color: C.textFaint, fontFamily: "'JetBrains Mono', monospace", display: "flex", gap: 4 }}>
+                        <span>{pickerHex.toUpperCase()}</span>
+                        {alphaPct < 100 && (
+                          <span style={{ color: C.textFaint, opacity: 0.7 }}>{alphaPct}%</span>
+                        )}
                       </div>
                     </div>
                     {isOverridden && (

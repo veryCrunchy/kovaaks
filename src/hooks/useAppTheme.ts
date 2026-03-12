@@ -27,30 +27,42 @@ interface KovaaksPalette {
   path_used: string | null;
 }
 
-function hexToRgb(hex: string): { r: number; g: number; b: number } | null {
+/** Parses 6-char (#RRGGBB) or 8-char (#RRGGBBAA) hex. Alpha defaults to 1. */
+function hexToRgba(hex: string): { r: number; g: number; b: number; a: number } | null {
   const clean = hex.replace("#", "");
-  if (clean.length !== 6) return null;
+  if (clean.length !== 6 && clean.length !== 8) return null;
   return {
     r: parseInt(clean.slice(0, 2), 16),
     g: parseInt(clean.slice(2, 4), 16),
     b: parseInt(clean.slice(4, 6), 16),
+    a: clean.length === 8 ? parseInt(clean.slice(6, 8), 16) / 255 : 1,
   };
 }
 
+/**
+ * Sets a CSS color var plus its companion -rgb var.
+ * Uses rgba() when alpha < 1 so semi-transparent palette entries stay soft.
+ */
 function setVar(root: HTMLElement, name: string, hex: string) {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return;
-  const { r, g, b } = rgb;
-  root.style.setProperty(name, hex);
+  const rgba = hexToRgba(hex);
+  if (!rgba) return;
+  const { r, g, b, a } = rgba;
+  const colorVal =
+    a < 0.999
+      ? `rgba(${r}, ${g}, ${b}, ${a.toFixed(3)})`
+      : `#${hex.replace("#", "").slice(0, 6)}`;
+  root.style.setProperty(name, colorVal);
   root.style.setProperty(`${name}-rgb`, `${r}, ${g}, ${b}`);
 }
 
+/** Accent is always fully opaque — alpha from Palette.ini is stripped. */
 function applyAccent(hex: string) {
-  const rgb = hexToRgb(hex);
-  if (!rgb) return;
-  const { r, g, b } = rgb;
+  const rgba = hexToRgba(hex);
+  if (!rgba) return;
+  const { r, g, b } = rgba;
+  const solidHex = `#${hex.replace("#", "").slice(0, 6)}`;
   const root = document.documentElement;
-  root.style.setProperty("--am-accent", hex);
+  root.style.setProperty("--am-accent", solidHex);
   root.style.setProperty("--am-accent-rgb", `${r}, ${g}, ${b}`);
   root.style.setProperty("--am-accent-dim", `rgba(${r}, ${g}, ${b}, 0.12)`);
   root.style.setProperty("--am-accent-border", `rgba(${r}, ${g}, ${b}, 0.25)`);
@@ -59,25 +71,46 @@ function applyAccent(hex: string) {
 
 function applyPalette(palette: KovaaksPalette) {
   const root = document.documentElement;
-  if (palette.primary_hex) applyAccent(palette.primary_hex);
-  if (palette.secondary_hex) setVar(root, "--am-surface", palette.secondary_hex);
-  if (palette.background_hex) setVar(root, "--am-bg-deep", palette.background_hex);
-  if (palette.special_call_to_action_hex) setVar(root, "--am-success", palette.special_call_to_action_hex);
-  if (palette.hud_enemy_health_bar_hex) setVar(root, "--am-danger", palette.hud_enemy_health_bar_hex);
-  if (palette.hud_team_health_bar_hex) setVar(root, "--am-team", palette.hud_team_health_bar_hex);
-  if (palette.hud_health_bar_hex) setVar(root, "--am-health", palette.hud_health_bar_hex);
-  if (palette.hud_speed_bar_hex) setVar(root, "--am-speed", palette.hud_speed_bar_hex);
-  if (palette.hud_jet_pack_bar_hex) setVar(root, "--am-gold", palette.hud_jet_pack_bar_hex);
-  if (palette.hud_weapon_ammo_bar_hex) setVar(root, "--am-teal", palette.hud_weapon_ammo_bar_hex);
+  if (palette.primary_hex)              applyAccent(palette.primary_hex);
+  if (palette.secondary_hex)            setVar(root, "--am-surface",      palette.secondary_hex);
+  if (palette.background_hex)           setVar(root, "--am-bg-deep",      palette.background_hex);
+  if (palette.special_call_to_action_hex) setVar(root, "--am-success",    palette.special_call_to_action_hex);
+  if (palette.hud_enemy_health_bar_hex) setVar(root, "--am-danger",       palette.hud_enemy_health_bar_hex);
+  if (palette.hud_team_health_bar_hex)  setVar(root, "--am-team",         palette.hud_team_health_bar_hex);
+  if (palette.hud_health_bar_hex)       setVar(root, "--am-health",       palette.hud_health_bar_hex);
+  if (palette.hud_speed_bar_hex)        setVar(root, "--am-speed",        palette.hud_speed_bar_hex);
+  if (palette.hud_jet_pack_bar_hex)     setVar(root, "--am-gold",         palette.hud_jet_pack_bar_hex);
+  if (palette.hud_weapon_ammo_bar_hex)  setVar(root, "--am-teal",         palette.hud_weapon_ammo_bar_hex);
   if (palette.hud_weapon_change_bar_hex) setVar(root, "--am-teal-bright", palette.hud_weapon_change_bar_hex);
-  if (palette.hud_background_hex) setVar(root, "--am-hud-bg", palette.hud_background_hex);
-  if (palette.hud_bar_background_hex) setVar(root, "--am-bar-bg", palette.hud_bar_background_hex);
-  if (palette.special_text_hex) setVar(root, "--am-text-sub", palette.special_text_hex);
-  if (palette.info_dodge_hex) setVar(root, "--am-info-dodge", palette.info_dodge_hex);
-  if (palette.info_weapon_hex) setVar(root, "--am-info-weapon", palette.info_weapon_hex);
-  if (palette.hud_countdown_timer_hex) setVar(root, "--am-countdown", palette.hud_countdown_timer_hex);
-  if (palette.challenge_graph_hex) setVar(root, "--am-graph", palette.challenge_graph_hex);
+  if (palette.hud_background_hex)       setVar(root, "--am-hud-bg",       palette.hud_background_hex);
+  if (palette.hud_bar_background_hex)   setVar(root, "--am-bar-bg",       palette.hud_bar_background_hex);
+  if (palette.special_text_hex)         setVar(root, "--am-text-sub",     palette.special_text_hex);
+  if (palette.info_dodge_hex)           setVar(root, "--am-info-dodge",   palette.info_dodge_hex);
+  if (palette.info_weapon_hex)          setVar(root, "--am-info-weapon",  palette.info_weapon_hex);
+  if (palette.hud_countdown_timer_hex)  setVar(root, "--am-countdown",    palette.hud_countdown_timer_hex);
+  if (palette.challenge_graph_hex)      setVar(root, "--am-graph",        palette.challenge_graph_hex);
 }
+
+const KEY_TO_VAR: Record<string, string> = {
+  Primary:             "--am-accent",
+  Background:          "--am-bg-deep",
+  Secondary:           "--am-surface",
+  SpecialCallToAction: "--am-success",
+  SpecialText:         "--am-text-sub",
+  HudBackground:       "--am-hud-bg",
+  HudBarBackground:    "--am-bar-bg",
+  HudEnemyHealthBar:   "--am-danger",
+  HudTeamHealthBar:    "--am-team",
+  HudHealthBar:        "--am-health",
+  HudSpeedBar:         "--am-speed",
+  HudJetPackBar:       "--am-gold",
+  HudWeaponAmmoBar:    "--am-teal",
+  HudWeaponChangeBar:  "--am-teal-bright",
+  HudCountdownTimer:   "--am-countdown",
+  ChallengeGraph:      "--am-graph",
+  InfoDodge:           "--am-info-dodge",
+  InfoWeapon:          "--am-info-weapon",
+};
 
 function applyHudOpacity(settings: AppSettings) {
   const opacity = typeof settings.hud_opacity === "number"
@@ -109,7 +142,7 @@ async function loadAndApplyTheme() {
     return;
   }
 
-  // mode === "kovaaks" — read from Palette.ini then layer overrides
+  // mode === "kovaaks" — read palette then layer overrides on top
   try {
     const palette = await invoke<KovaaksPalette>("read_kovaaks_palette");
     applyPalette(palette);
@@ -118,31 +151,11 @@ async function loadAndApplyTheme() {
     applyAccent(DEFAULT_ACCENT);
   }
 
-  // Apply per-color overrides on top (stored in settings, also written to Palette.ini)
+  // Per-color overrides (6-char hex from picker, always solid — no alpha)
   const overrides = settings.palette_color_overrides ?? {};
   const root = document.documentElement;
-  const KEY_TO_VAR: Record<string, string> = {
-    Primary:             "--am-accent",
-    Background:          "--am-bg-deep",
-    Secondary:           "--am-surface",
-    SpecialCallToAction: "--am-success",
-    SpecialText:         "--am-text-sub",
-    HudBackground:       "--am-hud-bg",
-    HudBarBackground:    "--am-bar-bg",
-    HudEnemyHealthBar:   "--am-danger",
-    HudTeamHealthBar:    "--am-team",
-    HudHealthBar:        "--am-health",
-    HudSpeedBar:         "--am-speed",
-    HudJetPackBar:       "--am-gold",
-    HudWeaponAmmoBar:    "--am-teal",
-    HudWeaponChangeBar:  "--am-teal-bright",
-    HudCountdownTimer:   "--am-countdown",
-    ChallengeGraph:      "--am-graph",
-    InfoDodge:           "--am-info-dodge",
-    InfoWeapon:          "--am-info-weapon",
-  };
   for (const [key, hex] of Object.entries(overrides)) {
-    if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) continue;
+    if (!hex || !/^#[0-9a-fA-F]{6,8}$/.test(hex)) continue;
     const cssVar = KEY_TO_VAR[key];
     if (!cssVar) continue;
     if (cssVar === "--am-accent") {

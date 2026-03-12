@@ -66,13 +66,18 @@ fn parse_component(inner: &str, key: &str) -> Option<u8> {
     rest[..end].trim().parse().ok()
 }
 
-fn bgr_to_hex(r: u8, g: u8, b: u8) -> String {
-    format!("#{:02X}{:02X}{:02X}", r, g, b)
+/// Encodes RGBA as `#RRGGBBAA`. When alpha is 255 the AA suffix is still included
+/// so callers can always rely on a fixed-length 9-char string.
+fn bgra_to_hex(r: u8, g: u8, b: u8, a: u8) -> String {
+    format!("#{:02X}{:02X}{:02X}{:02X}", r, g, b, a)
 }
 
+/// Accepts `#RRGGBB` (6 hex digits) or `#RRGGBBAA` (8 hex digits).
+/// Returns (r, g, b) only — used by the write-back path which always keeps
+/// the existing alpha from Palette.ini.
 fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
     let clean = hex.trim_start_matches('#');
-    if clean.len() != 6 {
+    if clean.len() < 6 {
         return None;
     }
     let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
@@ -141,7 +146,7 @@ pub fn write_palette_colors(
 }
 
 /// Parses a single palette entry like `Primary, (B=22,G=104,R=237,A=255)`.
-fn parse_entry(entry: &str) -> Option<(String, u8, u8, u8)> {
+fn parse_entry(entry: &str) -> Option<(String, u8, u8, u8, u8)> {
     let comma = entry.find(',')?;
     let name = entry[..comma].trim().to_string();
     let paren = entry.find('(')?;
@@ -149,11 +154,12 @@ fn parse_entry(entry: &str) -> Option<(String, u8, u8, u8)> {
     let r = parse_component(inner, "R")?;
     let g = parse_component(inner, "G")?;
     let b = parse_component(inner, "B")?;
-    Some((name, r, g, b))
+    let a = parse_component(inner, "A").unwrap_or(255);
+    Some((name, r, g, b, a))
 }
 
 /// Parses all `(Name, (B=xx,G=xx,R=xx,A=xx))` entries from the mPalette line.
-fn parse_mpalette_line(line: &str) -> Vec<(String, u8, u8, u8)> {
+fn parse_mpalette_line(line: &str) -> Vec<(String, u8, u8, u8, u8)> {
     let mut entries = Vec::new();
     // Find the outer double-paren start: mPalette=((…))
     let Some(start_idx) = line.find("((") else {
@@ -176,8 +182,8 @@ fn parse_mpalette_line(line: &str) -> Vec<(String, u8, u8, u8)> {
                 depth -= 1;
                 if depth == 0 {
                     let entry_str: String = chars[entry_start + 1..i].iter().collect();
-                    if let Some(entry) = parse_entry(&entry_str) {
-                        entries.push(entry);
+                    if let Some((name, r, g, b, a)) = parse_entry(&entry_str) {
+                        entries.push((name, r, g, b, a));
                     }
                 }
             }
@@ -210,8 +216,8 @@ pub fn read_palette(path: &str) -> KovaaksPalette {
         if !trimmed.starts_with("mPalette=") {
             continue;
         }
-        for (name, r, g, b) in parse_mpalette_line(trimmed) {
-            let hex = bgr_to_hex(r, g, b);
+        for (name, r, g, b, a) in parse_mpalette_line(trimmed) {
+            let hex = bgra_to_hex(r, g, b, a);
             match name.as_str() {
                 "Primary" => palette.primary_hex = Some(hex),
                 "Secondary" => palette.secondary_hex = Some(hex),
