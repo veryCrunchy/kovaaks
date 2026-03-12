@@ -510,6 +510,65 @@ function Invoke-RobocopyMirror([string]$SourceDir, [string]$DestinationDir, [str
   $global:LASTEXITCODE = 0
 }
 
+function Remove-DirectoryRobust([string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue) -or -not (Test-Path -LiteralPath $PathValue)) {
+    return
+  }
+
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      Remove-Item -LiteralPath $PathValue -Recurse -Force -ErrorAction Stop
+    } catch {
+    }
+    if (-not (Test-Path -LiteralPath $PathValue)) {
+      return
+    }
+
+    try {
+      & cmd.exe /d /c "rmdir /s /q `"$PathValue`"" 1>$null 2>$null
+    } catch {
+    }
+    if (-not (Test-Path -LiteralPath $PathValue)) {
+      return
+    }
+
+    $remainingItems = @(Get-ChildItem -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue)
+    if ($remainingItems.Count -eq 0) {
+      return
+    }
+
+    Start-Sleep -Milliseconds (200 * $attempt)
+  }
+
+  if (Test-Path -LiteralPath $PathValue) {
+    $remainingItems = @(Get-ChildItem -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue)
+    if ($remainingItems.Count -eq 0) {
+      return
+    }
+    throw "Failed to remove directory '$PathValue'."
+  }
+}
+
+function Clear-DirectoryContentsRobust([string]$PathValue) {
+  if ([string]::IsNullOrWhiteSpace($PathValue) -or -not (Test-Path -LiteralPath $PathValue)) {
+    return
+  }
+
+  $items = @(Get-ChildItem -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue)
+  foreach ($item in $items) {
+    if ($item.PSIsContainer) {
+      Remove-DirectoryRobust -PathValue $item.FullName
+      continue
+    }
+    Remove-Item -LiteralPath $item.FullName -Force -ErrorAction SilentlyContinue
+  }
+
+  $remainingItems = @(Get-ChildItem -LiteralPath $PathValue -Force -ErrorAction SilentlyContinue)
+  if ($remainingItems.Count -ne 0) {
+    throw "Failed to clear directory contents for '$PathValue'."
+  }
+}
+
 function Sync-Ue4ssPayloadToTauriTargets([string]$RepoRoot, [string]$TargetTriple) {
   $src = Join-Path $RepoRoot "src-tauri/ue4ss"
   if (-not (Test-Path $src -PathType Container)) {
@@ -976,13 +1035,21 @@ if ($script:UseCache) {
 if ($ClearCache) {
   Write-Host "==> Clearing pipeline cache at $script:PipelineCacheDir"
   if (Test-Path $script:PipelineCacheDir) {
-    Remove-Item -Path $script:PipelineCacheDir -Recurse -Force
+    try {
+      Clear-DirectoryContentsRobust -PathValue $script:PipelineCacheDir
+    } catch {
+      Write-Warning "Unable to fully clear pipeline cache dir '$script:PipelineCacheDir'. Continuing."
+    }
   }
   if ($originalRepoRoot.StartsWith("\\")) {
     $stableStagingRoot = Get-StableMsvcStagingRoot -RepoIdentityPath $originalRepoRoot
     if (Test-Path $stableStagingRoot) {
       Write-Host "==> Clearing stable MSVC staging root at $stableStagingRoot"
-      Remove-Item -Path $stableStagingRoot -Recurse -Force
+      try {
+        Clear-DirectoryContentsRobust -PathValue $stableStagingRoot
+      } catch {
+        Write-Warning "Unable to fully clear stable MSVC staging root '$stableStagingRoot'. Continuing."
+      }
     }
   }
 }
@@ -1118,10 +1185,15 @@ if (-not $SkipModBuild) {
       $stagingRoot = Get-StableMsvcStagingRoot -RepoIdentityPath $originalRepoRoot
       $buildRootForMod = Join-Path $stagingRoot "repo"
       $modSourceDir = Join-Path $buildRootForMod "ue4ss-mod"
-      $modBuildDir = Join-Path $modSourceDir "build"
+      $modBuildDir = Join-Path $stagingRoot ("build\{0}-{1}" -f $ModConfiguration.ToLowerInvariant(), $modKey.Substring(0, 12))
 
       New-Item -ItemType Directory -Path $buildRootForMod -Force | Out-Null
+      New-Item -ItemType Directory -Path (Split-Path -Parent $modBuildDir) -Force | Out-Null
       Write-Host "==> Using stable MSVC staging root: $stagingRoot"
+      if ($ClearCache -and (Test-Path $modBuildDir)) {
+        Write-Host "==> Clearing staged ue4ss-mod build dir at $modBuildDir"
+        Remove-DirectoryRobust -PathValue $modBuildDir
+      }
 
       $sourceRepoForCopy = $originalRepoRoot
       $sdkSourceForCopy = Convert-ToMappedRepoPath -PathValue $Ue4ssSdkDir -OriginalRepoRoot $repoRoot -MappedRepoRoot $originalRepoRoot

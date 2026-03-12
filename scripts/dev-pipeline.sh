@@ -358,6 +358,9 @@ build_mod_with_windows_msvc() {
     -SkipStage
     -SkipOverlayBuild
   )
+  if [[ "$CLEAR_CACHE" -eq 1 ]]; then
+    ps_args+=(-ClearCache)
+  fi
 
   run_logged_step "msvc-mod-build" powershell.exe "${ps_args[@]}"
 }
