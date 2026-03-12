@@ -1,5 +1,8 @@
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
+use std::thread::{self, JoinHandle};
+use std::time::Duration;
 use std::{ffi::c_void, ptr};
 
 static CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -20,6 +23,10 @@ const FILE_SHARE_NONE: u32 = 0x0000_0000;
 const OPEN_EXISTING: u32 = 3;
 const FILE_ATTRIBUTE_NORMAL: u32 = 0x0000_0080;
 const ERROR_ACCESS_DENIED: u32 = 5;
+const PIPE_NOWAIT: u32 = 0x0000_0001;
+const EVENT_QUEUE_MAX_LEN: usize = 4096;
+const EVENT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const EVENT_RETRY_INTERVAL_MS: u64 = 50;
 
 type Handle = *mut c_void;
 const INVALID_HANDLE_VALUE: Handle = -1isize as Handle;
@@ -64,9 +71,40 @@ extern "system" {
         lp_in_buffer_size: *mut u32,
         lp_max_instances: *mut u32,
     ) -> i32;
+    fn SetNamedPipeHandleState(
+        h_named_pipe: Handle,
+        lp_mode: *mut u32,
+        lp_max_collection_count: *mut u32,
+        lp_collect_data_timeout: *mut u32,
+    ) -> i32;
     fn WaitNamedPipeA(lp_named_pipe_name: *const u8, n_time_out: u32) -> i32;
     fn CloseHandle(h_object: Handle) -> i32;
     fn GetLastError() -> u32;
+}
+
+struct EventQueueState {
+    queue: VecDeque<String>,
+    queued_bytes: usize,
+    stop: bool,
+}
+
+struct EventQueue {
+    state: Mutex<EventQueueState>,
+    wake: Condvar,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+fn event_queue() -> &'static EventQueue {
+    static QUEUE: OnceLock<EventQueue> = OnceLock::new();
+    QUEUE.get_or_init(|| EventQueue {
+        state: Mutex::new(EventQueueState {
+            queue: VecDeque::new(),
+            queued_bytes: 0,
+            stop: false,
+        }),
+        wake: Condvar::new(),
+        worker: Mutex::new(None),
+    })
 }
 
 fn command_buffer() -> &'static Mutex<Vec<u8>> {
@@ -117,7 +155,130 @@ fn close_event_pipe() {
     }
 }
 
+fn enable_event_pipe_nowait(handle: Handle) {
+    let mut mode = PIPE_NOWAIT;
+    let ok = unsafe {
+        SetNamedPipeHandleState(
+            handle,
+            &mut mode,
+            ptr::null_mut(),
+            ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        LAST_ERROR.store(unsafe { GetLastError() }, Ordering::Release);
+    }
+}
+
+fn ensure_event_worker() {
+    let queue = event_queue();
+    let mut worker = queue.worker.lock().unwrap_or_else(|err| err.into_inner());
+    if worker.is_some() {
+        return;
+    }
+
+    {
+        let mut state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.stop = false;
+    }
+
+    *worker = Some(thread::spawn(event_worker_loop));
+}
+
+fn stop_event_worker() {
+    let queue = event_queue();
+    {
+        let mut state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+        state.stop = true;
+        state.queue.clear();
+        state.queued_bytes = 0;
+        queue.wake.notify_all();
+    }
+
+    close_event_pipe();
+
+    let worker = queue
+        .worker
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .take();
+    if let Some(worker) = worker {
+        let _ = worker.join();
+    }
+}
+
+fn requeue_event_front(payload: String) {
+    let queue = event_queue();
+    let mut state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+    if state.stop {
+        return;
+    }
+
+    let payload_len = payload.len();
+    while (state.queue.len() >= EVENT_QUEUE_MAX_LEN
+        || state.queued_bytes.saturating_add(payload_len) > EVENT_QUEUE_MAX_BYTES)
+        && !state.queue.is_empty()
+    {
+        if let Some(dropped) = state.queue.pop_back() {
+            state.queued_bytes = state.queued_bytes.saturating_sub(dropped.len());
+        }
+    }
+
+    if state.queue.len() >= EVENT_QUEUE_MAX_LEN
+        || state.queued_bytes.saturating_add(payload_len) > EVENT_QUEUE_MAX_BYTES
+    {
+        return;
+    }
+
+    state.queued_bytes += payload_len;
+    state.queue.push_front(payload);
+    queue.wake.notify_one();
+}
+
+fn wait_for_event_retry() {
+    let queue = event_queue();
+    let state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+    if state.stop {
+        return;
+    }
+    let _ = queue
+        .wake
+        .wait_timeout(state, Duration::from_millis(EVENT_RETRY_INTERVAL_MS));
+}
+
+fn event_worker_loop() {
+    loop {
+        let payload = {
+            let queue = event_queue();
+            let mut state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+            loop {
+                if state.stop {
+                    return;
+                }
+                if let Some(payload) = state.queue.pop_front() {
+                    state.queued_bytes = state.queued_bytes.saturating_sub(payload.len());
+                    break payload;
+                }
+                state = queue.wake.wait(state).unwrap_or_else(|err| err.into_inner());
+            }
+        };
+
+        if !is_event_connected() && connect_event().is_err() {
+            requeue_event_front(payload);
+            wait_for_event_retry();
+            continue;
+        }
+
+        if !write_event_now(&payload) {
+            requeue_event_front(payload);
+            wait_for_event_retry();
+        }
+    }
+}
+
 pub fn connect_event() -> Result<(), String> {
+    ensure_event_worker();
+
     if is_event_connected() {
         return Ok(());
     }
@@ -133,7 +294,7 @@ pub fn connect_event() -> Result<(), String> {
     let handle = unsafe {
         CreateFileA(
             EVENT_PIPE_NAME.as_ptr(),
-            GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES,
             FILE_SHARE_NONE,
             ptr::null_mut(),
             OPEN_EXISTING,
@@ -142,6 +303,7 @@ pub fn connect_event() -> Result<(), String> {
         )
     };
     if handle != INVALID_HANDLE_VALUE && !handle.is_null() {
+        enable_event_pipe_nowait(handle);
         PIPE_HANDLE.store(handle as usize, Ordering::Release);
         CONNECTED.store(true, Ordering::Release);
         LAST_ERROR.store(0, Ordering::Release);
@@ -193,12 +355,13 @@ fn connect_command() -> Result<(), String> {
 }
 
 pub fn connect() -> Result<(), String> {
+    ensure_event_worker();
     connect_event()?;
     connect_command()?;
     Ok(())
 }
 
-pub fn write_event(json: &str) -> bool {
+fn write_event_now(json: &str) -> bool {
     if !CONNECTED.load(Ordering::Acquire) {
         return false;
     }
@@ -233,6 +396,41 @@ pub fn write_event(json: &str) -> bool {
         return false;
     }
 
+    true
+}
+
+pub fn write_event(json: &str) -> bool {
+    ensure_event_worker();
+
+    let queue = event_queue();
+    let mut state = queue.state.lock().unwrap_or_else(|err| err.into_inner());
+    if state.stop {
+        return false;
+    }
+
+    let payload_len = json.len();
+    if payload_len > EVENT_QUEUE_MAX_BYTES {
+        return false;
+    }
+
+    while (state.queue.len() >= EVENT_QUEUE_MAX_LEN
+        || state.queued_bytes.saturating_add(payload_len) > EVENT_QUEUE_MAX_BYTES)
+        && !state.queue.is_empty()
+    {
+        if let Some(dropped) = state.queue.pop_front() {
+            state.queued_bytes = state.queued_bytes.saturating_sub(dropped.len());
+        }
+    }
+
+    if state.queue.len() >= EVENT_QUEUE_MAX_LEN
+        || state.queued_bytes.saturating_add(payload_len) > EVENT_QUEUE_MAX_BYTES
+    {
+        return false;
+    }
+
+    state.queued_bytes += payload_len;
+    state.queue.push_back(json.to_string());
+    queue.wake.notify_one();
     true
 }
 
@@ -396,6 +594,7 @@ pub fn is_connected() -> bool {
 }
 
 pub fn close() {
+    stop_event_worker();
     close_event_pipe();
     close_command_pipe();
 }

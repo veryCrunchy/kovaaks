@@ -77,9 +77,6 @@ fn stamp_json_payload(json: &str) -> String {
 
 fn emit_json(json: &str) -> bool {
     let payload = stamp_json_payload(json);
-    if !pipe::is_event_connected() && pipe::connect_event().is_err() {
-        return false;
-    }
     pipe::write_event(&payload)
 }
 

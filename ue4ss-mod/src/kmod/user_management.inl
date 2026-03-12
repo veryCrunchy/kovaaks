@@ -135,12 +135,14 @@
     uint64_t next_active_leaderboards_widget_resolve_ms_{0};
     uint64_t next_pending_friend_request_prune_ms_{0};
     uint64_t next_user_management_debug_log_ms_{0};
+    uint64_t friend_scores_suspend_until_ms_{0};
     uint64_t last_friend_scores_response_ms_{0};
     std::string last_user_management_debug_message_{};
     std::string last_emitted_user_snapshot_{};
     std::string last_emitted_user_source_{};
     std::string last_emitted_friends_snapshot_{};
     std::string last_sa_http_auth_token_{};
+    std::string last_observed_friend_scores_scenario_{};
     std::string last_friend_scores_scenario_{};
     std::string last_friend_scores_source_{};
     std::string last_emitted_friend_scores_snapshot_{};
@@ -2516,10 +2518,21 @@
             log_user_management(now, "friends leaderboard skipped without active scenario");
             return;
         }
+        if (scenario_name != last_observed_friend_scores_scenario_) {
+            last_observed_friend_scores_scenario_ = scenario_name;
+            friend_scores_suspend_until_ms_ = now + 5000;
+            (void)maybe_emit_persisted_friend_scores_snapshot(scenario_name, 0, now);
+            log_user_management(now, "friends leaderboard cooling down after scenario switch");
+            return;
+        }
+        if (now < friend_scores_suspend_until_ms_) {
+            (void)maybe_emit_persisted_friend_scores_snapshot(scenario_name, 0, now);
+            return;
+        }
         if (now < next_friend_scores_refresh_ms_ && scenario_name == last_friend_scores_scenario_) {
             return;
         }
-        if (!force && is_user_management_live_gameplay_active()) {
+        if (is_user_management_live_gameplay_active()) {
             (void)maybe_emit_persisted_friend_scores_snapshot(scenario_name, 0, now);
             next_friend_scores_refresh_ms_ = now + 15000;
             return;
@@ -2944,7 +2957,7 @@
         if (!force && now < next_user_bridge_refresh_ms_) {
             return;
         }
-        const bool live_gameplay_active = !force && is_user_management_live_gameplay_active();
+        const bool live_gameplay_active = is_user_management_live_gameplay_active();
         next_user_bridge_refresh_ms_ = now + (force ? 1000 : (live_gameplay_active ? 15000 : 5000));
 
         if (live_gameplay_active) {
