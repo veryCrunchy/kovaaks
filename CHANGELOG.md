@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.7.2](https://github.com/veryCrunchy/aimmod/compare/v1.7.1...v1.7.2) (2026-03-12)
+
+
+### Bug Fixes
+
+* **event-pipe:** implement non-blocking event writing and worker management ([4b0d3cc](https://github.com/veryCrunchy/aimmod/commit/4b0d3cc60a39d6905c4dffda4e2e1ede27e0255b))
+* **stats:** reduce hub status refresh interval and add unlisten for hub sync status ([94951b1](https://github.com/veryCrunchy/aimmod/commit/94951b15f13066fee484278ff13c9449b198cbf8))
+
 ## [1.7.1](https://github.com/veryCrunchy/aimmod/compare/v1.7.0...v1.7.1) (2026-03-12)
 
 
