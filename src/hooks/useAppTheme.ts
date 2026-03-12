@@ -109,13 +109,47 @@ async function loadAndApplyTheme() {
     return;
   }
 
-  // mode === "kovaaks" — read from Palette.ini
+  // mode === "kovaaks" — read from Palette.ini then layer overrides
   try {
     const palette = await invoke<KovaaksPalette>("read_kovaaks_palette");
     applyPalette(palette);
     if (!palette.primary_hex) applyAccent(DEFAULT_ACCENT);
   } catch {
     applyAccent(DEFAULT_ACCENT);
+  }
+
+  // Apply per-color overrides on top (stored in settings, also written to Palette.ini)
+  const overrides = settings.palette_color_overrides ?? {};
+  const root = document.documentElement;
+  const KEY_TO_VAR: Record<string, string> = {
+    Primary:             "--am-accent",
+    Background:          "--am-bg-deep",
+    Secondary:           "--am-surface",
+    SpecialCallToAction: "--am-success",
+    SpecialText:         "--am-text-sub",
+    HudBackground:       "--am-hud-bg",
+    HudBarBackground:    "--am-bar-bg",
+    HudEnemyHealthBar:   "--am-danger",
+    HudTeamHealthBar:    "--am-team",
+    HudHealthBar:        "--am-health",
+    HudSpeedBar:         "--am-speed",
+    HudJetPackBar:       "--am-gold",
+    HudWeaponAmmoBar:    "--am-teal",
+    HudWeaponChangeBar:  "--am-teal-bright",
+    HudCountdownTimer:   "--am-countdown",
+    ChallengeGraph:      "--am-graph",
+    InfoDodge:           "--am-info-dodge",
+    InfoWeapon:          "--am-info-weapon",
+  };
+  for (const [key, hex] of Object.entries(overrides)) {
+    if (!hex || !/^#[0-9a-fA-F]{6}$/.test(hex)) continue;
+    const cssVar = KEY_TO_VAR[key];
+    if (!cssVar) continue;
+    if (cssVar === "--am-accent") {
+      applyAccent(hex);
+    } else {
+      setVar(root, cssVar, hex);
+    }
   }
 }
 

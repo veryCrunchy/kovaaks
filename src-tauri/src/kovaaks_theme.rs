@@ -70,6 +70,76 @@ fn bgr_to_hex(r: u8, g: u8, b: u8) -> String {
     format!("#{:02X}{:02X}{:02X}", r, g, b)
 }
 
+fn hex_to_rgb(hex: &str) -> Option<(u8, u8, u8)> {
+    let clean = hex.trim_start_matches('#');
+    if clean.len() != 6 {
+        return None;
+    }
+    let r = u8::from_str_radix(&clean[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&clean[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&clean[4..6], 16).ok()?;
+    Some((r, g, b))
+}
+
+/// Rewrites named entries in a mPalette= line, preserving alpha and key order.
+fn update_mpalette_line(line: &str, colors: &std::collections::HashMap<String, String>) -> String {
+    let mut result = line.to_string();
+    for (name, hex) in colors {
+        let Some((r, g, b)) = hex_to_rgb(hex) else {
+            continue;
+        };
+        let entry_prefix = format!("({},", name);
+        let Some(entry_pos) = result.find(&entry_prefix) else {
+            continue;
+        };
+        let inner_search_start = entry_pos + entry_prefix.len();
+        let Some(rel_paren) = result[inner_search_start..].find('(') else {
+            continue;
+        };
+        let paren_pos = inner_search_start + rel_paren;
+        let Some(rel_close) = result[paren_pos + 1..].find(')') else {
+            continue;
+        };
+        let close_pos = paren_pos + 1 + rel_close;
+        let inner = result[paren_pos + 1..close_pos].to_string();
+        let a = parse_component(&inner, "A").unwrap_or(255);
+        let new_inner = format!("(B={},G={},R={},A={})", b, g, r, a);
+        result.replace_range(paren_pos..=close_pos, &new_inner);
+    }
+    result
+}
+
+/// Writes one or more palette color overrides back into Palette.ini.
+/// Preserves the existing alpha channel and all other colors untouched.
+pub fn write_palette_colors(
+    path: &str,
+    colors: &std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    if path.is_empty() || colors.is_empty() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("could not read {path}: {e}"))?;
+    let trailing_newline = content.ends_with('\n');
+    let new_lines: Vec<String> = content
+        .lines()
+        .map(|line| {
+            if line.trim().starts_with("mPalette=") {
+                update_mpalette_line(line, colors)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect();
+    let mut new_content = new_lines.join("\n");
+    if trailing_newline {
+        new_content.push('\n');
+    }
+    std::fs::write(path, new_content).map_err(|e| format!("could not write {path}: {e}"))?;
+    log::info!("kovaaks_theme: wrote {} color override(s) to {path}", colors.len());
+    Ok(())
+}
+
 /// Parses a single palette entry like `Primary, (B=22,G=104,R=237,A=255)`.
 fn parse_entry(entry: &str) -> Option<(String, u8, u8, u8)> {
     let comma = entry.find(',')?;

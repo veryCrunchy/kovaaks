@@ -771,6 +771,20 @@ fn read_kovaaks_palette(app: AppHandle) -> kovaaks_theme::KovaaksPalette {
     kovaaks_theme::read_palette(&path)
 }
 
+#[tauri::command]
+fn write_kovaaks_palette_colors(
+    app: AppHandle,
+    colors: std::collections::HashMap<String, String>,
+) -> Result<(), String> {
+    let settings = settings::load(&app).unwrap_or_default();
+    let path = if settings.kovaaks_palette_path.trim().is_empty() {
+        kovaaks_theme::default_palette_path()
+    } else {
+        settings.kovaaks_palette_path.trim().to_string()
+    };
+    kovaaks_theme::write_palette_colors(&path, &colors)
+}
+
 // ─── Friend / API commands ─────────────────────────────────────────────────────
 
 /// Persist the username of the friend chosen as battle opponent (pass None to clear).
@@ -802,6 +816,10 @@ fn friend_profile_from_bridge_user(
 ) -> Option<FriendProfile> {
     let username = if !user.username.trim().is_empty() {
         user.username.trim().to_string()
+    } else if !user.display_name.trim().is_empty() {
+        user.display_name.trim().to_string()
+    } else if !user.steam_name.trim().is_empty() {
+        user.steam_name.trim().to_string()
     } else if !user.steam_id.trim().is_empty() {
         user.steam_id.trim().to_string()
     } else {
@@ -1968,6 +1986,7 @@ pub fn run() {
             hub_get_aim_profile,
             hub_get_aim_fingerprint,
             read_kovaaks_palette,
+            write_kovaaks_palette_colors,
             get_friends,
             get_current_kovaaks_user,
             add_friend,

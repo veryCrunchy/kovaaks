@@ -28,12 +28,12 @@ export const SCENARIO_LABELS: Record<string, string> = {
 };
 
 export const C = {
-  // Backgrounds
-  bg:           "#06060e",
-  glass:        "rgba(10, 10, 18, 0.88)",
-  glassDark:    "rgba(5, 5, 12, 0.94)",
-  surface:      "rgba(255,255,255,0.04)",
-  surfaceHover: "rgba(255,255,255,0.07)",
+  // Backgrounds — pulled from KovaaK's palette at runtime via CSS vars
+  bg:           "var(--am-bg-deep)",
+  glass:        "rgba(var(--am-bg-deep-rgb), 0.88)",
+  glassDark:    "rgba(var(--am-bg-deep-rgb), 0.94)",
+  surface:      "rgba(var(--am-surface-rgb), 0.06)",
+  surfaceHover: "rgba(var(--am-surface-rgb), 0.10)",
 
   // Borders
   border:       "rgba(255,255,255,0.08)",
@@ -48,15 +48,15 @@ export const C = {
 
   // Text hierarchy
   text:         "#ffffff",
-  textSub:      "rgba(255,255,255,0.7)",
+  textSub:      "var(--am-text-sub)",
   textMuted:    "rgba(255,255,255,0.45)",
   textFaint:    "rgba(255,255,255,0.22)",
   textDisabled: "rgba(255,255,255,0.15)",
 
-  // Semantic
-  danger:       "#ff4d4d",
-  dangerDim:    "rgba(255,77,77,0.12)",
-  dangerBorder: "rgba(255,77,77,0.25)",
+  // Semantic — resolved at runtime from KovaaK's palette
+  danger:       "var(--am-danger)",
+  dangerDim:    "rgba(var(--am-danger-rgb), 0.12)",
+  dangerBorder: "rgba(var(--am-danger-rgb), 0.25)",
   warn:         "#ffd700",
   warnDim:      "rgba(255,215,0,0.12)",
   info:         "#60a5fa",

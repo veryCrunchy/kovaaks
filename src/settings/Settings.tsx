@@ -1625,28 +1625,57 @@ interface VoicePickerProps {
 interface KovaaksPalette {
   primary_hex: string | null;
   secondary_hex: string | null;
+  background_hex: string | null;
   special_call_to_action_hex: string | null;
+  hud_enemy_health_bar_hex: string | null;
+  hud_team_health_bar_hex: string | null;
+  hud_health_bar_hex: string | null;
+  hud_speed_bar_hex: string | null;
+  hud_jet_pack_bar_hex: string | null;
+  hud_weapon_ammo_bar_hex: string | null;
+  hud_weapon_change_bar_hex: string | null;
+  hud_background_hex: string | null;
+  hud_bar_background_hex: string | null;
+  special_text_hex: string | null;
+  info_dodge_hex: string | null;
+  info_weapon_hex: string | null;
+  hud_countdown_timer_hex: string | null;
+  challenge_graph_hex: string | null;
   path_used: string | null;
 }
 
-function ColorSwatch({ hex, label }: { hex: string; label: string }) {
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <div
-        style={{
-          width: 20,
-          height: 20,
-          borderRadius: 5,
-          background: hex,
-          border: "1px solid rgba(255,255,255,0.15)",
-          flexShrink: 0,
-        }}
-      />
-      <span style={{ fontSize: 11, color: C.textMuted }}>{label}</span>
-      <span style={{ fontSize: 10, color: C.textFaint, fontFamily: "inherit" }}>{hex}</span>
-    </div>
-  );
+interface PaletteEntry {
+  key: string;
+  label: string;
+  paletteField: keyof KovaaksPalette;
+  group: string;
 }
+
+const PALETTE_ENTRIES: PaletteEntry[] = [
+  // Theme
+  { key: "Primary",             label: "Primary / Accent",  paletteField: "primary_hex",              group: "Theme" },
+  { key: "Background",          label: "Background",         paletteField: "background_hex",            group: "Theme" },
+  { key: "Secondary",           label: "Surface",            paletteField: "secondary_hex",             group: "Theme" },
+  { key: "SpecialCallToAction", label: "Call-to-Action",     paletteField: "special_call_to_action_hex",group: "Theme" },
+  { key: "SpecialText",         label: "Muted Text",         paletteField: "special_text_hex",          group: "Theme" },
+  // HUD
+  { key: "HudBackground",       label: "HUD Background",     paletteField: "hud_background_hex",        group: "HUD" },
+  { key: "HudBarBackground",    label: "Bar Background",     paletteField: "hud_bar_background_hex",    group: "HUD" },
+  { key: "HudEnemyHealthBar",   label: "Enemy / Danger",     paletteField: "hud_enemy_health_bar_hex",  group: "HUD" },
+  { key: "HudTeamHealthBar",    label: "Team / Friendly",    paletteField: "hud_team_health_bar_hex",   group: "HUD" },
+  { key: "HudHealthBar",        label: "Health Bar",         paletteField: "hud_health_bar_hex",        group: "HUD" },
+  { key: "HudSpeedBar",         label: "Speed Bar",          paletteField: "hud_speed_bar_hex",         group: "HUD" },
+  { key: "HudJetPackBar",       label: "Jetpack Bar",        paletteField: "hud_jet_pack_bar_hex",      group: "HUD" },
+  { key: "HudWeaponAmmoBar",    label: "Ammo Bar",           paletteField: "hud_weapon_ammo_bar_hex",   group: "HUD" },
+  { key: "HudWeaponChangeBar",  label: "Weapon Change",      paletteField: "hud_weapon_change_bar_hex", group: "HUD" },
+  { key: "HudCountdownTimer",   label: "Countdown Timer",    paletteField: "hud_countdown_timer_hex",   group: "HUD" },
+  // Info
+  { key: "ChallengeGraph",      label: "Challenge Graph",    paletteField: "challenge_graph_hex",       group: "Info" },
+  { key: "InfoDodge",           label: "Dodge Info",         paletteField: "info_dodge_hex",            group: "Info" },
+  { key: "InfoWeapon",          label: "Weapon Info",        paletteField: "info_weapon_hex",           group: "Info" },
+];
+
+const PALETTE_GROUPS = ["Theme", "HUD", "Info"] as const;
 
 function AppearanceSection({
   settings,
@@ -1657,77 +1686,132 @@ function AppearanceSection({
 }) {
   const [palette, setPalette] = useState<KovaaksPalette | null>(null);
   const [loadingPalette, setLoadingPalette] = useState(false);
+  const [writingBack, setWritingBack] = useState(false);
+  const [writeError, setWriteError] = useState<string | null>(null);
 
   const mode = settings.color_mode ?? "kovaaks";
+  const overrides: Record<string, string> = settings.palette_color_overrides ?? {};
 
   useEffect(() => {
-    if (mode !== "kovaaks") return;
     setLoadingPalette(true);
     invoke<KovaaksPalette>("read_kovaaks_palette")
       .then(setPalette)
       .catch(() => setPalette(null))
       .finally(() => setLoadingPalette(false));
-  }, [mode, settings.kovaaks_palette_path]);
+  }, [settings.kovaaks_palette_path]);
+
+  // Effective color for a palette key: override → palette → ""
+  function effectiveHex(entry: PaletteEntry): string {
+    return overrides[entry.key] || (palette?.[entry.paletteField] as string | null) || "";
+  }
+
+  function setColorOverride(key: string, hex: string) {
+    const next = { ...overrides, [key]: hex };
+    update("palette_color_overrides", next);
+  }
+
+  function clearColorOverride(key: string) {
+    const next = { ...overrides };
+    delete next[key];
+    update("palette_color_overrides", next);
+  }
+
+  function clearAllOverrides() {
+    update("palette_color_overrides", {});
+  }
+
+  async function syncToKovaaks() {
+    // Merge palette + overrides → write everything to Palette.ini
+    const toWrite: Record<string, string> = {};
+    for (const entry of PALETTE_ENTRIES) {
+      const hex = effectiveHex(entry);
+      if (hex) toWrite[entry.key] = hex;
+    }
+    setWritingBack(true);
+    setWriteError(null);
+    try {
+      await invoke("write_kovaaks_palette_colors", { colors: toWrite });
+    } catch (e) {
+      setWriteError(String(e));
+    } finally {
+      setWritingBack(false);
+    }
+  }
+
+  const hasAnyOverride = Object.keys(overrides).length > 0;
 
   return (
-    <FieldGroup
-      label="Accent Color"
-      description="Choose how AimMod picks its accent color across the overlay and stats window."
-    >
-      {/* Mode picker */}
-      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-        {(["kovaaks", "custom", "default"] as const).map((m) => (
-          <button
-            key={m}
-            type="button"
-            onClick={() => update("color_mode", m)}
-            style={{
-              padding: "5px 14px",
-              borderRadius: 7,
-              border: `1px solid ${mode === m ? C.accentBorder : C.border}`,
-              background: mode === m ? accentAlpha("16") : "rgba(255,255,255,0.04)",
-              color: mode === m ? C.accent : C.textMuted,
-              fontSize: 12,
-              fontFamily: "inherit",
-              fontWeight: mode === m ? 700 : 400,
-              cursor: "pointer",
-            }}
-          >
-            {m === "kovaaks" ? "KovaaK's theme" : m === "custom" ? "Custom" : "Default green"}
-          </button>
-        ))}
-      </div>
+    <>
+      <FieldGroup
+        label="Color Theme"
+        description="Choose how AimMod picks its colors. In KovaaK's mode you can individually customize every color."
+      >
+        {/* Mode picker */}
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {(["kovaaks", "custom", "default"] as const).map((m) => (
+            <button
+              key={m}
+              type="button"
+              onClick={() => update("color_mode", m)}
+              style={{
+                padding: "5px 14px",
+                borderRadius: 7,
+                border: `1px solid ${mode === m ? C.accentBorder : C.border}`,
+                background: mode === m ? accentAlpha("16") : "rgba(255,255,255,0.04)",
+                color: mode === m ? C.accent : C.textMuted,
+                fontSize: 12,
+                fontFamily: "inherit",
+                fontWeight: mode === m ? 700 : 400,
+                cursor: "pointer",
+              }}
+            >
+              {m === "kovaaks" ? "KovaaK's theme" : m === "custom" ? "Custom accent" : "Default green"}
+            </button>
+          ))}
+        </div>
 
-      {/* KovaaK's mode: show detected palette */}
-      {mode === "kovaaks" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-          {loadingPalette && (
-            <span style={{ fontSize: 12, color: C.textFaint }}>Reading Palette.ini…</span>
-          )}
-          {!loadingPalette && palette?.primary_hex && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-              <span style={{ fontSize: 11, color: C.textSub }}>Detected KovaaK's palette:</span>
-              {palette.primary_hex && <ColorSwatch hex={palette.primary_hex} label="Primary (accent)" />}
-              {palette.special_call_to_action_hex && (
-                <ColorSwatch hex={palette.special_call_to_action_hex} label="Call-to-action" />
-              )}
-              {palette.secondary_hex && <ColorSwatch hex={palette.secondary_hex} label="Secondary" />}
-              {palette.path_used && (
-                <span style={{ fontSize: 10, color: C.textFaint, wordBreak: "break-all" }}>
-                  {palette.path_used}
-                </span>
-              )}
+        {/* Custom mode: single accent picker */}
+        {mode === "custom" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <input
+              type="color"
+              value={
+                /^#[0-9a-fA-F]{6}$/.test(settings.custom_accent_color ?? "")
+                  ? settings.custom_accent_color
+                  : "#00f5a0"
+              }
+              onChange={(e) => update("custom_accent_color", e.target.value)}
+              style={{ width: 44, height: 36, borderRadius: 7, border: `1px solid ${C.border}`, background: "none", cursor: "pointer", padding: 2 }}
+            />
+            <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ fontSize: 12, color: C.textSub }}>Pick any accent color</span>
+              <span style={{ fontSize: 10, color: C.textFaint }}>Applied to all highlighted elements across AimMod.</span>
             </div>
-          )}
-          {!loadingPalette && !palette?.primary_hex && (
-            <span style={{ fontSize: 12, color: C.warn }}>
-              Could not read Palette.ini — falling back to default green. Make sure KovaaK's has been launched at least once.
-            </span>
-          )}
+          </div>
+        )}
+
+        {/* Default mode */}
+        {mode === "default" && (
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 20, height: 20, borderRadius: 5, background: "#00f5a0", border: "1px solid rgba(255,255,255,0.15)" }} />
+            <span style={{ fontSize: 12, color: C.textFaint }}>AimMod default green (#00f5a0)</span>
+          </div>
+        )}
+
+        {/* KovaaK's mode: path override */}
+        {mode === "kovaaks" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <label style={{ fontSize: 11, color: C.textMuted }}>
-              Custom Palette.ini path (optional override)
-            </label>
+            {palette?.path_used && (
+              <span style={{ fontSize: 10, color: C.textFaint, wordBreak: "break-all" }}>
+                Reading from: {palette.path_used}
+              </span>
+            )}
+            {!loadingPalette && !palette?.primary_hex && (
+              <span style={{ fontSize: 12, color: C.warn }}>
+                Could not read Palette.ini — make sure KovaaK's has been launched at least once.
+              </span>
+            )}
+            <label style={{ fontSize: 11, color: C.textMuted }}>Custom Palette.ini path (optional)</label>
             <input
               type="text"
               className="am-input"
@@ -1737,69 +1821,168 @@ function AppearanceSection({
               style={{ fontSize: 11 }}
             />
           </div>
-        </div>
-      )}
+        )}
+      </FieldGroup>
 
-      {/* Custom mode: color picker */}
-      {mode === "custom" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <input
-            type="color"
-            value={
-              /^#[0-9a-fA-F]{6}$/.test(settings.custom_accent_color ?? "")
-                ? settings.custom_accent_color
-                : "#00f5a0"
-            }
-            onChange={(e) => update("custom_accent_color", e.target.value)}
-            style={{
-              width: 44,
-              height: 36,
-              borderRadius: 7,
-              border: `1px solid ${C.border}`,
-              background: "none",
-              cursor: "pointer",
-              padding: 2,
-            }}
-          />
-          <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-            <span style={{ fontSize: 12, color: C.textSub }}>Pick any accent color</span>
-            <span style={{ fontSize: 10, color: C.textFaint }}>
-              Used for all highlighted elements in the overlay and stats window.
+      {/* Full color palette editor — shown in all modes so users always have access */}
+      <FieldGroup
+        label="Palette Colors"
+        description="All KovaaK's UI colors. Edit any color here to override it in AimMod. Use 'Sync to KovaaK's' to write your changes back to Palette.ini."
+      >
+        {loadingPalette && (
+          <span style={{ fontSize: 12, color: C.textFaint }}>Reading Palette.ini…</span>
+        )}
+
+        {PALETTE_GROUPS.map((group) => (
+          <div key={group} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 2 }}>
+              {group}
             </span>
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "6px 12px",
+              }}
+            >
+              {PALETTE_ENTRIES.filter((e) => e.group === group).map((entry) => {
+                const hex = effectiveHex(entry);
+                const isOverridden = !!overrides[entry.key];
+                const validHex = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#888888";
+                return (
+                  <div
+                    key={entry.key}
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "4px 6px",
+                      borderRadius: 6,
+                      background: isOverridden ? accentAlpha("0a") : "transparent",
+                      border: `1px solid ${isOverridden ? C.accentBorder : "transparent"}`,
+                    }}
+                  >
+                    <input
+                      type="color"
+                      value={validHex}
+                      onChange={(e) => setColorOverride(entry.key, e.target.value)}
+                      title={entry.key}
+                      style={{
+                        width: 28,
+                        height: 28,
+                        borderRadius: 5,
+                        border: `1px solid ${C.border}`,
+                        background: "none",
+                        cursor: "pointer",
+                        padding: 2,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 11, color: isOverridden ? C.accent : C.textMuted, fontWeight: isOverridden ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {entry.label}
+                      </div>
+                      <div style={{ fontSize: 9, color: C.textFaint, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {validHex.toUpperCase()}
+                      </div>
+                    </div>
+                    {isOverridden && (
+                      <button
+                        type="button"
+                        title="Reset to KovaaK's value"
+                        onClick={() => clearColorOverride(entry.key)}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          cursor: "pointer",
+                          color: C.textFaint,
+                          fontSize: 12,
+                          padding: "0 2px",
+                          lineHeight: 1,
+                          flexShrink: 0,
+                        }}
+                      >
+                        ↺
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-      )}
+        ))}
 
-      {/* Default mode: just a note */}
-      {mode === "default" && (
-        <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <div style={{ width: 20, height: 20, borderRadius: 5, background: "#00f5a0", border: "1px solid rgba(255,255,255,0.15)" }} />
-          <span style={{ fontSize: 12, color: C.textFaint }}>AimMod default green (#00f5a0)</span>
-        </div>
-      )}
-
-      {/* HUD opacity */}
-      <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-          <label style={{ fontSize: 12, color: C.textSub }}>Overlay HUD opacity</label>
-          <span style={{ fontSize: 11, color: C.accent, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
-            {Math.round((settings.hud_opacity ?? 1) * 100)}%
+        {/* Actions */}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginTop: 4 }}>
+          <button
+            type="button"
+            onClick={syncToKovaaks}
+            disabled={writingBack}
+            style={{
+              padding: "5px 14px",
+              borderRadius: 7,
+              border: `1px solid ${C.accentBorder}`,
+              background: accentAlpha("16"),
+              color: C.accent,
+              fontSize: 12,
+              fontFamily: "inherit",
+              fontWeight: 600,
+              cursor: writingBack ? "default" : "pointer",
+              opacity: writingBack ? 0.6 : 1,
+            }}
+          >
+            {writingBack ? "Writing…" : "Sync to KovaaK's"}
+          </button>
+          {hasAnyOverride && (
+            <button
+              type="button"
+              onClick={clearAllOverrides}
+              style={{
+                padding: "5px 14px",
+                borderRadius: 7,
+                border: `1px solid ${C.border}`,
+                background: "rgba(255,255,255,0.04)",
+                color: C.textMuted,
+                fontSize: 12,
+                fontFamily: "inherit",
+                cursor: "pointer",
+              }}
+            >
+              Reset all overrides
+            </button>
+          )}
+          {writeError && (
+            <span style={{ fontSize: 11, color: C.warn }}>{writeError}</span>
+          )}
+          <span style={{ fontSize: 10, color: C.textFaint }}>
+            Changes apply instantly in AimMod. "Sync to KovaaK's" also writes them to Palette.ini.
           </span>
         </div>
-        <input
-          type="range"
-          min={10}
-          max={100}
-          step={5}
-          value={Math.round((settings.hud_opacity ?? 1) * 100)}
-          onChange={(e) => update("hud_opacity", Number(e.target.value) / 100)}
-          style={{ width: "100%", accentColor: C.accent }}
-        />
-        <span style={{ fontSize: 10, color: C.textFaint }}>
-          Controls the transparency of all overlay HUDs (VS Mode, Stats, Smoothness, Coaching). Does not affect the settings or stats windows.
-        </span>
-      </div>
-    </FieldGroup>
+      </FieldGroup>
+
+      <FieldGroup label="HUD Opacity" description="Controls the transparency of all overlay HUDs during gameplay.">
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <label style={{ fontSize: 12, color: C.textSub }}>Overlay opacity</label>
+            <span style={{ fontSize: 11, color: C.accent, fontFamily: "'JetBrains Mono', monospace", fontWeight: 700 }}>
+              {Math.round((settings.hud_opacity ?? 1) * 100)}%
+            </span>
+          </div>
+          <input
+            type="range"
+            min={10}
+            max={100}
+            step={5}
+            value={Math.round((settings.hud_opacity ?? 1) * 100)}
+            onChange={(e) => update("hud_opacity", Number(e.target.value) / 100)}
+            style={{ width: "100%", accentColor: C.accent }}
+          />
+          <span style={{ fontSize: 10, color: C.textFaint }}>
+            VS Mode, Stats, Smoothness, and Coaching HUDs. Does not affect the settings or stats windows.
+          </span>
+        </div>
+      </FieldGroup>
+    </>
   );
 }
 

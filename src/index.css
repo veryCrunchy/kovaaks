@@ -47,15 +47,15 @@
   --am-accent-border: rgba(0, 245, 160, 0.25);
   --am-accent-glow:   rgba(0, 245, 160, 0.30);
 
-  /* Semantic palette defaults (overridden by KovaaK's theme when loaded) */
-  --am-surface:       #4E4A54;
-  --am-surface-rgb:   78, 74, 84;
-  --am-bg-deep:       #36323B;
-  --am-bg-deep-rgb:   54, 50, 59;
+  /* Semantic palette defaults — match original dark theme; overridden by KovaaK's theme when loaded */
+  --am-surface:       #14141f;    /* ≈ rgba(255,255,255,0.04) over #06060e */
+  --am-surface-rgb:   20, 20, 31;
+  --am-bg-deep:       #06060e;
+  --am-bg-deep-rgb:   6, 6, 14;
   --am-success:       #4FAB5F;
   --am-success-rgb:   79, 171, 95;
-  --am-danger:        #E65000;
-  --am-danger-rgb:    230, 80, 0;
+  --am-danger:        #ff4d4d;
+  --am-danger-rgb:    255, 77, 77;
   --am-team:          #05CB78;
   --am-team-rgb:      5, 203, 120;
   --am-health:        #05CB78;
@@ -72,8 +72,8 @@
   --am-hud-bg-rgb:    54, 50, 59;
   --am-bar-bg:        #28243B;
   --am-bar-bg-rgb:    40, 36, 59;
-  --am-text-sub:      #9B9DB1;
-  --am-text-sub-rgb:  155, 157, 177;
+  --am-text-sub:      #b3b3cc;    /* ≈ rgba(255,255,255,0.7) — overridden to KovaaK's SpecialText */
+  --am-text-sub-rgb:  179, 179, 204;
   --am-info-dodge:    #6666FF;
   --am-info-dodge-rgb:102, 102, 255;
   --am-info-weapon:   #66D6D6;
@@ -104,7 +104,7 @@ html, body, #root {
 }
 
 body.settings-window {
-  background: #06060e !important;
+  background: var(--am-bg-deep) !important;
   overflow: auto;
 }
 
@@ -183,13 +183,14 @@ button:active:not(:disabled) { transform: scale(0.97); }
 /* danger */
 .am-btn-danger {
   background:   transparent;
-  color:        #ff4d4d;
-  border-color: rgba(255,77,77,0.22);
+  color:        var(--am-danger);
+  border-color: rgba(var(--am-danger-rgb), 0.22);
 }
 .am-btn-danger:hover:not(:disabled) {
-  background: rgba(255,77,77,0.1);
-  color:      #ff6b6b;
-  border-color: rgba(255,77,77,0.4);
+  background:   rgba(var(--am-danger-rgb), 0.10);
+  color:        var(--am-danger);
+  filter:       brightness(1.15);
+  border-color: rgba(var(--am-danger-rgb), 0.40);
 }
 
 /* accent outline */
@@ -291,6 +292,6 @@ select.am-input:focus {
 }
 
 select.am-input option {
-  background: #0b1018;
+  background: var(--am-bg-deep);
   color: rgba(255,255,255,0.92);
 }

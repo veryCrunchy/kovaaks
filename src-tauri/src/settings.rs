@@ -119,6 +119,10 @@ pub struct AppSettings {
     /// Optional override path for KovaaK's Palette.ini. Empty = auto-detect from %LOCALAPPDATA%.
     #[serde(default)]
     pub kovaaks_palette_path: String,
+    /// Per-color overrides applied on top of KovaaK's palette (key = palette name, value = "#RRGGBB").
+    /// Only active when color_mode is "kovaaks". Changes are also written back to Palette.ini.
+    #[serde(default)]
+    pub palette_color_overrides: std::collections::HashMap<String, String>,
     /// Opacity for all overlay HUDs (0.0–1.0). Defaults to 1.0 (fully opaque).
     #[serde(default = "default_hud_opacity")]
     pub hud_opacity: f64,
@@ -156,6 +160,7 @@ impl Default for AppSettings {
             color_mode: default_color_mode(),
             custom_accent_color: String::new(),
             kovaaks_palette_path: String::new(),
+            palette_color_overrides: std::collections::HashMap::new(),
             hud_opacity: default_hud_opacity(),
         }
     }
