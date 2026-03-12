@@ -141,7 +141,11 @@ fn backfill_sqlite_replay(app: &AppHandle, session_id: &str, replay: &ReplayData
     true
 }
 
-fn import_legacy_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
+fn import_legacy_replay_with_video_requirement(
+    app: &AppHandle,
+    session_id: &str,
+    require_video_frames: bool,
+) -> Option<ReplayData> {
     let dir = replay_dir(app)?;
     let path = dir.join(format!("{}.json", session_id));
     let json = std::fs::read_to_string(&path).ok()?;
@@ -153,13 +157,17 @@ fn import_legacy_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData>
         }
     };
 
-    if replay.frames.is_empty() {
+    if require_video_frames && replay.frames.is_empty() {
         purge_invalid_replay_without_video_frames(app, session_id, "legacy replay", Some(&path));
         return None;
     }
 
     let _ = backfill_sqlite_replay(app, session_id, &replay);
     Some(replay)
+}
+
+fn import_legacy_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
+    import_legacy_replay_with_video_requirement(app, session_id, true)
 }
 
 fn repair_run_capture_if_needed(app: &AppHandle, session_id: &str, replay: &ReplayData) {
@@ -869,6 +877,40 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
     }
 }
 
+fn load_replay_allowing_missing_video(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
+    match crate::stats_db::get_replay_data(app, session_id) {
+        Ok(Some(mut replay)) => {
+            repair_replay_timing_if_needed(app, session_id, &mut replay);
+            repair_run_capture_if_needed(app, session_id, &replay);
+            Some(replay)
+        }
+        Ok(None) => match crate::stats_db::get_legacy_replay_blob(app, session_id) {
+            Ok(Some(mut replay)) => {
+                repair_replay_timing_if_needed(app, session_id, &mut replay);
+                let _ = backfill_sqlite_replay(app, session_id, &replay);
+                let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
+                repair_run_capture_if_needed(app, session_id, &replay);
+                Some(replay)
+            }
+            Ok(None) => import_legacy_replay_with_video_requirement(app, session_id, false),
+            Err(error) => {
+                log::warn!(
+                    "replay_store: could not load legacy sqlite replay blob for {}: {error}",
+                    session_id
+                );
+                import_legacy_replay_with_video_requirement(app, session_id, false)
+            }
+        },
+        Err(error) => {
+            log::warn!(
+                "replay_store: could not load sqlite replay payload for {}: {error}",
+                session_id
+            );
+            import_legacy_replay_with_video_requirement(app, session_id, false)
+        }
+    }
+}
+
 fn purge_invalid_replay_without_video_frames(
     app: &AppHandle,
     session_id: &str,
@@ -904,4 +946,9 @@ fn purge_invalid_replay_without_video_frames(
 
 pub fn load_replay_payload(app: &AppHandle, session_id: &str) -> Option<ReplayPayloadData> {
     load_replay(app, session_id).map(|replay| ReplayPayloadData::from(&replay))
+}
+
+pub fn load_mouse_path_payload(app: &AppHandle, session_id: &str) -> Option<ReplayPayloadData> {
+    load_replay_allowing_missing_video(app, session_id)
+        .map(|replay| ReplayPayloadData::from(&replay))
 }

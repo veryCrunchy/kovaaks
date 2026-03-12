@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::{Local, NaiveDateTime, TimeZone, Utc};
@@ -45,6 +45,8 @@ static SYNC_STATUS: Lazy<Mutex<HubSyncStatus>> = Lazy::new(|| {
         last_replay_media_session_id: None,
     })
 });
+static UPLOAD_IDENTITY_CACHE: Lazy<Mutex<HashMap<String, UploadIdentityCacheEntry>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
 pub struct SessionUploadInput {
@@ -194,7 +196,32 @@ fn first_nonempty_owned(candidates: &[&str]) -> String {
     String::new()
 }
 
-fn derive_upload_identity() -> Option<UploadIdentity> {
+fn looks_like_steam_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 17 && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn build_upload_external_id(
+    kovaaks_user_id: &str,
+    kovaaks_username: &str,
+    steam_id: &str,
+) -> String {
+    let kovaaks_user_id = kovaaks_user_id.trim();
+    let kovaaks_username = kovaaks_username.trim();
+    let steam_id = steam_id.trim();
+
+    if !kovaaks_user_id.is_empty() {
+        format!("kovaaks:{kovaaks_user_id}")
+    } else if !kovaaks_username.is_empty() {
+        format!("kovaaks:username:{}", kovaaks_username.to_ascii_lowercase())
+    } else if !steam_id.is_empty() {
+        format!("steam:{steam_id}")
+    } else {
+        String::new()
+    }
+}
+
+fn derive_bridge_upload_identity() -> Option<UploadIdentity> {
     let user = crate::bridge::current_kovaaks_user()?;
     let kovaaks_user_id = user.kovaaks_user_id.trim().to_string();
     let kovaaks_username = user.username.trim().to_string();
@@ -203,13 +230,7 @@ fn derive_upload_identity() -> Option<UploadIdentity> {
         return None;
     }
 
-    let user_external_id = if !kovaaks_user_id.is_empty() {
-        format!("kovaaks:{kovaaks_user_id}")
-    } else if !steam_id.is_empty() {
-        format!("steam:{steam_id}")
-    } else {
-        format!("kovaaks:username:{}", kovaaks_username.to_ascii_lowercase())
-    };
+    let user_external_id = build_upload_external_id(&kovaaks_user_id, &kovaaks_username, &steam_id);
 
     Some(UploadIdentity {
         user_external_id,
@@ -229,11 +250,113 @@ fn derive_upload_identity() -> Option<UploadIdentity> {
     })
 }
 
+async fn resolve_upload_identity() -> Option<UploadIdentity> {
+    let mut identity = derive_bridge_upload_identity()?;
+    let steam_id = identity.steam_id.trim().to_string();
+    let needs_enrichment = identity.kovaaks_username.trim().is_empty()
+        || looks_like_steam_id(&identity.kovaaks_username);
+
+    if steam_id.is_empty() || !needs_enrichment {
+        return Some(identity);
+    }
+
+    let display_name = first_nonempty_owned(&[
+        identity.steam_display_name.as_str(),
+        identity.user_display_name.as_str(),
+        identity.kovaaks_username.as_str(),
+        steam_id.as_str(),
+    ]);
+    let ttl = Duration::from_secs(15 * 60);
+    let now = Instant::now();
+
+    let cached_profile = {
+        let cache = UPLOAD_IDENTITY_CACHE.lock();
+        cache.get(&steam_id).and_then(|entry| {
+            if entry.display_name == display_name && now.duration_since(entry.checked_at) < ttl {
+                entry.profile.clone()
+            } else {
+                None
+            }
+        })
+    };
+
+    let profile = if let Some(profile) = cached_profile {
+        Some(profile)
+    } else {
+        match crate::kovaaks_api::find_user_by_steam_id(&steam_id, &display_name).await {
+            Ok(profile) => {
+                let mut cache = UPLOAD_IDENTITY_CACHE.lock();
+                cache.insert(
+                    steam_id.clone(),
+                    UploadIdentityCacheEntry {
+                        display_name: display_name.clone(),
+                        checked_at: now,
+                        profile: profile.clone(),
+                    },
+                );
+                profile
+            }
+            Err(err) => {
+                log::warn!(
+                    "hub_sync: failed to enrich upload identity steam_id='{}' display='{}': {}",
+                    steam_id,
+                    display_name,
+                    err
+                );
+                None
+            }
+        }
+    };
+
+    if let Some(profile) = profile {
+        identity.kovaaks_username = first_nonempty_owned(&[
+            profile.username.as_str(),
+            identity.kovaaks_username.as_str(),
+        ]);
+        identity.user_display_name = first_nonempty_owned(&[
+            identity.user_display_name.as_str(),
+            profile.username.as_str(),
+            profile.steam_account_name.as_str(),
+            display_name.as_str(),
+        ]);
+        identity.avatar_url =
+            first_nonempty_owned(&[identity.avatar_url.as_str(), profile.avatar_url.as_str()]);
+        identity.steam_display_name = first_nonempty_owned(&[
+            identity.steam_display_name.as_str(),
+            profile.steam_account_name.as_str(),
+            display_name.as_str(),
+        ]);
+        identity.user_external_id = build_upload_external_id(
+            &identity.kovaaks_user_id,
+            &identity.kovaaks_username,
+            &identity.steam_id,
+        );
+    }
+
+    Some(identity)
+}
+
+fn log_upload_identity(context: &str, upload_identity: Option<&UploadIdentity>) {
+    match upload_identity {
+        Some(identity) => log::info!(
+            "hub_sync: {} identity external_id='{}' steam_id='{}' steam_display='{}' kovaaks_username='{}' kovaaks_user_id='{}'",
+            context,
+            identity.user_external_id,
+            identity.steam_id,
+            identity.steam_display_name,
+            identity.kovaaks_username,
+            identity.kovaaks_user_id,
+        ),
+        None => log::info!("hub_sync: {} identity unavailable", context),
+    }
+}
+
 pub fn get_sync_overview(app: &AppHandle) -> anyhow::Result<HubSyncOverview> {
     let settings = crate::settings::load(app)?;
     refresh_pending_count(app);
     let status = SYNC_STATUS.lock().clone();
-    let discovered_identity = derive_upload_identity();
+    let discovered_identity = derive_bridge_upload_identity();
+    let can_upload_without_link = discovered_identity.is_some();
     let account_label = if settings.hub_account_label.trim().is_empty() {
         discovered_identity.as_ref().and_then(|identity| {
             let label = first_nonempty_owned(&[
@@ -249,7 +372,7 @@ pub fn get_sync_overview(app: &AppHandle) -> anyhow::Result<HubSyncOverview> {
     };
     Ok(HubSyncOverview {
         configured: !normalize_base_url(&settings.hub_api_base_url).is_empty()
-            && (!settings.hub_upload_token.trim().is_empty() || discovered_identity.is_some()),
+            && (!settings.hub_upload_token.trim().is_empty() || can_upload_without_link),
         enabled: settings.hub_sync_enabled,
         account_label,
         status,
@@ -528,6 +651,13 @@ struct UploadIdentity {
     steam_display_name: String,
 }
 
+#[derive(Clone, Debug)]
+struct UploadIdentityCacheEntry {
+    display_name: String,
+    checked_at: Instant,
+    profile: Option<crate::kovaaks_api::UserProfile>,
+}
+
 pub fn queue_session_upload(app: &AppHandle, input: SessionUploadInput) {
     set_sync_in_progress(true);
     let session_id = input.session_id.clone();
@@ -555,8 +685,9 @@ pub fn queue_pending_session_sync(app: &AppHandle) {
         return;
     }
 
+    let upload_identity_available = derive_bridge_upload_identity().is_some();
     if normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || (settings.hub_upload_token.trim().is_empty() && derive_upload_identity().is_none())
+        || (!upload_identity_available && settings.hub_upload_token.trim().is_empty())
     {
         return;
     }
@@ -588,7 +719,7 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
 
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
-    let upload_identity = derive_upload_identity();
+    let upload_identity = resolve_upload_identity().await;
     if base_url.is_empty() || (upload_token.is_empty() && upload_identity.is_none()) {
         log::info!(
             "hub_sync: skipping upload for {} because hub sync is not fully configured",
@@ -597,6 +728,10 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
         record_sync_success(None);
         return Ok(());
     }
+    log_upload_identity(
+        &format!("session {}", input.session_id),
+        upload_identity.as_ref(),
+    );
 
     let persisted_run = crate::stats_db::get_run_summary(app, &input.session_id)
         .ok()
@@ -710,9 +845,10 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
 
 async fn sync_pending_sessions(app: &AppHandle) -> anyhow::Result<()> {
     let settings = crate::settings::load(app)?;
+    let upload_identity_available = derive_bridge_upload_identity().is_some();
     if !settings.hub_sync_enabled
         || normalize_base_url(&settings.hub_api_base_url).is_empty()
-        || (settings.hub_upload_token.trim().is_empty() && derive_upload_identity().is_none())
+        || (settings.hub_upload_token.trim().is_empty() && !upload_identity_available)
     {
         record_sync_success(None);
         return Ok(());
@@ -833,13 +969,17 @@ async fn upload_session_batch(
     let settings = crate::settings::load(app)?;
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
-    let upload_identity = derive_upload_identity();
+    let upload_identity = resolve_upload_identity().await;
     if !settings.hub_sync_enabled
         || base_url.is_empty()
         || (upload_token.is_empty() && upload_identity.is_none())
     {
         anyhow::bail!("hub sync is not fully configured");
     }
+    log_upload_identity(
+        &format!("batch of {} session(s)", records.len()),
+        upload_identity.as_ref(),
+    );
 
     let mut sessions = Vec::with_capacity(records.len());
     let mut local_session_ids = Vec::with_capacity(records.len());
@@ -1051,7 +1191,7 @@ async fn upload_replay_media_for_session(
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
     if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
-        anyhow::bail!("hub sync is not fully configured");
+        return Ok(());
     }
     if !should_upload_replay_media(app, &settings, result, session_id)? {
         return Ok(());
@@ -1136,11 +1276,11 @@ async fn upload_mouse_path_for_session(app: &AppHandle, session_id: &str) -> any
     let base_url = normalize_base_url(&settings.hub_api_base_url);
     let upload_token = settings.hub_upload_token.trim();
     if !settings.hub_sync_enabled || base_url.is_empty() || upload_token.is_empty() {
-        anyhow::bail!("hub sync is not fully configured");
+        return Ok(());
     }
 
-    let Some(replay) = crate::replay_store::load_replay_payload(app, session_id) else {
-        anyhow::bail!("no replay payload is available for this run");
+    let Some(replay) = crate::replay_store::load_mouse_path_payload(app, session_id) else {
+        anyhow::bail!("no mouse path payload is available for this run");
     };
     if replay.positions.is_empty() {
         anyhow::bail!("this replay has no saved mouse path data");
