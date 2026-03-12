@@ -14,7 +14,6 @@ export interface RegionRect {
 export interface AppSettings {
   stats_dir: string;
   overlay_visible: boolean;
-  username: string;
   monitor_index: number;
   friends: FriendProfile[];
   selected_friend: string | null;

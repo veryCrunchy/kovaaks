@@ -7,6 +7,7 @@ export interface FriendProfile {
   avatar_url: string;
   country: string;
   kovaaks_plus: boolean;
+  bridge_managed: boolean;
 }
 
 export interface MostPlayedEntry {

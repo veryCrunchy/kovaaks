@@ -590,6 +590,7 @@ public:
     ~KovaaksBridgeModProduction() override {
         updates_disabled_ = true;
         unregister_live_metric_hooks();
+        unregister_http_trace_hooks();
         if (text_set_hook_registered_ && text_set_fn_ && is_likely_valid_object_ptr(text_set_fn_)) {
             text_set_fn_->UnregisterHook(text_set_hook_id_);
             text_set_hook_registered_ = false;
@@ -760,6 +761,44 @@ private:
         const auto current = static_cast<uint64_t>(property->GetPropertyFlags());
         const auto wanted = static_cast<uint64_t>(flags);
         return (current & wanted) != 0;
+    }
+
+    struct InGameHttpTraceRequest {
+        uint64_t id{0};
+        uint64_t created_ms{0};
+        bool has_auth_token{false};
+        std::string auth_token{};
+        std::string context_name{};
+        std::string url_path{};
+        std::string verb{};
+        std::string request_body{};
+    };
+
+    static auto resolve_struct_property_script_struct(
+        RC::Unreal::FStructProperty* struct_property
+    ) -> RC::Unreal::UScriptStruct* {
+        if (!struct_property || !is_likely_valid_object_ptr(struct_property)) {
+            return nullptr;
+        }
+        const auto it = RC::Unreal::FStructProperty::MemberOffsets.find(STR("Struct"));
+        if (it == RC::Unreal::FStructProperty::MemberOffsets.end()) {
+            return nullptr;
+        }
+        const int32_t offset = it->second;
+        if (offset <= 0 || offset > 0x400) {
+            return nullptr;
+        }
+        auto** script_struct_ptr = reinterpret_cast<RC::Unreal::UScriptStruct**>(
+            reinterpret_cast<uint8_t*>(struct_property) + static_cast<size_t>(offset)
+        );
+        if (!script_struct_ptr || !is_likely_readable_region(script_struct_ptr, sizeof(void*))) {
+            return nullptr;
+        }
+        auto* script_struct = *script_struct_ptr;
+        if (!script_struct || !is_likely_valid_object_ptr(script_struct)) {
+            return nullptr;
+        }
+        return script_struct;
     }
 
     static auto is_runtime_object_usable(RC::Unreal::UObject* obj) -> bool {
@@ -1087,6 +1126,7 @@ private:
             static_cast<unsigned long long>(now_ms)
         );
         kovaaks::RustBridge::emit_json(ack.data());
+        maybe_emit_user_management_build_tag();
         maybe_emit_user_management_snapshot(now_ms, true);
     }
 
@@ -1592,6 +1632,414 @@ private:
         live_metric_hooks_registered_ = false;
     }
 
+    static auto truncate_http_trace_field(std::string value, size_t max_len) -> std::string {
+        if (value.empty()) {
+            return {};
+        }
+        value.erase(
+            std::remove_if(
+                value.begin(),
+                value.end(),
+                [](unsigned char ch) { return ch < 0x20; }
+            ),
+            value.end()
+        );
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front()))) {
+            value.erase(value.begin());
+        }
+        while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back()))) {
+            value.pop_back();
+        }
+        if (value.size() <= max_len) {
+            return value;
+        }
+        value.resize(max_len);
+        value += "...(truncated)";
+        return value;
+    }
+
+    bool read_object_param_full_name(
+        RC::Unreal::UFunction* fn,
+        void* params,
+        const char* wanted_name,
+        std::string& out
+    ) {
+        out.clear();
+        if (!fn || !params || !wanted_name || !*wanted_name) {
+            return false;
+        }
+        const auto wanted_key = canonicalize_property_name(wanted_name);
+        for (RC::Unreal::FProperty* property : enumerate_properties(fn)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            if (!property_has_any_flags(property, RC::Unreal::CPF_Parm)) {
+                continue;
+            }
+            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
+                continue;
+            }
+            auto* object_property = RC::Unreal::CastField<RC::Unreal::FObjectPropertyBase>(property);
+            if (!object_property || !is_likely_valid_object_ptr(object_property)) {
+                continue;
+            }
+            void* value_ptr = safe_property_value_ptr(property, params);
+            if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(void*))) {
+                continue;
+            }
+            auto* object_value = object_property->GetObjectPropertyValue(value_ptr);
+            if (!object_value || !is_likely_valid_object_ptr(object_value)) {
+                continue;
+            }
+            out = trim_ascii_token(object_value->GetFullName());
+            return !out.empty();
+        }
+        return false;
+    }
+
+    bool read_struct_param_value_ptr(
+        RC::Unreal::UFunction* fn,
+        void* params,
+        const char* wanted_name,
+        RC::Unreal::UStruct*& out_struct,
+        void*& out_ptr
+    ) {
+        out_struct = nullptr;
+        out_ptr = nullptr;
+        if (!fn || !params || !wanted_name || !*wanted_name) {
+            return false;
+        }
+        const auto wanted_key = canonicalize_property_name(wanted_name);
+        for (RC::Unreal::FProperty* property : enumerate_properties(fn)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            if (!property_has_any_flags(property, RC::Unreal::CPF_Parm)) {
+                continue;
+            }
+            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
+                continue;
+            }
+            auto* struct_property = RC::Unreal::CastField<RC::Unreal::FStructProperty>(property);
+            if (!struct_property || !is_likely_valid_object_ptr(struct_property)) {
+                continue;
+            }
+            void* value_ptr = safe_property_value_ptr(property, params);
+            if (!value_ptr) {
+                continue;
+            }
+            auto* script_struct = resolve_struct_property_script_struct(struct_property);
+            if (!script_struct || !is_likely_valid_object_ptr(script_struct)) {
+                continue;
+            }
+            out_struct = reinterpret_cast<RC::Unreal::UStruct*>(script_struct);
+            out_ptr = value_ptr;
+            return true;
+        }
+        return false;
+    }
+
+    bool read_nested_struct_value_ptr(
+        RC::Unreal::UStruct* owner,
+        void* container,
+        const char* wanted_name,
+        RC::Unreal::UStruct*& out_struct,
+        void*& out_ptr
+    ) {
+        out_struct = nullptr;
+        out_ptr = nullptr;
+        if (!owner || !container || !wanted_name || !*wanted_name) {
+            return false;
+        }
+        const auto wanted_key = canonicalize_property_name(wanted_name);
+        for (RC::Unreal::FProperty* property : enumerate_properties_in_chain(owner)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            if (canonicalize_property_name(normalize_ascii(property->GetName())) != wanted_key) {
+                continue;
+            }
+            auto* struct_property = RC::Unreal::CastField<RC::Unreal::FStructProperty>(property);
+            if (!struct_property || !is_likely_valid_object_ptr(struct_property)) {
+                continue;
+            }
+            void* value_ptr = safe_property_value_ptr(property, container);
+            if (!value_ptr) {
+                continue;
+            }
+            auto* script_struct = resolve_struct_property_script_struct(struct_property);
+            if (!script_struct || !is_likely_valid_object_ptr(script_struct)) {
+                continue;
+            }
+            out_struct = reinterpret_cast<RC::Unreal::UStruct*>(script_struct);
+            out_ptr = value_ptr;
+            return true;
+        }
+        return false;
+    }
+
+    bool read_http_trace_request_params(
+        RC::Unreal::UFunction* fn,
+        void* params,
+        InGameHttpTraceRequest& out_trace
+    ) {
+        RC::Unreal::UStruct* params_struct = nullptr;
+        void* params_ptr = nullptr;
+        if (!read_struct_param_value_ptr(fn, params, "params", params_struct, params_ptr)) {
+            return false;
+        }
+
+        RC::Unreal::UStruct* network_request_struct = nullptr;
+        void* network_request_ptr = nullptr;
+        read_nested_struct_value_ptr(
+            params_struct,
+            params_ptr,
+            "networkrequest",
+            network_request_struct,
+            network_request_ptr
+        );
+
+        std::string steam_auth_token{};
+        read_string_property_named(params_struct, params_ptr, "steamauthtoken", steam_auth_token);
+        out_trace.has_auth_token = !steam_auth_token.empty();
+        out_trace.auth_token = std::move(steam_auth_token);
+
+        if (network_request_struct && network_request_ptr) {
+            read_string_property_named(network_request_struct, network_request_ptr, "urlpath", out_trace.url_path);
+            read_string_property_named(network_request_struct, network_request_ptr, "verb", out_trace.verb);
+            read_string_property_named(network_request_struct, network_request_ptr, "messagebody", out_trace.request_body);
+        }
+
+        out_trace.url_path = truncate_http_trace_field(std::move(out_trace.url_path), 320);
+        out_trace.verb = truncate_http_trace_field(std::move(out_trace.verb), 32);
+        out_trace.request_body = truncate_http_trace_field(std::move(out_trace.request_body), 1024);
+        return !out_trace.url_path.empty() || !out_trace.request_body.empty();
+    }
+
+    RC::Unreal::UObject* read_http_trace_return_object(RC::Unreal::UFunction* fn, void* params) {
+        if (!fn || !params) {
+            return nullptr;
+        }
+        for (RC::Unreal::FProperty* property : enumerate_properties(fn)) {
+            if (!property || !is_likely_valid_object_ptr(property)) {
+                continue;
+            }
+            if (!property_has_any_flags(property, RC::Unreal::CPF_ReturnParm)) {
+                continue;
+            }
+            auto* object_property = RC::Unreal::CastField<RC::Unreal::FObjectPropertyBase>(property);
+            if (!object_property || !is_likely_valid_object_ptr(object_property)) {
+                continue;
+            }
+            void* value_ptr = safe_property_value_ptr(property, params);
+            if (!value_ptr || !is_likely_readable_region(value_ptr, sizeof(void*))) {
+                continue;
+            }
+            auto* object_value = object_property->GetObjectPropertyValue(value_ptr);
+            if (object_value && is_likely_valid_object_ptr(object_value)) {
+                return object_value;
+            }
+        }
+        return nullptr;
+    }
+
+    void emit_http_trace_request(const InGameHttpTraceRequest& trace) {
+        char summary[512]{};
+        std::snprintf(
+            summary,
+            sizeof(summary),
+            "[http_trace] request id=%llu verb=%s auth=%u ctx=%s url=%s body_len=%zu",
+            static_cast<unsigned long long>(trace.id),
+            trace.verb.empty() ? "?" : trace.verb.c_str(),
+            trace.has_auth_token ? 1u : 0u,
+            trace.context_name.empty() ? "?" : trace.context_name.c_str(),
+            trace.url_path.empty() ? "?" : trace.url_path.c_str(),
+            trace.request_body.size()
+        );
+        runtime_log_line(summary);
+
+        std::string json;
+        json.reserve(512 + trace.request_body.size());
+        json += "{\"ev\":\"kovaaks_ingame_http_request\",\"id\":";
+        json += std::to_string(trace.id);
+        json += ",\"context\":\"";
+        json += escape_json_ascii(trace.context_name);
+        json += "\",\"url\":\"";
+        json += trace.url_path;
+        json += "\",\"verb\":\"";
+        json += trace.verb;
+        json += "\",\"has_auth\":";
+        json += trace.has_auth_token ? "true" : "false";
+        json += ",\"body\":\"";
+        json += trace.request_body;
+        json += "\"}";
+        kovaaks::RustBridge::emit_json(json.c_str());
+    }
+
+    void emit_http_trace_response(
+        const InGameHttpTraceRequest& trace,
+        const char* phase,
+        int32_t response_code,
+        const std::string& response_contents
+    ) {
+        char summary[512]{};
+        std::snprintf(
+            summary,
+            sizeof(summary),
+            "[http_trace] %s id=%llu code=%d ctx=%s url=%s resp_len=%zu",
+            phase ? phase : "response",
+            static_cast<unsigned long long>(trace.id),
+            response_code,
+            trace.context_name.empty() ? "?" : trace.context_name.c_str(),
+            trace.url_path.empty() ? "?" : trace.url_path.c_str(),
+            response_contents.size()
+        );
+        runtime_log_line(summary);
+
+        std::string json;
+        json.reserve(512 + response_contents.size());
+        json += "{\"ev\":\"kovaaks_ingame_http_response\",\"phase\":\"";
+        json += escape_json_ascii(phase ? phase : "response");
+        json += "\",\"id\":";
+        json += std::to_string(trace.id);
+        json += ",\"context\":\"";
+        json += escape_json_ascii(trace.context_name);
+        json += "\",\"url\":\"";
+        json += trace.url_path;
+        json += "\",\"verb\":\"";
+        json += trace.verb;
+        json += "\",\"code\":";
+        json += std::to_string(response_code);
+        json += ",\"body\":\"";
+        json += trace.request_body;
+        json += "\",\"response\":\"";
+        json += response_contents;
+        json += "\"}";
+        kovaaks::RustBridge::emit_json(json.c_str());
+    }
+
+    void handle_http_trace_hook_impl(
+        RC::Unreal::UFunction* fn,
+        RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx
+    ) {
+        if (!fn || !is_likely_valid_object_ptr(fn)) {
+            return;
+        }
+        auto* frame = reinterpret_cast<RC::Unreal::FFrame_50_AndBelow*>(&call_ctx.TheStack);
+        void* params = frame ? static_cast<void*>(frame->Locals) : nullptr;
+        if (!params) {
+            return;
+        }
+
+        if (fn == targets_.send_sa_http_request) {
+            InGameHttpTraceRequest trace{};
+            trace.id = next_http_trace_request_id_++;
+            trace.created_ms = GetTickCount64();
+            read_object_param_full_name(fn, params, "worldcontextobject", trace.context_name);
+            read_http_trace_request_params(fn, params, trace);
+            if (!trace.auth_token.empty()) {
+                last_sa_http_auth_token_ = trace.auth_token;
+            }
+
+            auto* request_object = read_http_trace_return_object(fn, params);
+            if (request_object && is_likely_valid_object_ptr(request_object)) {
+                pending_http_trace_requests_[request_object] = trace;
+            }
+            emit_http_trace_request(trace);
+            return;
+        }
+
+        if (!call_ctx.Context || !is_likely_valid_object_ptr(call_ctx.Context)) {
+            return;
+        }
+        auto it = pending_http_trace_requests_.find(call_ctx.Context);
+        if (it == pending_http_trace_requests_.end()) {
+            return;
+        }
+
+        std::string response_contents{};
+        read_string_property_named(fn, params, "contents", response_contents);
+        response_contents = truncate_http_trace_field(std::move(response_contents), 2048);
+
+        if (fn == targets_.sa_http_invoke_success) {
+            handle_user_management_http_response(call_ctx.Context, true, 200, response_contents, GetTickCount64());
+            emit_http_trace_response(it->second, "success", 200, response_contents);
+            pending_http_trace_requests_.erase(it);
+            return;
+        }
+
+        if (fn == targets_.sa_http_invoke_error) {
+            int32_t response_code = 0;
+            read_i32_property_named(fn, params, "httpresultcode", response_code);
+            handle_user_management_http_response(
+                call_ctx.Context,
+                false,
+                response_code,
+                response_contents,
+                GetTickCount64()
+            );
+            emit_http_trace_response(it->second, "error", response_code, response_contents);
+            pending_http_trace_requests_.erase(it);
+        }
+    }
+
+    void handle_http_trace_hook(
+        RC::Unreal::UFunction* fn,
+        RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx
+    ) {
+#if defined(_MSC_VER)
+        __try {
+            handle_http_trace_hook_impl(fn, call_ctx);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return;
+        }
+#else
+        handle_http_trace_hook_impl(fn, call_ctx);
+#endif
+    }
+
+    void register_http_trace_hooks() {
+        auto bind = [&](RC::Unreal::UFunction* fn) {
+            if (!fn || !is_likely_valid_object_ptr(fn)) {
+                return;
+            }
+            for (const auto& existing : http_trace_hook_bindings_) {
+                if (existing.first == fn) {
+                    return;
+                }
+            }
+            const auto callback_id = fn->RegisterPostHook(
+                [](RC::Unreal::UnrealScriptFunctionCallableContext& call_ctx, void* custom_data) {
+                    auto* self = reinterpret_cast<KovaaksBridgeModProduction*>(custom_data);
+                    if (!self || !self->rust_ready_ || self->updates_disabled_) {
+                        return;
+                    }
+                    auto* frame = reinterpret_cast<RC::Unreal::FFrame_50_AndBelow*>(&call_ctx.TheStack);
+                    auto* current_fn = frame ? frame->Node : nullptr;
+                    self->handle_http_trace_hook(current_fn, call_ctx);
+                },
+                this
+            );
+            http_trace_hook_bindings_.emplace_back(fn, callback_id);
+        };
+
+        bind(targets_.send_sa_http_request);
+        bind(targets_.sa_http_invoke_success);
+        bind(targets_.sa_http_invoke_error);
+        http_trace_hooks_registered_ = !http_trace_hook_bindings_.empty();
+    }
+
+    void unregister_http_trace_hooks() {
+        for (auto& binding : http_trace_hook_bindings_) {
+            if (binding.first && is_likely_valid_object_ptr(binding.first)) {
+                binding.first->UnregisterHook(binding.second);
+            }
+        }
+        http_trace_hook_bindings_.clear();
+        http_trace_hooks_registered_ = false;
+        pending_http_trace_requests_.clear();
+    }
+
     auto on_update_impl() -> void {
         const uint64_t now = GetTickCount64();
         if (now < fault_backoff_until_ms_) {
@@ -1619,6 +2067,7 @@ private:
             next_scenario_resolve_ms_ = 0;
         }
 
+        maybe_emit_user_management_build_tag();
         maybe_emit_user_management_snapshot(now, false);
 
         resolve_targets(false);
@@ -2752,6 +3201,9 @@ private:
 
 private:
     struct Targets {
+        RC::Unreal::UFunction* send_sa_http_request{};
+        RC::Unreal::UFunction* sa_http_invoke_success{};
+        RC::Unreal::UFunction* sa_http_invoke_error{};
         RC::Unreal::UFunction* get_kills_value_else{};
         RC::Unreal::UFunction* get_kills_value_or{};
         RC::Unreal::UFunction* receive_kills_value_else{};
@@ -3016,19 +3468,33 @@ private:
     uint64_t pending_shot_telemetry_started_ms_{0};
     std::vector<std::pair<RC::Unreal::UFunction*, uint64_t>> live_metric_hook_bindings_{};
     bool live_metric_hooks_registered_{false};
+    std::vector<std::pair<RC::Unreal::UFunction*, uint64_t>> http_trace_hook_bindings_{};
+    bool http_trace_hooks_registered_{false};
+    uint64_t next_http_trace_request_id_{1};
+    std::unordered_map<RC::Unreal::UObject*, InGameHttpTraceRequest> pending_http_trace_requests_{};
     bool live_pull_snapshot_dirty_{false};
+    bool user_management_build_tag_sent_{false};
 
     // Keep user identity and friend resolution isolated from the core bridge loop.
     #include "kmod/user_management.inl"
 
     static inline KovaaksBridgeModProduction* s_instance_{nullptr};
 
+    void maybe_emit_user_management_build_tag() {
+        if (user_management_build_tag_sent_ || !kovaaks::RustBridge::is_connected()) {
+            return;
+        }
+        user_management_build_tag_sent_ = true;
+        kovaaks::RustBridge::emit_json(
+            "{\"ev\":\"kovaaks_user_debug\",\"message\":\"build user_mgmt_diag_v3\"}"
+        );
+    }
+
     void reset_runtime_resolvers() {
         meta_game_instance_ = nullptr;
         state_receiver_instance_ = nullptr;
         scenario_state_receiver_instance_ = nullptr;
         scenario_manager_instance_ = nullptr;
-        xsolla_login_subsystem_ = nullptr;
         cached_scenario_is_paused_ = -1;
         live_metric_receiver_hint_ = nullptr;
         live_metric_receiver_hint_ms_ = 0;
@@ -3260,6 +3726,9 @@ private:
             return nullptr;
         };
 
+        targets_.send_sa_http_request = resolve_fn(STR("/Script/GameSkillsTrainer.Send_SAHttpRequest:Send_SAHttpRequest"));
+        targets_.sa_http_invoke_success = resolve_fn(STR("/Script/GameSkillsTrainer.Send_SAHttpRequest:Invoke_Success"));
+        targets_.sa_http_invoke_error = resolve_fn(STR("/Script/GameSkillsTrainer.Send_SAHttpRequest:Invoke_Error"));
         targets_.get_kills_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Kills_ValueElse"));
         targets_.get_kills_value_or = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Get_Kills_ValueOr"));
         targets_.receive_kills_value_else = resolve_fn(STR("/Script/KovaaKFramework.PerformanceIndicatorsStateReceiver:Receive_Kills_ValueElse"));
@@ -3344,6 +3813,7 @@ private:
         targets_.scenario_is_in_scenario_editor = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsInScenarioEditor"));
         targets_.scenario_is_currently_in_benchmark = resolve_fn(STR("/Script/GameSkillsTrainer.ScenarioManager:IsCurrentlyInBenchmark"));
         register_live_metric_hooks();
+        register_http_trace_hooks();
 
         const bool core_live_hooks_ready =
             (targets_.receive_seconds || targets_.receive_seconds_single || targets_.receive_seconds_value_else || targets_.receive_seconds_value_or) &&

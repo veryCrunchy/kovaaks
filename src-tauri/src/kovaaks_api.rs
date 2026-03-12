@@ -152,38 +152,6 @@ pub async fn fetch_best_score(username: &str, scenario_name: &str) -> anyhow::Re
     Ok(best)
 }
 
-/// Fetch the best score for a user identified by their Steam64 ID (no KovaaK's account required).
-///
-/// Uses the `steamId` query param variant of `last-scores/by-name`, which works for any player
-/// who has linked their Steam account to KovaaK's in-game, even without a webapp account.
-/// Returns `None` if they have never played the scenario or their scores are not public.
-pub async fn fetch_best_score_by_steam_id(
-    steam_id: &str,
-    scenario_name: &str,
-) -> anyhow::Result<Option<f64>> {
-    let response = CLIENT
-        .get(format!(
-            "{}/webapp-backend/user/scenario/last-scores/by-name",
-            BASE_URL
-        ))
-        .query(&[("steamId", steam_id), ("scenarioName", scenario_name)])
-        .header("Accept", "application/json")
-        .send()
-        .await?;
-
-    if response.status() == reqwest::StatusCode::NOT_FOUND {
-        return Ok(None);
-    }
-
-    if !response.status().is_success() {
-        anyhow::bail!("API error {} (steamId={})", response.status(), steam_id);
-    }
-
-    let scores: Vec<ScoreData> = response.json().await?;
-    let best = scores.into_iter().map(|s| s.score).reduce(f64::max);
-    Ok(best)
-}
-
 /// Fetch the full user profile for a KovaaK's webapp username.
 ///
 /// Returns `None` if no user with that username exists.
@@ -222,16 +190,14 @@ fn search_result_to_profile(r: SearchResult) -> UserProfile {
     }
 }
 
-/// Find a KovaaK's user profile by cross-referencing their Steam64 ID against
-/// KovaaK's search results.
+/// Best-effort attempt to find a KovaaK's user profile by cross-referencing a
+/// Steam64 ID against KovaaK's username search results.
 ///
-/// The KovaaK's `/user/search` endpoint only accepts a `username` query, but each
-/// result includes the linked `steamId`.  This function searches with `display_name`
-/// (the Steam display name obtained from the Steam API) and checks if any result's
-/// `steamId` matches.  Falls back to searching with just the first token of
-/// `display_name` in case the KovaaK's username is only a partial match.
-///
-/// Returns `None` if no KovaaK's account is linked to that Steam ID.
+/// The public `/user/search` endpoint only accepts a `username` query. This
+/// helper probes with the provided Steam display name and then checks whether any
+/// returned result has a matching `steamId`. It can work when a player's KovaaK's
+/// username resembles their Steam identity, but it is not reliable enough for
+/// background refresh loops or authoritative friend filtering.
 pub async fn find_user_by_steam_id(
     steam_id: &str,
     display_name: &str,

@@ -194,7 +194,7 @@ set_target_properties(main PROPERTIES
 )
 
 if(MSVC)
-  target_compile_options(main PRIVATE /utf-8 /EHsc)
+  target_compile_options(main PRIVATE /utf-8 /EHsc /FS)
   # UE4SS runtime in-game is release-built; forcing /MD + non-debug STL ABI
   # avoids Debug STL object layout/allocator mismatch across DLL boundaries.
   set_property(TARGET main PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")

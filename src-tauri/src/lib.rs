@@ -828,25 +828,181 @@ fn set_selected_friend(
 
 /// Return the list of friend profiles stored in settings.
 #[tauri::command]
-fn get_friends(state: tauri::State<AppState>) -> Result<Vec<FriendProfile>, String> {
-    let s = state.settings.lock().map_err(|e| e.to_string())?;
-    Ok(s.friends.clone())
+async fn get_friends(state: tauri::State<'_, AppState>) -> Result<Vec<FriendProfile>, String> {
+    let manual_friends = {
+        let s = match state.settings.lock() {
+            Ok(guard) => guard,
+            Err(err) => return Err(err.to_string()),
+        };
+        s.friends
+            .iter()
+            .cloned()
+            .map(|mut friend| {
+                friend.bridge_managed = false;
+                friend
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let live_friends = current_bridge_friend_profiles().await;
+    if live_friends.is_empty() {
+        return Ok(manual_friends);
+    }
+
+    let mut manual_used = vec![false; manual_friends.len()];
+    let mut merged = Vec::with_capacity(live_friends.len() + manual_friends.len());
+
+    for live_friend in live_friends {
+        if let Some((index, manual_friend)) = manual_friends
+            .iter()
+            .enumerate()
+            .find(|(_, manual_friend)| same_friend_identity(&live_friend, manual_friend))
+        {
+            manual_used[index] = true;
+            merged.push(merge_live_and_manual_friend(&live_friend, manual_friend));
+        } else {
+            merged.push(live_friend);
+        }
+    }
+
+    for (index, manual_friend) in manual_friends.into_iter().enumerate() {
+        if !manual_used[index] {
+            merged.push(manual_friend);
+        }
+    }
+
+    merged.sort_by(|left, right| {
+        let left_key = first_nonempty_string(&[
+            left.steam_account_name.as_str(),
+            left.username.as_str(),
+            left.steam_id.as_str(),
+        ])
+        .to_ascii_lowercase();
+        let right_key = first_nonempty_string(&[
+            right.steam_account_name.as_str(),
+            right.username.as_str(),
+            right.steam_id.as_str(),
+        ])
+        .to_ascii_lowercase();
+        left_key.cmp(&right_key)
+    });
+
+    Ok(merged)
+}
+
+async fn current_bridge_friend_profiles() -> Vec<FriendProfile> {
+    let Some(snapshot) = bridge::current_kovaaks_friend_scores() else {
+        return Vec::new();
+    };
+
+    let mut unique = Vec::new();
+    for entry in snapshot.entries {
+        let Some(friend) = friend_profile_from_bridge_score_entry(&entry) else {
+            continue;
+        };
+        let duplicate = unique.iter().any(|existing: &FriendProfile| {
+            if !friend.steam_id.is_empty() && !existing.steam_id.is_empty() {
+                existing.steam_id == friend.steam_id
+            } else {
+                existing.username.eq_ignore_ascii_case(&friend.username)
+            }
+        });
+
+        if !duplicate {
+            unique.push(enrich_friend_profile_from_steam(friend).await);
+        }
+    }
+
+    unique.sort_by(|left, right| {
+        let left_key = first_nonempty_string(&[
+            left.steam_account_name.as_str(),
+            left.username.as_str(),
+            left.steam_id.as_str(),
+        ])
+        .to_ascii_lowercase();
+        let right_key = first_nonempty_string(&[
+            right.steam_account_name.as_str(),
+            right.username.as_str(),
+            right.steam_id.as_str(),
+        ])
+        .to_ascii_lowercase();
+        left_key.cmp(&right_key)
+    });
+
+    unique
+}
+
+fn looks_like_steam_id(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.len() >= 17 && trimmed.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn same_friend_identity(left: &FriendProfile, right: &FriendProfile) -> bool {
+    if !left.steam_id.is_empty() && !right.steam_id.is_empty() {
+        return left.steam_id == right.steam_id;
+    }
+
+    left.username.eq_ignore_ascii_case(&right.username)
+}
+
+fn merge_live_and_manual_friend(live: &FriendProfile, manual: &FriendProfile) -> FriendProfile {
+    let live_username = live.username.trim();
+    let manual_username = manual.username.trim();
+    let username = if live_username.is_empty() || looks_like_steam_id(live_username) {
+        first_nonempty_string(&[manual_username, live_username, live.steam_id.as_str()])
+    } else {
+        live_username.to_string()
+    };
+
+    FriendProfile {
+        username,
+        steam_id: first_nonempty_string(&[live.steam_id.as_str(), manual.steam_id.as_str()]),
+        steam_account_name: first_nonempty_string(&[
+            live.steam_account_name.as_str(),
+            manual.steam_account_name.as_str(),
+            manual.username.as_str(),
+        ]),
+        avatar_url: first_nonempty_string(&[live.avatar_url.as_str(), manual.avatar_url.as_str()]),
+        country: first_nonempty_string(&[live.country.as_str(), manual.country.as_str()]),
+        kovaaks_plus: live.kovaaks_plus || manual.kovaaks_plus,
+        bridge_managed: true,
+    }
+}
+
+fn bridge_linked_identity_for_provider<'a>(
+    user: &'a bridge::BridgeCurrentUserProfile,
+    provider: &str,
+) -> Option<&'a bridge::BridgeLinkedIdentity> {
+    user.linked_accounts
+        .iter()
+        .find(|account| account.provider.eq_ignore_ascii_case(provider))
+}
+
+fn bridge_user_display_name(user: &bridge::BridgeCurrentUserProfile) -> String {
+    let steam_identity = bridge_linked_identity_for_provider(user, "steam");
+    first_nonempty_string(&[
+        user.display_name.as_str(),
+        user.steam_name.as_str(),
+        steam_identity
+            .map(|account| account.display_name.as_str())
+            .unwrap_or(""),
+        steam_identity
+            .map(|account| account.username.as_str())
+            .unwrap_or(""),
+        user.username.as_str(),
+        user.steam_id.as_str(),
+    ])
 }
 
 fn friend_profile_from_bridge_user(
     user: &bridge::BridgeCurrentUserProfile,
 ) -> Option<FriendProfile> {
-    let username = if !user.username.trim().is_empty() {
-        user.username.trim().to_string()
-    } else if !user.display_name.trim().is_empty() {
-        user.display_name.trim().to_string()
-    } else if !user.steam_name.trim().is_empty() {
-        user.steam_name.trim().to_string()
-    } else if !user.steam_id.trim().is_empty() {
-        user.steam_id.trim().to_string()
-    } else {
+    let username = bridge_user_display_name(user);
+    if username.is_empty() {
         return None;
-    };
+    }
+
+    let steam_identity = bridge_linked_identity_for_provider(user, "steam");
 
     Some(FriendProfile {
         username,
@@ -854,32 +1010,120 @@ fn friend_profile_from_bridge_user(
         steam_account_name: first_nonempty_string(&[
             user.steam_name.as_str(),
             user.display_name.as_str(),
+            steam_identity
+                .map(|account| account.display_name.as_str())
+                .unwrap_or(""),
+            steam_identity
+                .map(|account| account.username.as_str())
+                .unwrap_or(""),
             user.username.as_str(),
         ]),
         avatar_url: user.avatar_url.trim().to_string(),
         country: String::new(),
         kovaaks_plus: false,
+        bridge_managed: true,
     })
 }
 
-fn friend_profile_from_bridge_friend(
-    friend: &bridge::BridgeSocialFriendProfile,
+fn friend_profile_from_bridge_score_entry(
+    entry: &bridge::BridgeFriendScoreEntry,
 ) -> Option<FriendProfile> {
-    let username = if !friend.username.trim().is_empty() {
-        friend.username.trim().to_string()
-    } else if !friend.steam_id.trim().is_empty() {
-        friend.steam_id.trim().to_string()
-    } else {
+    let steam_id = entry.steam_id.trim();
+    let display_name = entry.steam_account_name.trim();
+    if steam_id.is_empty() && display_name.is_empty() {
         return None;
-    };
+    }
 
     Some(FriendProfile {
-        username,
-        steam_id: friend.steam_id.trim().to_string(),
-        steam_account_name: friend.display_name.trim().to_string(),
-        avatar_url: friend.avatar_url.trim().to_string(),
+        username: first_nonempty_string(&[display_name, steam_id]),
+        steam_id: steam_id.to_string(),
+        steam_account_name: display_name.to_string(),
+        avatar_url: String::new(),
         country: String::new(),
-        kovaaks_plus: false,
+        kovaaks_plus: entry.kovaaks_plus_active,
+        bridge_managed: true,
+    })
+}
+
+async fn enrich_friend_profile_from_steam(mut profile: FriendProfile) -> FriendProfile {
+    let steam_id = profile.steam_id.trim().to_string();
+    if steam_id.is_empty() {
+        return profile;
+    }
+    if !profile.avatar_url.trim().is_empty()
+        && !profile.steam_account_name.trim().is_empty()
+        && profile.steam_account_name.trim() != steam_id
+    {
+        return profile;
+    }
+
+    match steam_api::resolve_steam_user(&steam_id).await {
+        Ok(steam) => {
+            if profile.avatar_url.trim().is_empty() {
+                profile.avatar_url = steam.avatar_url;
+            }
+            if profile.steam_account_name.trim().is_empty()
+                || profile.steam_account_name.trim() == steam_id
+            {
+                profile.steam_account_name = steam.display_name.clone();
+            }
+            if profile.username.trim().is_empty() || profile.username.trim() == steam_id {
+                profile.username = first_nonempty_string(&[
+                    profile.steam_account_name.as_str(),
+                    steam.display_name.as_str(),
+                    steam.steam_id.as_str(),
+                ]);
+            }
+            profile
+        }
+        Err(err) => {
+            log::debug!(
+                "identity: steam profile enrichment failed steam_id='{}': {}",
+                steam_id,
+                err
+            );
+            profile
+        }
+    }
+}
+
+fn normalize_vs_scenario_name(name: &str) -> String {
+    let normalized = name.trim().to_ascii_lowercase();
+    for suffix in [" - challenge start", " - challenge"] {
+        if let Some(stripped) = normalized.strip_suffix(suffix) {
+            return stripped.trim().to_string();
+        }
+    }
+    normalized
+}
+
+fn current_bridge_friend_score(
+    scenario_name: &str,
+    username: &str,
+    steam_id: Option<&str>,
+    steam_account_name: Option<&str>,
+) -> Option<f64> {
+    let snapshot = bridge::current_kovaaks_friend_scores()?;
+    if normalize_vs_scenario_name(&snapshot.scenario_name)
+        != normalize_vs_scenario_name(scenario_name)
+    {
+        return None;
+    }
+
+    let wanted_steam_id = steam_id.unwrap_or("").trim();
+    let wanted_username = username.trim();
+    let wanted_display_name = steam_account_name.unwrap_or("").trim();
+
+    snapshot.entries.into_iter().find_map(|entry| {
+        let entry_steam_id = entry.steam_id.trim();
+        let entry_display_name = entry.steam_account_name.trim();
+        let matches = (!wanted_steam_id.is_empty() && entry_steam_id == wanted_steam_id)
+            || (!wanted_display_name.is_empty()
+                && entry_display_name.eq_ignore_ascii_case(wanted_display_name))
+            || (!wanted_username.is_empty()
+                && entry_display_name.eq_ignore_ascii_case(wanted_username))
+            || (!wanted_username.is_empty() && entry_steam_id == wanted_username);
+        matches.then_some(entry.score)
     })
 }
 
@@ -894,19 +1138,19 @@ fn first_nonempty_string(candidates: &[&str]) -> String {
 }
 
 async fn resolve_current_identity_profile() -> Option<FriendProfile> {
-    if let Some(user) = bridge::current_kovaaks_user()
-        .as_ref()
-        .and_then(friend_profile_from_bridge_user)
-    {
-        log::info!(
-            "identity: resolved current user from bridge username='{}' steam_id='{}'",
-            user.username,
-            user.steam_id
-        );
-        return Some(user);
+    if let Some(user) = bridge::current_kovaaks_user().as_ref() {
+        if let Some(user) = friend_profile_from_bridge_user(user) {
+            let user = enrich_friend_profile_from_steam(user).await;
+            log::info!(
+                "identity: resolved current user from bridge username='{}' steam_id='{}'",
+                user.username,
+                user.steam_id
+            );
+            return Some(user);
+        }
     }
 
-    log::info!("identity: no live bridge user snapshot; falling back to Steam/KovaaK's lookup");
+    log::info!("identity: no live bridge user snapshot; falling back to Steam lookup");
 
     let steam_id = match steam_integration::get_active_steam_id() {
         Some(value) => value,
@@ -924,31 +1168,14 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
         }
     };
 
-    let kovaaks = match kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name).await {
-        Ok(profile) => profile,
-        Err(err) => {
-            log::warn!("identity: failed to resolve KovaaK's profile by Steam ID: {err}");
-            None
-        }
-    };
-
-    let profile = match kovaaks {
-        Some(p) => FriendProfile {
-            username: p.username,
-            steam_id: p.steam_id,
-            steam_account_name: p.steam_account_name,
-            avatar_url: p.avatar_url,
-            country: p.country,
-            kovaaks_plus: p.kovaaks_plus,
-        },
-        None => FriendProfile {
-            username: steam.steam_id.clone(),
-            steam_id: steam.steam_id.clone(),
-            steam_account_name: steam.display_name.clone(),
-            avatar_url: steam.avatar_url.clone(),
-            country: String::new(),
-            kovaaks_plus: false,
-        },
+    let profile = FriendProfile {
+        username: first_nonempty_string(&[steam.display_name.as_str(), steam.steam_id.as_str()]),
+        steam_id: steam.steam_id.clone(),
+        steam_account_name: steam.display_name.clone(),
+        avatar_url: steam.avatar_url.clone(),
+        country: String::new(),
+        kovaaks_plus: false,
+        bridge_managed: false,
     };
 
     log::info!(
@@ -957,6 +1184,11 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
         profile.steam_id
     );
     Some(profile)
+}
+
+#[tauri::command]
+fn get_live_friend_scores() -> Option<bridge::BridgeFriendScoresSnapshot> {
+    bridge::current_kovaaks_friend_scores()
 }
 
 #[tauri::command]
@@ -984,8 +1216,8 @@ async fn get_current_kovaaks_user() -> Option<FriendProfile> {
 ///                     Steam (so vanity URLs like "aimicantaim" also work)
 ///
 /// Friends resolved via Steam with no linked KovaaK's account are stored with
-/// their Steam64 ID as `username`; scores are still fetched using the steamId
-/// query param so VS-mode comparison works for them too.
+/// their Steam64 ID as `username`. Those entries can still be tracked in the
+/// live bridge list, but score lookups require a real KovaaK's username.
 #[tauri::command]
 async fn add_friend(
     username: String,
@@ -1051,6 +1283,7 @@ async fn add_friend(
         avatar_url: profile.avatar_url.clone(),
         country: profile.country.clone(),
         kovaaks_plus: profile.kovaaks_plus,
+        bridge_managed: false,
     };
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
     // Deduplicate by steam_id (if available) or username.
@@ -1086,10 +1319,10 @@ fn remove_friend(
 }
 
 /// Fetch a friend's best score for a specific scenario from the KovaaK's API.
-/// Works for both KovaaK's-account holders (lookup by username) and Steam-only
-/// players (lookup by Steam64 ID via the `steamId` query param).
+/// Prefers the in-game bridge snapshot and falls back to local PB for self-VS.
 #[tauri::command]
 async fn fetch_friend_score(
+    app: AppHandle,
     username: String,
     scenario_name: String,
     steam_id: Option<String>,
@@ -1101,83 +1334,62 @@ async fn fetch_friend_score(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .or_else(|| steam_api::is_steam64_id(&normalized_username).then(|| normalized_username.clone()));
+        .or_else(|| {
+            steam_api::is_steam64_id(&normalized_username).then(|| normalized_username.clone())
+        });
     let normalized_display_name = steam_account_name
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    if !normalized_username.is_empty() && !steam_api::is_steam64_id(&normalized_username) {
-        let result = kovaaks_api::fetch_best_score(&normalized_username, &scenario_name)
-            .await
-            .map_err(|e| e.to_string());
-        match &result {
-            Ok(score) => log::info!(
-                "vsmode: fetch_friend_score via username username='{}' scenario='{}' -> {:?}",
-                normalized_username,
-                scenario_name,
-                score
-            ),
-            Err(error) => log::warn!(
-                "vsmode: fetch_friend_score via username failed username='{}' scenario='{}': {}",
-                normalized_username,
-                scenario_name,
-                error
-            ),
-        }
-        if matches!(result, Ok(Some(_))) {
-            return result;
-        }
+    if let Some(score) = current_bridge_friend_score(
+        &scenario_name,
+        &normalized_username,
+        normalized_steam_id.as_deref(),
+        normalized_display_name.as_deref(),
+    ) {
         log::info!(
-            "vsmode: username score lookup returned no score; attempting Steam fallback username='{}' scenario='{}'",
+            "vsmode: fetch_friend_score via bridge username='{}' steam_id='{}' scenario='{}' -> {:?}",
             normalized_username,
-            scenario_name
+            normalized_steam_id.as_deref().unwrap_or(""),
+            scenario_name,
+            Some(score)
         );
+        return Ok(Some(score));
     }
 
-    if let (Some(steam_id), Some(display_name)) = (normalized_steam_id.as_deref(), normalized_display_name.as_deref()) {
-        match kovaaks_api::find_user_by_steam_id(steam_id, display_name).await {
-            Ok(Some(profile)) => {
-                let result = kovaaks_api::fetch_best_score(&profile.username, &scenario_name)
-                    .await
-                    .map_err(|e| e.to_string());
-                match &result {
-                    Ok(score) => log::info!(
-                        "vsmode: fetch_friend_score via resolved steam identity username='{}' steam_id='{}' scenario='{}' -> {:?}",
-                        profile.username,
-                        steam_id,
-                        scenario_name,
-                        score
-                    ),
-                    Err(error) => log::warn!(
-                        "vsmode: fetch_friend_score via resolved steam identity failed username='{}' steam_id='{}' scenario='{}': {}",
-                        profile.username,
-                        steam_id,
-                        scenario_name,
-                        error
-                    ),
-                }
-                return result;
-            }
-            Ok(None) => {
-                log::info!(
-                    "vsmode: no KovaaK's username found for steam_id='{}' display_name='{}'",
-                    steam_id,
-                    display_name
-                );
-            }
-            Err(error) => {
-                log::warn!(
-                    "vsmode: failed to resolve steam identity steam_id='{}' display_name='{}': {}",
-                    steam_id,
-                    display_name,
-                    error
-                );
-            }
-        }
+    let active_bridge_user = bridge::current_kovaaks_user();
+    let is_self = active_bridge_user.as_ref().is_some_and(|user| {
+        let current_steam_id = user.steam_id.trim();
+        !current_steam_id.is_empty()
+            && normalized_steam_id
+                .as_deref()
+                .is_some_and(|wanted| wanted.trim() == current_steam_id)
+    });
+
+    if is_self {
+        let local_pb = session_store::get_personal_best_for_scenario(
+            &app,
+            &normalize_vs_scenario_name(&scenario_name),
+        )
+        .map(|value| value as f64);
+        log::info!(
+            "vsmode: fetch_friend_score via local_pb username='{}' scenario='{}' -> {:?}",
+            normalized_username,
+            scenario_name,
+            local_pb
+        );
+        return Ok(local_pb);
     }
 
+    log::info!(
+        "vsmode: no in-game friend score available username='{}' steam_id='{}' display_name='{}' scenario='{}'",
+        normalized_username,
+        normalized_steam_id.as_deref().unwrap_or(""),
+        normalized_display_name.as_deref().unwrap_or(""),
+        scenario_name
+    );
     Ok(None)
 }
 
@@ -1193,22 +1405,6 @@ async fn fetch_friend_most_played(
     kovaaks_api::fetch_most_played(&username, 10)
         .await
         .map_err(|e| e.to_string())
-}
-
-/// Detect the currently logged-in Steam user and cross-reference their KovaaK's account.
-///
-/// Returns a `FriendProfile` for the active Steam user:
-/// - `username` is their KovaaK's username if they have a linked account, otherwise their Steam64 ID.
-/// - All other fields are populated from Steam + KovaaK's as available.
-///
-/// Intended to auto-populate the "your username" settings field without any manual entry.
-#[tauri::command]
-async fn detect_current_user() -> Result<FriendProfile, String> {
-    if let Some(user) = resolve_current_identity_profile().await {
-        return Ok(user);
-    }
-
-    Err("Steam is not running or active user could not be detected".to_string())
 }
 
 /// Returns the Steam 64-bit ID and display name of the currently logged-in Steam user.
@@ -1257,176 +1453,22 @@ async fn get_active_steam_user() -> Option<ActiveSteamUser> {
 /// Returns the newly added FriendProfiles.
 #[tauri::command]
 async fn import_steam_friends(
-    state: tauri::State<'_, AppState>,
-    app: AppHandle,
+    _state: tauri::State<'_, AppState>,
+    _app: AppHandle,
 ) -> Result<Vec<FriendProfile>, String> {
-    let bridge_friends = bridge::current_kovaaks_friends();
-    if !bridge_friends.is_empty() {
-        let existing_friends = {
-            let s = state.settings.lock().map_err(|e| e.to_string())?;
-            s.friends.clone()
-        };
-
-        let mut new_friends = Vec::new();
-        for friend in bridge_friends {
-            let Some(profile) = friend_profile_from_bridge_friend(&friend) else {
-                continue;
-            };
-            let already_exists = if !profile.steam_id.is_empty() {
-                existing_friends
-                    .iter()
-                    .any(|entry| entry.steam_id == profile.steam_id)
-                    || new_friends
-                        .iter()
-                        .any(|entry: &FriendProfile| entry.steam_id == profile.steam_id)
-            } else {
-                existing_friends
-                    .iter()
-                    .any(|entry| entry.username.eq_ignore_ascii_case(&profile.username))
-                    || new_friends
-                        .iter()
-                        .any(|entry| entry.username.eq_ignore_ascii_case(&profile.username))
-            };
-            if already_exists {
-                continue;
-            }
-            let _ = app.emit("steam-import-progress", ());
-            new_friends.push(profile);
-        }
-
-        if new_friends.is_empty() {
-            return Ok(vec![]);
-        }
-
-        {
-            let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-            s.friends.extend(new_friends.iter().cloned());
-            s.friends.sort_by(|lhs, rhs| {
-                let lhs_key = lhs.steam_account_name.trim().to_ascii_lowercase();
-                let rhs_key = rhs.steam_account_name.trim().to_ascii_lowercase();
-                lhs_key.cmp(&rhs_key)
-            });
-            let cloned = s.clone();
-            drop(s);
-            settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
-        }
-
-        log::info!(
-            "import_steam_friends: imported {} friends from live KovaaK's social data",
-            new_friends.len()
+    let live_friends = current_bridge_friend_profiles().await;
+    if live_friends.is_empty() {
+        return Err(
+            "No live KovaaK friends are available from the mod bridge yet. Start KovaaK's with the bridge active first."
+                .to_string(),
         );
-        return Ok(new_friends);
-    }
-
-    use std::sync::Arc;
-    use tokio::sync::Semaphore;
-
-    let active_steam_id = steam_integration::get_active_steam_id()
-        .ok_or_else(|| "Steam is not running or active user could not be detected".to_string())?;
-
-    let friend_ids = steam_integration::get_friend_ids(&active_steam_id).await;
-    if friend_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    // Filter out already-added friends.
-    let existing_steam_ids: Vec<String> = {
-        let s = state.settings.lock().map_err(|e| e.to_string())?;
-        s.friends.iter().map(|f| f.steam_id.clone()).collect()
-    };
-    let new_ids: Vec<String> = friend_ids
-        .into_iter()
-        .filter(|id| !existing_steam_ids.contains(id))
-        .collect();
-
-    if new_ids.is_empty() {
-        return Ok(vec![]);
-    }
-
-    let total = new_ids.len();
-    log::info!("import_steam_friends: resolving {} new friend IDs", total);
-
-    // Resolve concurrently — 12 in-flight at a time to avoid hammering the APIs.
-    let sem = Arc::new(Semaphore::new(12));
-    let mut handles = Vec::with_capacity(total);
-
-    for steam_id in new_ids {
-        let permit = sem.clone().acquire_owned().await.unwrap();
-        let app_handle = app.clone();
-        let handle = tokio::spawn(async move {
-            let _permit = permit; // released when task finishes
-
-            // 1. Resolve Steam profile (display name + avatar).
-            let steam = match steam_api::resolve_steam_user(&steam_id).await {
-                Ok(p) => p,
-                Err(e) => {
-                    log::warn!("import_steam_friends: skip {steam_id}: {e}");
-                    let _ = app_handle.emit("steam-import-progress", ());
-                    return None;
-                }
-            };
-
-            // 2. Cross-reference with KovaaK's — skip if they don't play KovaaK's.
-            let kovaaks =
-                match kovaaks_api::find_user_by_steam_id(&steam.steam_id, &steam.display_name)
-                    .await
-                    .unwrap_or(None)
-                {
-                    Some(p) => p,
-                    None => {
-                        let _ = app_handle.emit("steam-import-progress", ());
-                        return None; // not a KovaaK's player — skip
-                    }
-                };
-
-            let friend = FriendProfile {
-                username: kovaaks.username,
-                steam_id: kovaaks.steam_id,
-                steam_account_name: kovaaks.steam_account_name,
-                avatar_url: kovaaks.avatar_url,
-                country: kovaaks.country,
-                kovaaks_plus: kovaaks.kovaaks_plus,
-            };
-
-            let _ = app_handle.emit("steam-import-progress", ());
-            Some(friend)
-        });
-        handles.push(handle);
-    }
-
-    // Collect results.
-    let mut new_friends: Vec<FriendProfile> = Vec::new();
-    for handle in handles {
-        if let Ok(Some(f)) = handle.await {
-            new_friends.push(f);
-        }
-    }
-
-    // Persist.
-    {
-        let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-        for f in &new_friends {
-            let dupe = if !f.steam_id.is_empty() {
-                s.friends.iter().any(|x| x.steam_id == f.steam_id)
-            } else {
-                s.friends
-                    .iter()
-                    .any(|x| x.username.eq_ignore_ascii_case(&f.username))
-            };
-            if !dupe {
-                s.friends.push(f.clone());
-            }
-        }
-        let cloned = s.clone();
-        drop(s);
-        settings::persist(&app, &cloned).map_err(|e| e.to_string())?;
     }
 
     log::info!(
-        "import_steam_friends: imported {} friends",
-        new_friends.len()
+        "import_steam_friends: compatibility path returning {} live bridge friends",
+        live_friends.len()
     );
-    Ok(new_friends)
+    Ok(live_friends)
 }
 
 /// Validate an OCR-read scenario name and return the canonical spelling, or null if
@@ -1474,6 +1516,7 @@ async fn validate_username(username: String) -> Result<Option<FriendProfile>, St
         avatar_url: p.avatar_url,
         country: p.country,
         kovaaks_plus: p.kovaaks_plus,
+        bridge_managed: false,
     }))
 }
 
@@ -2012,6 +2055,7 @@ pub fn run() {
             read_kovaaks_palette,
             write_kovaaks_palette_colors,
             get_friends,
+            get_live_friend_scores,
             get_current_kovaaks_user,
             add_friend,
             remove_friend,
@@ -2020,7 +2064,6 @@ pub fn run() {
             fetch_friend_most_played,
             get_active_steam_user,
             import_steam_friends,
-            detect_current_user,
             validate_username,
             validate_scenario,
             start_mouse_hook,

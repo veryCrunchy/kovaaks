@@ -28,6 +28,8 @@ pub struct FriendProfile {
     pub avatar_url: String,
     pub country: String,
     pub kovaaks_plus: bool,
+    #[serde(default)]
+    pub bridge_managed: bool,
 }
 
 /// Persistent application settings.
@@ -39,9 +41,6 @@ pub struct AppSettings {
     /// Whether the overlay is currently visible.
     #[serde(default = "default_true")]
     pub overlay_visible: bool,
-    /// The user's KovaaK's webapp username (used for VS Mode comparison and display).
-    #[serde(default)]
-    pub username: String,
     /// Which monitor index to show the overlay on (0 = primary).
     #[serde(default)]
     pub monitor_index: usize,
@@ -133,7 +132,6 @@ impl Default for AppSettings {
         Self {
             stats_dir: default_stats_dir(),
             overlay_visible: true,
-            username: String::new(),
             monitor_index: 0,
             friends: Vec::new(),
             mouse_dpi: default_mouse_dpi(),

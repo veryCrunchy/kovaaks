@@ -435,8 +435,8 @@ function GeneralSettings({
   confirmReset,
 }: GeneralSettingsProps) {
   const [monitors,      setMonitors]      = useState<MonitorInfo[]>([]);
-  const [detectingUser, setDetectingUser] = useState(false);
-  const [detectError,   setDetectError]   = useState<string | null>(null);
+  const [currentUser, setCurrentUser] = useState<FriendProfile | null>(null);
+  const [currentUserError, setCurrentUserError] = useState<string | null>(null);
   const [hubStatus, setHubStatus] = useState<HubSyncOverview | null>(null);
   const [hubLinkSession, setHubLinkSession] = useState<HubDeviceLinkSession | null>(null);
   const [hubLinkBusy, setHubLinkBusy] = useState(false);
@@ -460,6 +460,17 @@ function GeneralSettings({
     }
   }, []);
 
+  const refreshCurrentUser = useCallback(async () => {
+    try {
+      const next = await invoke<FriendProfile | null>("get_current_kovaaks_user");
+      setCurrentUser(next);
+      setCurrentUserError(null);
+    } catch (err) {
+      setCurrentUser(null);
+      setCurrentUserError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
   const refreshFfmpegStatus = useCallback(async () => {
     try {
       const next = await invoke<FfmpegStatus>("get_ffmpeg_status");
@@ -472,6 +483,14 @@ function GeneralSettings({
   useEffect(() => {
     invoke<MonitorInfo[]>("get_monitors").then(setMonitors).catch(console.error);
   }, []);
+
+  useEffect(() => {
+    void refreshCurrentUser();
+    const interval = window.setInterval(() => {
+      void refreshCurrentUser();
+    }, 5000);
+    return () => window.clearInterval(interval);
+  }, [refreshCurrentUser]);
 
   useEffect(() => {
     void refreshFfmpegStatus();
@@ -538,24 +557,6 @@ function GeneralSettings({
     };
   }, [hubLinkSession, onChange, refreshHubStatus, settings.hub_api_base_url]);
 
-  const handleDetectSteamUser = async () => {
-    setDetectingUser(true);
-    setDetectError(null);
-    try {
-      const profile = await invoke<FriendProfile>("detect_current_user");
-      const name =
-        profile.username && !profile.username.startsWith("765611")
-          ? profile.username
-          : profile.steam_account_name || profile.username;
-      onChange({ ...settings, username: name });
-    } catch (e) {
-      setDetectError(String(e));
-      setTimeout(() => setDetectError(null), 4000);
-    } finally {
-      setDetectingUser(false);
-    }
-  };
-
   const handleMonitorChange = async (index: number) => {
     update("monitor_index", index);
     await invoke("set_overlay_monitor", { index }).catch(console.error);
@@ -619,6 +620,15 @@ function GeneralSettings({
 
   const formatHubTime = (unixMs: number | null) =>
     unixMs ? new Date(unixMs).toLocaleString() : "Not yet";
+  const detectedName = currentUser?.username?.trim()
+    || currentUser?.steam_account_name?.trim()
+    || currentUser?.steam_id?.trim()
+    || "Waiting for live game identity";
+  const detectedKovaaksName = currentUser?.username?.trim() || "";
+  const detectedSteamName = currentUser?.steam_account_name?.trim() || "";
+  const detectedSteamId = currentUser?.steam_id?.trim() || "";
+  const hubAccountLabel = settings.hub_account_label?.trim() || hubStatus?.accountLabel || "";
+  const avatarFallback = detectedName.trim().charAt(0).toUpperCase() || "?";
 
   const ffmpegSourceLabel = ffmpegStatus?.source === "system"
     ? "System install"
@@ -716,29 +726,79 @@ function GeneralSettings({
 
       <div className="flex flex-col gap-7">
 
-        {/* ── Username ──────────────────────────────────────────────── */}
+        {/* ── Identity ──────────────────────────────────────────────── */}
         {activeSection === "basics" && (
-        <FieldGroup label="Display Name" description="Optional local label for the app UI. Live VS mode and hub uploads now use the active in-game identity directly.">
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={settings.username}
-              onChange={(e) => update("username", e.target.value)}
-              placeholder="Shown locally in the desktop app"
-              className="am-input flex-1"
-            />
-            <Btn
-              variant="ghost"
-              size="sm"
-              onClick={handleDetectSteamUser}
-              disabled={detectingUser}
-              title="Auto-detect from the active Steam account"
-              style={{ whiteSpace: "nowrap", borderColor: "rgba(23,144,255,0.3)", color: detectingUser ? "rgba(23,144,255,0.35)" : "#1790ff" }}
-            >
-              {detectingUser ? "Detecting…" : "Detect from Steam"}
-            </Btn>
+        <FieldGroup
+          label="Detected Player"
+          description="AimMod uses the live in-game KovaaK or Steam identity directly for VS mode, friends, and hub uploads."
+        >
+          <div
+            className="flex items-center gap-3"
+            style={{
+              padding: "12px 14px",
+              borderRadius: 12,
+              background: "rgba(255,255,255,0.03)",
+              border: `1px solid ${C.borderSub}`,
+            }}
+          >
+            {currentUser?.avatar_url ? (
+              <img
+                src={currentUser.avatar_url}
+                alt={detectedName}
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: "50%",
+                  objectFit: "cover",
+                  border: `1px solid ${C.border}`,
+                  flexShrink: 0,
+                }}
+              />
+            ) : (
+              <div
+                style={{
+                  width: 44,
+                  height: 44,
+                  borderRadius: "50%",
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  background: "rgba(149,76,233,0.18)",
+                  border: `1px solid ${C.border}`,
+                  color: C.text,
+                  fontSize: 18,
+                  fontWeight: 700,
+                  flexShrink: 0,
+                }}
+              >
+                {avatarFallback}
+              </div>
+            )}
+
+            <div className="flex-1 min-w-0">
+              <div className="text-sm truncate" style={{ color: C.text }}>
+                {detectedName}
+              </div>
+              <div className="text-xs mt-1" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                {detectedKovaaksName && detectedKovaaksName !== detectedSteamId ? `KovaaK's: ${detectedKovaaksName}` : "KovaaK's: waiting for live in-game identity"}
+                <br />
+                {detectedSteamName ? `Steam: ${detectedSteamName}` : "Steam: waiting"}
+                {detectedSteamId ? ` (${detectedSteamId})` : ""}
+              </div>
+            </div>
+
+            <div className="text-right" style={{ flexShrink: 0 }}>
+              <div className="text-xs" style={{ color: C.textFaint }}>Hub</div>
+              <div className="text-xs mt-1" style={{ color: hubAccountLabel ? C.text : C.textFaint }}>
+                {hubAccountLabel || "Not linked"}
+              </div>
+            </div>
           </div>
-          {detectError && <p className="text-xs mt-1" style={{ color: C.danger }}>{detectError}</p>}
+          {currentUserError ? (
+            <p className="text-xs mt-2" style={{ color: C.danger }}>
+              {currentUserError}
+            </p>
+          ) : null}
         </FieldGroup>
         )}
 

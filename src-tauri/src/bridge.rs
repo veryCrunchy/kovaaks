@@ -277,6 +277,36 @@ pub struct BridgeSocialFriendProfile {
     pub kovaaks_user_id: String,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BridgeFriendScoreEntry {
+    #[serde(default)]
+    pub steam_id: String,
+    #[serde(default)]
+    pub steam_account_name: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default)]
+    pub rank: i32,
+    #[serde(default)]
+    pub kovaaks_plus_active: bool,
+}
+
+#[cfg(target_os = "windows")]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct BridgeFriendScoresSnapshot {
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub scenario_name: String,
+    #[serde(default)]
+    pub leaderboard_id: u64,
+    #[serde(default)]
+    pub response_code: i32,
+    #[serde(default)]
+    pub entries: Vec<BridgeFriendScoreEntry>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersistedScenarioClassification {
     pub family: String,
@@ -1166,6 +1196,7 @@ mod imp {
     struct BridgeIdentityState {
         current_user: Option<super::BridgeCurrentUserProfile>,
         friends: Vec<super::BridgeSocialFriendProfile>,
+        friend_scores: Option<super::BridgeFriendScoresSnapshot>,
         last_updated_at: Option<Instant>,
     }
 
@@ -2524,6 +2555,13 @@ mod imp {
             .unwrap_or_default()
     }
 
+    pub(super) fn current_kovaaks_friend_scores() -> Option<super::BridgeFriendScoresSnapshot> {
+        bridge_identity_state()
+            .lock()
+            .ok()
+            .and_then(|state| state.friend_scores.clone())
+    }
+
     fn update_bridge_current_user(app: &AppHandle, user: super::BridgeCurrentUserProfile) {
         if let Ok(mut state) = bridge_identity_state().lock() {
             state.current_user = Some(user.clone());
@@ -2546,6 +2584,20 @@ mod imp {
         }
         log::info!("identity: bridge friends snapshot count={}", friends.len());
         let _ = app.emit(super::KOVAAKS_FRIENDS_EVENT, &friends);
+    }
+
+    fn update_bridge_friend_scores(app: &AppHandle, snapshot: super::BridgeFriendScoresSnapshot) {
+        if let Ok(mut state) = bridge_identity_state().lock() {
+            state.friend_scores = Some(snapshot.clone());
+            state.last_updated_at = Some(Instant::now());
+        }
+        log::info!(
+            "identity: bridge friend scores snapshot scenario='{}' leaderboard_id={} entries={}",
+            snapshot.scenario_name,
+            snapshot.leaderboard_id,
+            snapshot.entries.len()
+        );
+        let _ = app.emit(super::KOVAAKS_FRIENDS_EVENT, &snapshot);
     }
 
     fn reset_bridge_stats_snapshot() {
@@ -3498,6 +3550,99 @@ mod imp {
             return;
         }
 
+        if parsed.ev == "kovaaks_friend_scores_snapshot" {
+            #[derive(serde::Deserialize)]
+            struct RawLeaderboardEntry {
+                #[serde(default)]
+                steam_id: String,
+                #[serde(default)]
+                #[serde(alias = "Score", alias = "score")]
+                score: f64,
+                #[serde(default)]
+                rank: i32,
+                #[serde(default)]
+                kovaaks_plus_active: bool,
+                #[serde(default)]
+                steam_account_name: String,
+            }
+
+            #[derive(serde::Deserialize)]
+            struct RawLeaderboardBody {
+                #[serde(default)]
+                top_scores: Vec<RawLeaderboardEntry>,
+                #[serde(default)]
+                adjacent_scores: Vec<RawLeaderboardEntry>,
+            }
+
+            #[derive(serde::Deserialize)]
+            struct RawFriendScoresSnapshot {
+                #[serde(default)]
+                source: String,
+                #[serde(default)]
+                scenario_name: String,
+                #[serde(default)]
+                leaderboard_id: u64,
+                #[serde(default)]
+                response_code: i32,
+                body: String,
+            }
+
+            if let Ok(snapshot) = serde_json::from_str::<RawFriendScoresSnapshot>(&parsed.raw) {
+                match serde_json::from_str::<RawLeaderboardBody>(&snapshot.body) {
+                    Ok(body) => {
+                        let mut entries = Vec::new();
+                        let mut push_entry = |entry: RawLeaderboardEntry| {
+                            if entry.steam_id.trim().is_empty() {
+                                return;
+                            }
+                            let duplicate =
+                                entries
+                                    .iter()
+                                    .any(|existing: &super::BridgeFriendScoreEntry| {
+                                        existing.steam_id == entry.steam_id
+                                    });
+                            if duplicate {
+                                return;
+                            }
+                            entries.push(super::BridgeFriendScoreEntry {
+                                steam_id: entry.steam_id.trim().to_string(),
+                                steam_account_name: entry.steam_account_name.trim().to_string(),
+                                score: entry.score,
+                                rank: entry.rank,
+                                kovaaks_plus_active: entry.kovaaks_plus_active,
+                            });
+                        };
+
+                        for entry in body.top_scores {
+                            push_entry(entry);
+                        }
+                        for entry in body.adjacent_scores {
+                            push_entry(entry);
+                        }
+
+                        update_bridge_friend_scores(
+                            app,
+                            super::BridgeFriendScoresSnapshot {
+                                source: snapshot.source,
+                                scenario_name: snapshot.scenario_name,
+                                leaderboard_id: snapshot.leaderboard_id,
+                                response_code: snapshot.response_code,
+                                entries,
+                            },
+                        );
+                    }
+                    Err(err) => {
+                        log::warn!(
+                            "identity: failed to parse bridge friend scores body scenario='{}': {}",
+                            snapshot.scenario_name,
+                            err
+                        );
+                    }
+                }
+            }
+            return;
+        }
+
         if parsed.ev == "kovaaks_user_debug" {
             #[derive(serde::Deserialize)]
             struct BridgeUserDebugEvent {
@@ -3505,7 +3650,10 @@ mod imp {
             }
 
             if let Ok(debug_event) = serde_json::from_str::<BridgeUserDebugEvent>(&parsed.raw) {
-                log::info!("identity: mod user-management debug: {}", debug_event.message);
+                log::info!(
+                    "identity: mod user-management debug: {}",
+                    debug_event.message
+                );
             }
             return;
         }
@@ -6507,6 +6655,16 @@ pub fn current_kovaaks_friends() -> Vec<BridgeSocialFriendProfile> {
 #[cfg(not(target_os = "windows"))]
 pub fn current_kovaaks_friends() -> Vec<BridgeSocialFriendProfile> {
     Vec::new()
+}
+
+#[cfg(target_os = "windows")]
+pub fn current_kovaaks_friend_scores() -> Option<BridgeFriendScoresSnapshot> {
+    imp::current_kovaaks_friend_scores()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_kovaaks_friend_scores() -> Option<BridgeFriendScoresSnapshot> {
+    None
 }
 
 #[cfg(target_os = "windows")]

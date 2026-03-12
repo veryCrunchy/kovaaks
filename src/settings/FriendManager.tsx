@@ -1,9 +1,25 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { C, accentAlpha } from "../design/tokens";
+import { C } from "../design/tokens";
 import type { AppSettings } from "../types/settings";
-import type { ActiveSteamUser, FriendProfile, MostPlayedEntry } from "../types/friends";
+import type { FriendProfile, MostPlayedEntry } from "../types/friends";
+
+interface LiveFriendScoreEntry {
+  steam_id: string;
+  steam_account_name: string;
+  score: number;
+  rank: number;
+  kovaaks_plus_active: boolean;
+}
+
+interface LiveFriendScoresSnapshot {
+  source: string;
+  scenario_name: string;
+  leaderboard_id: number;
+  response_code: number;
+  entries: LiveFriendScoreEntry[];
+}
 
 interface FriendManagerProps {
   settings: AppSettings;
@@ -24,7 +40,7 @@ function Avatar({ url, name }: { url: string; name: string }) {
   if (!url || err) {
     return (
       <div
-        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold flex-shrink-0"
+        className="w-10 h-10 rounded-full flex items-center justify-center text-sm font-bold shrink-0"
         style={{ background: C.accentDim, color: C.accent }}
       >
         {name.slice(0, 1).toUpperCase()}
@@ -36,7 +52,7 @@ function Avatar({ url, name }: { url: string; name: string }) {
       src={url}
       alt={name}
       onError={() => setErr(true)}
-      className="w-10 h-10 rounded-full object-cover flex-shrink-0"
+      className="w-10 h-10 rounded-full object-cover shrink-0"
       style={{ border: `1px solid ${C.border}` }}
     />
   );
@@ -79,7 +95,7 @@ function MostPlayedRow({ username }: { username: string }) {
           >
             {e.scenario_name}
           </span>
-          <span className="text-xs tabular-nums flex-shrink-0" style={{ color: C.textFaint }}>
+          <span className="text-xs tabular-nums shrink-0" style={{ color: C.textFaint }}>
             {e.counts.plays} plays · {Math.round(e.score).toLocaleString()}
           </span>
         </div>
@@ -96,66 +112,65 @@ const SEARCH_TYPES: { label: string; value: SearchType; placeholder: string }[] 
   { label: "Steam",    value: "steam",   placeholder: "Steam ID, vanity URL, or steamcommunity.com link" },
 ];
 
+function looksLikeSteamId(value: string): boolean {
+  const trimmed = value.trim();
+  return trimmed.length >= 17 && /^\d+$/.test(trimmed);
+}
+
 export function FriendManager({ settings, onChange }: FriendManagerProps) {
   const [friends, setFriends] = useState<FriendProfile[]>(settings.friends ?? []);
+  const [liveScores, setLiveScores] = useState<LiveFriendScoresSnapshot | null>(null);
   const [selectedOpponent, setSelectedOpponent] = useState<string | null>(settings.selected_friend ?? null);
   const [input, setInput] = useState("");
   const [searchType, setSearchType] = useState<SearchType>("auto");
   const [adding, setAdding] = useState(false);
-  const [importing, setImporting] = useState(false);
-  const [importProgress, setImportProgress] = useState(0);
-  const [steamUser, setSteamUser] = useState<ActiveSteamUser | null>(null);
-  const unlistenRef = useRef<(() => void) | null>(null);
 
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<string | null>(null);
-  const [pendingRemoval, setPendingRemoval] = useState<{ friend: FriendProfile; wasSelected: boolean } | null>(null);
-  const pendingRemovalTimerRef = useRef<number | null>(null);
 
-  // Detect the active Steam user on mount so we can show the import button.
-  useEffect(() => {
-    invoke<ActiveSteamUser | null>("get_active_steam_user")
-      .then(setSteamUser)
-      .catch(() => setSteamUser(null));
-  }, []);
-
-  const updateFriends = useCallback(
-    (next: FriendProfile[]) => {
+  const refreshFriends = useCallback(async () => {
+    try {
+      const next = await invoke<FriendProfile[]>("get_friends");
       setFriends(next);
-      onChange({ ...settings, friends: next });
-    },
-    [settings, onChange]
-  );
+      onChange({
+        ...settings,
+        friends: next.filter((friend) => !friend.bridge_managed),
+      });
+    } catch (e) {
+      setError(String(e));
+    }
+  }, [onChange, settings]);
+
+  const refreshLiveScores = useCallback(async () => {
+    try {
+      const snapshot = await invoke<LiveFriendScoresSnapshot | null>("get_live_friend_scores");
+      setLiveScores(snapshot);
+    } catch {
+      setLiveScores(null);
+    }
+  }, []);
 
   const showSuccess = (msg: string) => {
     setSuccess(msg);
     setTimeout(() => setSuccess(null), 3000);
   };
 
-  const clearPendingRemovalTimer = useCallback(() => {
-    if (pendingRemovalTimerRef.current != null) {
-      window.clearTimeout(pendingRemovalTimerRef.current);
-      pendingRemovalTimerRef.current = null;
-    }
-  }, []);
+  useEffect(() => {
+    void refreshFriends();
+    void refreshLiveScores();
+    const unlistenPromise = listen("kovaaks-friends-updated", () => {
+      void refreshFriends();
+      void refreshLiveScores();
+    });
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [refreshFriends, refreshLiveScores]);
 
-  const commitPendingRemoval = useCallback(async (entry: { friend: FriendProfile; wasSelected: boolean }) => {
-    clearPendingRemovalTimer();
-    setPendingRemoval(null);
-    try {
-      const friend = entry.friend;
-      await invoke("remove_friend", { username: friend.username });
-      if (entry.wasSelected || selectedOpponent === friend.username) {
-        await invoke("set_selected_friend", { username: null });
-        setSelectedOpponent(null);
-        onChange({ ...settings, selected_friend: null, friends: friends.filter((f) => f.username !== friend.username) });
-      }
-      showSuccess(`Removed ${friend.steam_account_name || friend.username}`);
-    } catch (e) {
-      setError(String(e));
-    }
-  }, [clearPendingRemovalTimer, friends, onChange, selectedOpponent, settings]);
+  useEffect(() => {
+    setSelectedOpponent(settings.selected_friend ?? null);
+  }, [settings.selected_friend]);
 
   const handleAdd = useCallback(async () => {
     const trimmed = input.trim();
@@ -163,12 +178,11 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     setAdding(true);
     setError(null);
     try {
-    const profile = await invoke<FriendProfile>("add_friend", {
+      const profile = await invoke<FriendProfile>("add_friend", {
         username: trimmed,
         searchType: searchType === "auto" ? null : searchType,
       });
-      const next = await invoke<FriendProfile[]>("get_friends");
-      updateFriends(next);
+      await refreshFriends();
       setInput("");
       showSuccess(`Added ${profile.steam_account_name || profile.username}`);
     } catch (e) {
@@ -176,32 +190,31 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     } finally {
       setAdding(false);
     }
-  }, [input, searchType, updateFriends]);
+  }, [input, refreshFriends, searchType]);
 
   const handleRemove = useCallback(
     async (username: string) => {
       const friend = friends.find((entry) => entry.username === username);
-      if (!friend) return;
+      if (!friend || friend.bridge_managed) return;
 
-      if (pendingRemoval && pendingRemoval.friend.username !== username) {
-        await commitPendingRemoval(pendingRemoval);
-      }
-
-      clearPendingRemovalTimer();
-      setPendingRemoval({ friend, wasSelected: selectedOpponent === username });
-      updateFriends(friends.filter((f) => f.username !== username));
-      if (selectedOpponent === username) {
-        setSelectedOpponent(null);
-        onChange({ ...settings, selected_friend: null, friends: friends.filter((f) => f.username !== username) });
-      }
-      if (expanded === username) setExpanded(null);
       setError(null);
-      setSuccess(null);
-      pendingRemovalTimerRef.current = window.setTimeout(() => {
-        void commitPendingRemoval({ friend, wasSelected: selectedOpponent === username });
-      }, 5000);
+      try {
+        await invoke("remove_friend", { username: friend.username });
+        if (selectedOpponent === username) {
+          await invoke("set_selected_friend", { username: null });
+          onChange({ ...settings, selected_friend: null });
+        }
+        setSelectedOpponent(null);
+        await refreshFriends();
+        if (expanded === username) {
+          setExpanded(null);
+        }
+        showSuccess(`Removed ${friend.steam_account_name || friend.username}`);
+      } catch (e) {
+        setError(String(e));
+      }
     },
-    [clearPendingRemovalTimer, commitPendingRemoval, expanded, friends, onChange, pendingRemoval, selectedOpponent, settings, updateFriends]
+    [expanded, friends, onChange, refreshFriends, selectedOpponent, settings]
   );
 
   const handleSetOpponent = useCallback(
@@ -219,33 +232,6 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     [selectedOpponent, settings, onChange]
   );
 
-  const handleImportSteam = useCallback(async () => {
-    setImporting(true);
-    setImportProgress(0);
-    setError(null);
-    // Subscribe to per-friend progress events before invoking.
-    unlistenRef.current = await listen("steam-import-progress", () => {
-      setImportProgress((n) => n + 1);
-    });
-    try {
-      const added = await invoke<FriendProfile[]>("import_steam_friends");
-      if (added.length === 0) {
-        showSuccess("All detected KovaaK's friends are already added (or the list is empty).");
-      } else {
-        const next = await invoke<FriendProfile[]>("get_friends");
-        updateFriends(next);
-        showSuccess(`Imported ${added.length} KovaaK's friend${added.length === 1 ? "" : "s"}.`);
-      }
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      unlistenRef.current?.();
-      unlistenRef.current = null;
-      setImporting(false);
-      setImportProgress(0);
-    }
-  }, [updateFriends]);
-
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Enter") handleAdd();
   };
@@ -254,21 +240,16 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
     setExpanded((prev) => (prev === username ? null : username));
   };
 
-  const handleUndoRemove = useCallback(() => {
-    if (!pendingRemoval) return;
-    clearPendingRemovalTimer();
-    const nextFriends = [...friends, pendingRemoval.friend]
-      .sort((a, b) => (a.steam_account_name || a.username).localeCompare(b.steam_account_name || b.username));
-    updateFriends(nextFriends);
-    setPendingRemoval(null);
-    if (pendingRemoval.wasSelected) {
-      setSelectedOpponent(pendingRemoval.friend.username);
-      onChange({ ...settings, selected_friend: pendingRemoval.friend.username, friends: nextFriends });
-    }
-    showSuccess(`Kept ${pendingRemoval.friend.steam_account_name || pendingRemoval.friend.username}`);
-  }, [clearPendingRemovalTimer, friends, onChange, pendingRemoval, settings, updateFriends]);
-
-  useEffect(() => () => clearPendingRemovalTimer(), [clearPendingRemovalTimer]);
+  const getLiveScore = (friend: FriendProfile): LiveFriendScoreEntry | null => {
+    if (!liveScores) return null;
+    return (
+      liveScores.entries.find((entry) =>
+        friend.steam_id
+          ? entry.steam_id === friend.steam_id
+          : entry.steam_account_name.toLowerCase() === (friend.steam_account_name || friend.username).toLowerCase()
+      ) ?? null
+    );
+  };
 
   return (
     <div className="p-8 max-w-2xl" style={{ fontFamily: "'JetBrains Mono', monospace" }}>
@@ -279,59 +260,9 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
         Friends
       </h1>
       <p className="text-xs mb-6" style={{ color: C.textFaint }}>
-        Add friends by KovaaK's username, Steam64 ID, vanity URL, or steamcommunity.com link.
-        Friends with a linked KovaaK's account support VS-mode score comparison.
+        Live friends come from the AimMod bridge and update automatically while KovaaK's is running.
+        Use manual add only for extra people you want to track outside the live bridge list.
       </p>
-
-      {/* Steam import banner */}
-      {steamUser && (
-        <div
-          className="flex items-center justify-between gap-3 mb-5 px-4 py-3 rounded-xl"
-          style={{
-            background: `${C.info}0f`,
-            border: `1px solid ${C.info}30`,
-          }}
-        >
-          <div className="flex items-center gap-3 min-w-0">
-            {steamUser.avatar_url ? (
-              <img
-                src={steamUser.avatar_url}
-                alt={steamUser.display_name}
-                className="w-8 h-8 rounded-full flex-shrink-0"
-                style={{ border: `1px solid ${C.info}50` }}
-              />
-            ) : (
-              <div
-                className="w-8 h-8 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0"
-                style={{ background: `${C.info}25`, color: C.info }}
-              >
-                {steamUser.display_name.slice(0, 1).toUpperCase()}
-              </div>
-            )}
-            <div className="min-w-0">
-              <div className="text-xs font-semibold truncate" style={{ color: C.text }}>
-                {steamUser.display_name}
-              </div>
-              <div className="text-xs" style={{ color: `${C.info}b0` }}>
-                Steam detected
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={handleImportSteam}
-            disabled={importing}
-            className="am-btn px-3 py-1.5 rounded-lg text-xs font-semibold flex-shrink-0"
-            style={{
-              background: importing ? `${C.info}14` : `${C.info}25`,
-              border: `1px solid ${C.info}59`,
-              color: importing ? `${C.info}66` : C.info,
-              cursor: importing ? "not-allowed" : "pointer",
-            }}
-          >
-            {importing ? `Importing… ${importProgress > 0 ? importProgress : ""}` : "Import KovaaK's Friends"}
-          </button>
-        </div>
-      )}
 
       {/* Search type toggle */}
       <div className="flex gap-1 mb-3">
@@ -370,7 +301,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           className="am-btn px-4 py-2 rounded-lg text-sm font-semibold"
           style={{
             background: input.trim() ? C.accent : C.accentDim,
-            color: input.trim() ? "#000" : accentAlpha("59"),
+            color: input.trim() ? "#000" : C.textFaint,
             cursor: adding || !input.trim() ? "not-allowed" : "pointer",
             border: "none",
             minWidth: 80,
@@ -406,34 +337,6 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
           {success}
         </div>
       )}
-      {pendingRemoval && (
-        <div
-          className="mb-4 px-4 py-3 rounded-lg text-sm flex items-center justify-between gap-3"
-          style={{
-            background: `${C.warn}14`,
-            border: `1px solid ${C.warn}40`,
-            color: C.textSub,
-          }}
-        >
-          <span>
-            {pendingRemoval.friend.steam_account_name || pendingRemoval.friend.username} will be removed in a few seconds.
-          </span>
-          <button
-            type="button"
-            onClick={handleUndoRemove}
-            className="px-3 py-1 rounded-lg text-xs font-semibold"
-            style={{
-              background: `${C.warn}24`,
-              border: `1px solid ${C.warn}55`,
-              color: C.warn,
-              cursor: "pointer",
-              whiteSpace: "nowrap",
-            }}
-          >
-            Undo
-          </button>
-        </div>
-      )}
 
       {/* Friend list */}
       {friends.length === 0 ? (
@@ -444,7 +347,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
             color: C.textFaint,
           }}
         >
-          No friends added yet. Enter a KovaaK's username, Steam name, or Steam ID above.
+          No friends yet. Start KovaaK's with the mod bridge active, or add someone manually below.
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -465,6 +368,15 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-sm font-semibold truncate" style={{ color: C.text }}>
                         {f.steam_account_name || f.username}
+                      </span>
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded font-bold uppercase tracking-wider"
+                        style={{
+                          background: f.bridge_managed ? `${C.info}18` : `${C.accent}18`,
+                          color: f.bridge_managed ? C.info : C.accent,
+                        }}
+                      >
+                        {f.bridge_managed ? "Live" : "Manual"}
                       </span>
                       {f.country && (
                         <span className="text-base leading-none" title={f.country.toUpperCase()}>
@@ -488,7 +400,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 flex-shrink-0">
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     onClick={() => handleSetOpponent(f.username)}
                     className="px-2 py-1.5 rounded text-xs font-semibold"
@@ -517,48 +429,83 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
                   >
                     {expanded === f.username ? "▲" : "▼"}
                   </button>
-                  <a
-                    href={`https://kovaaks.com/kovaaks/profile?username=${f.username}`}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="px-2 py-1 rounded text-xs"
-                    style={{
-                      background: `${C.info}0f`,
-                      border: `1px solid ${C.info}26`,
-                      color: `${C.info}99`,
-                      textDecoration: "none",
-                    }}
-                  >
-                    ↗
-                  </a>
-                  <button
-                    onClick={() => handleRemove(f.username)}
-                    className="px-3 py-1 rounded-lg text-xs"
-                    style={{
-                      background: `${C.danger}14`,
-                      border: `1px solid ${C.dangerBorder}`,
-                      color: C.danger,
-                      cursor: "pointer",
-                    }}
-                  >
-                    Remove
-                  </button>
+                  {!looksLikeSteamId(f.username) && (
+                    <a
+                      href={`https://kovaaks.com/kovaaks/profile?username=${f.username}`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="px-2 py-1 rounded text-xs"
+                      style={{
+                        background: `${C.info}0f`,
+                        border: `1px solid ${C.info}26`,
+                        color: `${C.info}99`,
+                        textDecoration: "none",
+                      }}
+                    >
+                      ↗
+                    </a>
+                  )}
+                  {!f.bridge_managed && (
+                    <button
+                      onClick={() => handleRemove(f.username)}
+                      className="px-3 py-1 rounded-lg text-xs"
+                      style={{
+                        background: `${C.danger}14`,
+                        border: `1px solid ${C.dangerBorder}`,
+                        color: C.danger,
+                        cursor: "pointer",
+                      }}
+                    >
+                      Remove
+                    </button>
+                  )}
                 </div>
               </div>
 
-              {/* Expandable most-played */}
+              {/* Expandable details */}
               {expanded === f.username && (
                 <div
                   className="px-4 pb-3"
                   style={{ borderTop: `1px solid ${C.borderSub}` }}
                 >
-                  <p
-                    className="text-xs mt-2 mb-1 uppercase tracking-widest"
-                    style={{ color: C.textFaint }}
-                  >
-                    Most played
-                  </p>
-                  <MostPlayedRow username={f.username} />
+                  {f.bridge_managed ? (
+                    <>
+                      <p
+                        className="text-xs mt-2 mb-1 uppercase tracking-widest"
+                        style={{ color: C.textFaint }}
+                      >
+                        Live in-game score
+                      </p>
+                      {getLiveScore(f) ? (
+                        <div className="mt-2 flex items-center justify-between gap-2">
+                          <span
+                            className="text-xs truncate"
+                            style={{ color: C.textMuted, maxWidth: 220 }}
+                            title={liveScores?.scenario_name ?? ""}
+                          >
+                            {liveScores?.scenario_name || "Current scenario"}
+                          </span>
+                          <span className="text-xs tabular-nums shrink-0" style={{ color: C.text }}>
+                            #{getLiveScore(f)!.rank.toLocaleString()} · {Math.round(getLiveScore(f)!.score).toLocaleString()}
+                          </span>
+                        </div>
+                      ) : (
+                        <p className="text-xs mt-2 ml-1" style={{ color: C.textFaint }}>
+                          Waiting for current in-game leaderboard data…
+                        </p>
+                      )}
+                    </>
+                  ) : (
+                    <>
+                      <p
+                        className="text-xs mt-2 mb-1 uppercase tracking-widest"
+                        style={{ color: C.textFaint }}
+                      >
+                        Most played
+                      </p>
+                      <MostPlayedRow username={f.username} />
+                    </>
+                  )}
                 </div>
               )}
             </div>
@@ -567,7 +514,7 @@ export function FriendManager({ settings, onChange }: FriendManagerProps) {
       )}
 
       <p className="text-xs mt-6" style={{ color: C.textFaint }}>
-        Scores are fetched live from kovaaks.com — no files to export or share.
+        Live bridge friends use in-game leaderboard data. Manual friends still use web lookups for profile history. Live bridge friends cannot be removed here because the game is the source of truth for that list.
       </p>
     </div>
   );

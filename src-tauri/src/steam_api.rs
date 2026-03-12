@@ -6,6 +6,8 @@
 ///
 /// Accepts Steam 64-bit IDs, vanity URL slugs, or full steamcommunity.com URLs.
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
+use std::sync::Mutex;
 
 static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -14,6 +16,9 @@ static CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .build()
         .expect("failed to build reqwest client")
 });
+
+static PROFILE_CACHE: Lazy<Mutex<HashMap<String, SteamProfile>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// A resolved Steam user profile.
 #[derive(Debug, Clone)]
@@ -34,6 +39,15 @@ pub struct SteamProfile {
 ///                                 `https://steamcommunity.com/profiles/76561199417870483`
 pub async fn resolve_steam_user(input: &str) -> anyhow::Result<SteamProfile> {
     let input = input.trim();
+    let cache_key = input.to_ascii_lowercase();
+
+    if let Some(cached) = PROFILE_CACHE
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&cache_key).cloned())
+    {
+        return Ok(cached);
+    }
 
     // Strip full steamcommunity.com URLs to their last path segment.
     let slug = if input.contains("steamcommunity.com") {
@@ -66,12 +80,22 @@ pub async fn resolve_steam_user(input: &str) -> anyhow::Result<SteamProfile> {
     let avatar_url = extract_cdata(&body, "avatarFull").unwrap_or_default();
     let custom_url = extract_cdata(&body, "customURL").unwrap_or_default();
 
-    Ok(SteamProfile {
+    let profile = SteamProfile {
         steam_id,
         display_name,
         avatar_url,
         custom_url,
-    })
+    };
+
+    if let Ok(mut cache) = PROFILE_CACHE.lock() {
+        cache.insert(cache_key, profile.clone());
+        cache.insert(profile.steam_id.to_ascii_lowercase(), profile.clone());
+        if !profile.custom_url.trim().is_empty() {
+            cache.insert(profile.custom_url.to_ascii_lowercase(), profile.clone());
+        }
+    }
+
+    Ok(profile)
 }
 
 /// Returns `true` if `s` is a Steam 64-bit ID (17 digits, starts with 7656119).
