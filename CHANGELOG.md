@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.8.0](https://github.com/veryCrunchy/aimmod/compare/v1.7.2...v1.8.0) (2026-03-15)
+
+
+### Features
+
+* Add reconnect event handling and move to networked transport ([5136389](https://github.com/veryCrunchy/aimmod/commit/5136389329b1d8bc80037b932b65709cf3c284cb))
+
+
+### Bug Fixes
+
+* **logger:** improve log flushing strategy and enhance log level filtering ([333090e](https://github.com/veryCrunchy/aimmod/commit/333090e36b6878231e190a69def92aa097610f5f))
+
 ## [1.7.2](https://github.com/veryCrunchy/aimmod/compare/v1.7.1...v1.7.2) (2026-03-12)
 
 
