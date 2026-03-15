@@ -63,6 +63,11 @@ impl Log for TauriLogger {
         if meta.target().starts_with("tao")
             || meta.target().starts_with("wry")
             || meta.target().starts_with("tauri")
+            || meta.target().starts_with("reqwest")
+            || meta.target().starts_with("hyper")
+            || meta.target().starts_with("h2")
+            || meta.target().starts_with("rustls")
+            || meta.target().starts_with("tokio")
         {
             meta.level() <= Level::Warn
         } else {
@@ -90,11 +95,10 @@ impl Log for TauriLogger {
             record.args()
         );
 
-        // Write to file (best-effort, never panic)
+        // Write to file (best-effort, never panic).
+        // Flush is handled by the background flush thread — not per line.
         if let Some(f) = LOG_FILE.lock().as_mut() {
             let _ = f.write_all(line.as_bytes());
-            // Flush every line so the file is readable even if the app crashes
-            let _ = f.flush();
         }
 
         // Echo to stderr
@@ -157,6 +161,20 @@ pub fn init() -> Result<(), log::SetLoggerError> {
     static INSTANCE: TauriLogger = TauriLogger;
     log::set_logger(&INSTANCE)?;
     log::set_max_level(log::LevelFilter::Debug);
+
+    // Flush the log file every 500 ms instead of after every line.
+    // This reduces syscall pressure significantly while still keeping the file
+    // reasonably up-to-date for crash analysis.
+    std::thread::Builder::new()
+        .name("log-flusher".into())
+        .spawn(|| loop {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            if let Some(f) = LOG_FILE.lock().as_mut() {
+                let _ = f.flush();
+            }
+        })
+        .ok();
+
     Ok(())
 }
 

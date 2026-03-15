@@ -313,7 +313,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
                             };
 
                             if can_attempt {
-                                log::warn!(
+                                log::debug!(
                                     "UE4SS is loaded for KovaaK's pid {pid} but the bridge pipe is disconnected; waiting for mod-side reconnect"
                                 );
                                 last_attempt = Some((pid, std::time::Instant::now()));
@@ -1213,7 +1213,7 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
         return profile;
     }
 
-    log::info!("identity: no live bridge user snapshot; falling back to Steam lookup");
+    log::debug!("identity: no live bridge user snapshot; falling back to Steam lookup");
 
     let steam = match steam_api::resolve_steam_user(&steam_id).await {
         Ok(profile) => profile,
@@ -1234,7 +1234,7 @@ async fn resolve_current_identity_profile() -> Option<FriendProfile> {
     };
 
     store_current_identity_cache(cache_key, Some(profile.clone()));
-    log::info!(
+    log::debug!(
         "identity: resolved fallback current user username='{}' steam_id='{}'",
         profile.username,
         profile.steam_id
