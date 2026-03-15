@@ -2236,8 +2236,9 @@
         uint64_t leaderboard_id,
         uint64_t now
     ) {
-        auto* widget = resolve_active_leaderboards_widget(now);
+        auto* widget = active_leaderboards_widget_;
         if (!widget || !is_likely_valid_object_ptr(widget)) {
+            active_leaderboards_widget_ = nullptr;
             return false;
         }
         auto* widget_owner = static_cast<RC::Unreal::UStruct*>(widget->GetClassPrivate());
@@ -2960,7 +2961,7 @@
         const bool live_gameplay_active = is_user_management_live_gameplay_active();
         next_user_bridge_refresh_ms_ = now + (force ? 1000 : (live_gameplay_active ? 15000 : 5000));
 
-        if (live_gameplay_active) {
+        if (live_gameplay_active && !force) {
             maybe_request_active_friend_scores(now, false);
             return;
         }
@@ -2991,7 +2992,11 @@
             }
         }
 
-        maybe_request_active_friend_scores(now, force);
+        if (live_gameplay_active) {
+            maybe_request_active_friend_scores(now, false);
+        } else {
+            maybe_request_active_friend_scores(now, force);
+        }
         if (!have_user) {
             log_user_management(now, "tick produced no user");
         }

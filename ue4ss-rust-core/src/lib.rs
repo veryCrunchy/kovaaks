@@ -147,6 +147,18 @@ pub extern "C" fn bridge_emit_json(json: *const c_char) -> bool {
 }
 
 #[no_mangle]
+pub extern "C" fn bridge_probe_transport(json: *const c_char) -> bool {
+    let Some(json) = cstr_opt(json) else {
+        return false;
+    };
+    let Ok(json) = json.to_str() else {
+        return false;
+    };
+    let payload = stamp_json_payload(json);
+    pipe::probe_event_transport(&payload)
+}
+
+#[no_mangle]
 pub extern "C" fn bridge_poll_command(out_json: *mut c_char, out_len: u32) -> i32 {
     if out_json.is_null() || out_len == 0 {
         return -1;

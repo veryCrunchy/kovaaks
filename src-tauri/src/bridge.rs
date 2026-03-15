@@ -818,8 +818,8 @@ mod imp {
 
     use tauri::{AppHandle, Emitter};
 
-    use windows::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HWND, LPARAM};
-    use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+    use windows::Win32::Foundation::{CloseHandle, FILETIME, HWND, LPARAM};
+
     use windows::Win32::System::Diagnostics::Debug::WriteProcessMemory;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, MODULEENTRY32W, Module32FirstW, Module32NextW, PROCESSENTRY32W,
@@ -829,10 +829,7 @@ mod imp {
     use windows::Win32::System::Memory::{
         MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE, VirtualAllocEx, VirtualFreeEx,
     };
-    use windows::Win32::System::Pipes::{
-        ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PIPE_READMODE_BYTE,
-        PIPE_TYPE_BYTE, PIPE_WAIT,
-    };
+
     use windows::Win32::System::Threading::{
         CreateRemoteThread, GetProcessTimes, OpenProcess, PROCESS_ALL_ACCESS,
         PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
@@ -848,7 +845,7 @@ mod imp {
     use windows::core::{BOOL, PCSTR};
 
     static STARTED: AtomicBool = AtomicBool::new(false);
-    static COMMAND_PIPE_STARTED: AtomicBool = AtomicBool::new(false);
+
     static LOG_TAILER_STARTED: AtomicBool = AtomicBool::new(false);
     static SESSION_IDLE_WATCHDOG_STARTED: AtomicBool = AtomicBool::new(false);
     static RUNTIME_RESTART_REQUIRED: AtomicBool = AtomicBool::new(false);
@@ -862,14 +859,13 @@ mod imp {
     const IN_GAME_OVERLAY_TARGET_DIR: &str = "aimmod_overlay";
     const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
     const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
-    const COMMAND_PIPE_NAME: &str = "\\\\.\\pipe\\kovaaks-bridge-cmd";
+
     const LOG_RING_CAPACITY: usize = 1200;
     const MAX_BRIDGE_COMMAND_QUEUE: usize = 8192;
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(8);
-    // ERROR_PIPE_CONNECTED HRESULT (client connected before ConnectNamedPipe — still OK)
-    const ERROR_PIPE_CONNECTED_HRESULT: i32 = 0x80070217u32 as i32;
+
 
     fn sanitize_state_request_reason(reason: &str) -> String {
         let mut out = String::with_capacity(reason.len());
@@ -4477,7 +4473,7 @@ mod imp {
             .collect()
     }
 
-    // ─── Pipe server ─────────────────────────────────────────────────────────
+    // ─── TCP server ──────────────────────────────────────────────────────────
 
     pub fn start(app: AppHandle) {
         let _ = LOG_APP_HANDLE.set(app.clone());
@@ -4485,135 +4481,59 @@ mod imp {
             return;
         }
         start_session_idle_watchdog();
-        if !COMMAND_PIPE_STARTED.swap(true, Ordering::SeqCst) {
-            std::thread::Builder::new()
-                .name("bridge-command-pipe".into())
-                .spawn(command_pipe_loop)
-                .ok();
-        }
         std::thread::Builder::new()
-            .name("bridge-pipe".into())
-            .spawn(move || pipe_server_loop(app))
+            .name("bridge-tcp".into())
+            .spawn(move || tcp_server_loop(app))
             .ok();
     }
 
-    fn command_pipe_loop() {
-        let name = to_wide(COMMAND_PIPE_NAME);
-        use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
-        let retry_delay = Duration::from_millis(500);
-
-        loop {
-            // Pipe creation can race old AimMod shutdown during restart; keep retrying.
-            let pipe = unsafe {
-                CreateNamedPipeW(
-                    windows::core::PCWSTR(name.as_ptr()),
-                    windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000002), // PIPE_ACCESS_OUTBOUND
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,     // max instances
-                    65536, // out buffer
-                    0,     // in buffer
-                    0,
-                    None,
-                )
-            };
-            if pipe == INVALID_HANDLE_VALUE {
-                log::warn!("bridge: CreateNamedPipe(command) failed; retrying");
-                std::thread::sleep(retry_delay);
-                continue;
-            }
-
-            log::debug!("bridge: waiting for command pipe client");
-            unsafe {
-                let r = ConnectNamedPipe(pipe, None);
-                if let Err(ref e) = r {
-                    if e.code().0 != ERROR_PIPE_CONNECTED_HRESULT {
-                        log::error!("bridge: command ConnectNamedPipe failed: {e}");
-                        let _ = CloseHandle(pipe);
-                        std::thread::sleep(retry_delay);
-                        continue;
-                    }
-                }
-            }
-
-            log::info!("bridge: command pipe connected");
-            loop {
-                let next_cmd = bridge_command_queue()
-                    .lock()
-                    .ok()
-                    .and_then(|mut queue| queue.pop_front());
-
-                let Some(command) = next_cmd else {
-                    std::thread::sleep(Duration::from_millis(20));
-                    continue;
-                };
-
-                let mut line = String::with_capacity(command.len() + 1);
-                line.push_str(&command);
-                line.push('\n');
-                let bytes = line.as_bytes();
-                let mut written = 0u32;
-                match unsafe { WriteFile(pipe, Some(bytes), Some(&mut written), None) } {
-                    Ok(_) if written as usize == bytes.len() => {}
-                    _ => {
-                        if !requeue_bridge_command_front(command) {
-                            log::warn!(
-                                "bridge: failed to preserve command after pipe write failure; queue saturated"
-                            );
-                        }
-                        log::warn!("bridge: command pipe write failed; awaiting reconnect");
-                        break;
-                    }
-                }
-            }
-
-            unsafe {
-                let _ = DisconnectNamedPipe(pipe);
-                let _ = CloseHandle(pipe);
-            }
-        }
+    fn port_file_path() -> std::path::PathBuf {
+        std::env::temp_dir().join("kovaaks-bridge.port")
     }
 
-    fn pipe_server_loop(app: AppHandle) {
-        let name = to_wide("\\\\.\\pipe\\kovaaks-bridge");
-        use windows::Win32::Foundation::INVALID_HANDLE_VALUE;
+    fn tcp_server_loop(app: AppHandle) {
+        use std::net::TcpListener;
         let retry_delay = Duration::from_millis(500);
         mark_bridge_dll_connected(false);
         loop {
-            // Pipe creation can race old AimMod shutdown during restart; keep retrying.
-            let pipe = unsafe {
-                CreateNamedPipeW(
-                    windows::core::PCWSTR(name.as_ptr()),
-                    windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0x00000001), // PIPE_ACCESS_INBOUND
-                    PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
-                    1,     // max instances
-                    0,     // out buffer (server only reads)
-                    65536, // in buffer
-                    0,     // default timeout
-                    None,  // default security
-                )
-            };
-            if pipe == INVALID_HANDLE_VALUE {
-                log::warn!("bridge: CreateNamedPipe failed; retrying");
-                std::thread::sleep(retry_delay);
-                continue;
-            }
-
-            log::debug!("bridge: waiting for DLL connection");
-            unsafe {
-                let r = ConnectNamedPipe(pipe, None);
-                if let Err(ref e) = r {
-                    // ERROR_PIPE_CONNECTED means the client connected before us — still good
-                    if e.code().0 != ERROR_PIPE_CONNECTED_HRESULT {
-                        log::error!("bridge: ConnectNamedPipe: {e}");
-                        let _ = CloseHandle(pipe);
-                        std::thread::sleep(retry_delay);
-                        continue;
-                    }
+            let listener = match TcpListener::bind("127.0.0.1:0") {
+                Ok(l) => l,
+                Err(e) => {
+                    log::warn!("bridge: TcpListener bind failed: {e}; retrying");
+                    std::thread::sleep(retry_delay);
+                    continue;
                 }
+            };
+            let port = match listener.local_addr() {
+                Ok(addr) => addr.port(),
+                Err(e) => {
+                    log::warn!("bridge: local_addr failed: {e}; retrying");
+                    std::thread::sleep(retry_delay);
+                    continue;
+                }
+            };
+            if let Err(e) = std::fs::write(port_file_path(), port.to_string()) {
+                log::warn!("bridge: failed to write port file: {e}");
             }
-
+            log::debug!("bridge: waiting for DLL connection on TCP port {port}");
+            let (stream, _peer) = match listener.accept() {
+                Ok(pair) => pair,
+                Err(e) => {
+                    log::error!("bridge: accept failed: {e}");
+                    std::thread::sleep(retry_delay);
+                    continue;
+                }
+            };
+            stream.set_nodelay(true).ok();
             mark_bridge_dll_connected(true);
             log::info!("bridge: DLL connected — reading events");
+            if let Ok(mut s) = bridge_session_state().lock() {
+                s.last_lifecycle_seq = None;
+                s.last_lifecycle_ts_ms = None;
+                s.state_resync_pending = false;
+                s.last_state_resync_request_at = None;
+            }
+            reset_bridge_stats_snapshot();
             if runtime_restart_required_flag().load(Ordering::SeqCst) {
                 log::warn!(
                     "bridge: connected runtime differs from staged native payload; suppressing bridge_connected sync until KovaaK's is restarted"
@@ -4621,108 +4541,156 @@ mod imp {
             } else {
                 let _ = request_mod_state_sync("bridge_connected");
             }
-            read_events(pipe, &app);
+            let write_stream = match stream.try_clone() {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("bridge: stream clone failed: {e}");
+                    mark_bridge_dll_connected(false);
+                    continue;
+                }
+            };
+            let cmd_thread = std::thread::Builder::new()
+                .name("bridge-cmd-writer".into())
+                .spawn(move || command_writer_loop(write_stream))
+                .ok();
+            read_events_tcp(stream, &app);
             mark_bridge_dll_connected(false);
-            log::info!("bridge: pipe disconnected — waiting for next connection");
-
-            unsafe {
-                let _ = DisconnectNamedPipe(pipe);
-                let _ = CloseHandle(pipe);
+            log::info!("bridge: TCP disconnected — waiting for next connection");
+            if let Some(t) = cmd_thread {
+                let _ = t.join();
             }
         }
     }
 
-    fn read_events(pipe: HANDLE, app: &AppHandle) {
-        let mut buf: Vec<u8> = Vec::with_capacity(4096);
-        let mut tmp = [0u8; 4096];
+    fn command_writer_loop(mut stream: std::net::TcpStream) {
+        use std::io::Write;
         loop {
-            let mut nread: u32 = 0;
-            match unsafe { ReadFile(pipe, Some(&mut tmp), Some(&mut nread), None) } {
-                Ok(_) if nread > 0 => {
-                    buf.extend_from_slice(&tmp[..nread as usize]);
-                    // Drain all complete newline-terminated lines
-                    while let Some(nl) = buf.iter().position(|&b| b == b'\n') {
-                        let chunk: Vec<u8> = buf.drain(..=nl).collect();
-                        if let Ok(s) = std::str::from_utf8(&chunk[..chunk.len() - 1]) {
-                            let processed =
-                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                    let maybe_replay_ready =
-                                        s.contains("\"ev\":\"replay_playback_");
-                                    let maybe_replay_stream = s
-                                        .contains("\"ev\":\"replay_context\"")
-                                        || s.contains("\"ev\":\"replay_tick_keyframe\"")
-                                        || s.contains("\"ev\":\"replay_tick_delta\"")
-                                        || s.contains("\"ev\":\"replay_tick_end\"");
-                                    let maybe_shot_telemetry = s
-                                        .contains("\"ev\":\"shot_fired_telemetry\"")
-                                        || s.contains("\"ev\":\"shot_hit_telemetry\"")
-                                        || s.contains("\"ev\":\"shot_telemetry_batch\"");
-                                    if maybe_replay_ready {
-                                        note_in_game_replay_event(s);
-                                    }
-                                    if maybe_replay_stream {
-                                        observe_replay_stream_raw(s);
-                                    }
-                                    if maybe_shot_telemetry {
-                                        observe_shot_telemetry_raw(s);
-                                    }
-                                    let parsed_event = super::parse_bridge_payload(s);
-                                    let is_noisy_bridge_event = |ev: &str| {
-                                        matches!(
-                                            ev,
-                                            "process_event_activity"
-                                                | "hook_probe"
-                                                | "hook_focus_probe"
-                                                | "hook_focus_probe_typed"
-                                                | "class_hook_probe"
-                                                | "script_hook_probe"
-                                                | "bridge_transport_probe"
-                                                | "pull_source"
-                                                | "pull_snapshot"
-                                                | "shot_fired_telemetry"
-                                                | "shot_hit_telemetry"
-                                                | "shot_telemetry_batch"
-                                        ) || ev.starts_with("pull_")
-                                    };
-                                    let suppress_bridge_log_event = parsed_event
-                                        .as_ref()
-                                        .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
-                                    if !suppress_bridge_log_event {
-                                        log::info!("bridge event: {s}");
-                                        emit_ue4ss_log(app, format!("[bridge] {s}"));
-                                        let _ = app.emit(super::BRIDGE_EVENT, s.to_owned());
-                                    }
-                                    if let Some(parsed) = parsed_event {
-                                        observe_run_metric_event(&parsed);
-                                        // Always run compat handlers, even for noisy events
-                                        // (e.g. class_hook_probe) because they can drive
-                                        // lifecycle/state normalization.
-                                        emit_bridge_compat_events(app, &parsed);
-                                        if is_stats_flow_event(&parsed) {
-                                            mark_stats_flow_activity(
-                                                parsed.ev.as_str(),
-                                                parsed.ev.starts_with("pull_"),
-                                            );
-                                        }
-                                        if is_noisy_bridge_event(&parsed.ev) {
-                                            return;
-                                        }
-                                        let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
-                                        if super::is_frontend_metric_event_name(&parsed.ev) {
-                                            let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
-                                        }
-                                    }
-                                }));
-                            if processed.is_err() {
-                                log::error!(
-                                    "bridge: panic while processing bridge event line; continuing"
-                                );
+            let next_cmd = bridge_command_queue()
+                .lock()
+                .ok()
+                .and_then(|mut queue| queue.pop_front());
+            let Some(command) = next_cmd else {
+                if !bridge_dll_connected_flag().load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+                continue;
+            };
+            let mut line = String::with_capacity(command.len() + 1);
+            line.push_str(&command);
+            line.push('\n');
+            if let Err(e) = stream.write_all(line.as_bytes()) {
+                if !requeue_bridge_command_front(command) {
+                    log::warn!(
+                        "bridge: failed to preserve command after TCP write failure; queue saturated"
+                    );
+                }
+                log::warn!("bridge: command TCP write failed: {e}; awaiting reconnect");
+                break;
+            }
+        }
+    }
+
+    fn read_events_tcp(stream: std::net::TcpStream, app: &AppHandle) {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::with_capacity(65536, stream);
+        let mut line = String::new();
+        let mut probe_count: u32 = 0;
+        loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {
+                    let s = line.trim_end_matches('\n').trim_end_matches('\r');
+                    if s.is_empty() {
+                        continue;
+                    }
+                    let s = s.to_owned();
+                    let processed =
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            let maybe_replay_ready =
+                                s.contains("\"ev\":\"replay_playback_");
+                            let maybe_replay_stream = s
+                                .contains("\"ev\":\"replay_context\"")
+                                || s.contains("\"ev\":\"replay_tick_keyframe\"")
+                                || s.contains("\"ev\":\"replay_tick_delta\"")
+                                || s.contains("\"ev\":\"replay_tick_end\"");
+                            let maybe_shot_telemetry = s
+                                .contains("\"ev\":\"shot_fired_telemetry\"")
+                                || s.contains("\"ev\":\"shot_hit_telemetry\"")
+                                || s.contains("\"ev\":\"shot_telemetry_batch\"");
+                            if maybe_replay_ready {
+                                note_in_game_replay_event(&s);
                             }
+                            if maybe_replay_stream {
+                                observe_replay_stream_raw(&s);
+                            }
+                            if maybe_shot_telemetry {
+                                observe_shot_telemetry_raw(&s);
+                            }
+                            let parsed_event = super::parse_bridge_payload(&s);
+                            let is_noisy_bridge_event = |ev: &str| {
+                                matches!(
+                                    ev,
+                                    "process_event_activity"
+                                        | "hook_probe"
+                                        | "hook_focus_probe"
+                                        | "hook_focus_probe_typed"
+                                        | "class_hook_probe"
+                                        | "script_hook_probe"
+                                        | "bridge_transport_probe"
+                                        | "pull_source"
+                                        | "pull_snapshot"
+                                        | "shot_fired_telemetry"
+                                        | "shot_hit_telemetry"
+                                        | "shot_telemetry_batch"
+                                ) || ev.starts_with("pull_")
+                            };
+                            let suppress_bridge_log_event = parsed_event
+                                .as_ref()
+                                .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
+                            if !suppress_bridge_log_event {
+                                log::info!("bridge event: {s}");
+                                emit_ue4ss_log(app, format!("[bridge] {s}"));
+                                let _ = app.emit(super::BRIDGE_EVENT, s.clone());
+                            }
+                            if let Some(parsed) = parsed_event {
+                                observe_run_metric_event(&parsed);
+                                emit_bridge_compat_events(app, &parsed);
+                                if is_stats_flow_event(&parsed) {
+                                    mark_stats_flow_activity(
+                                        parsed.ev.as_str(),
+                                        parsed.ev.starts_with("pull_"),
+                                    );
+                                }
+                                if is_noisy_bridge_event(&parsed.ev) {
+                                    return;
+                                }
+                                let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
+                                if super::is_frontend_metric_event_name(&parsed.ev) {
+                                    let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
+                                }
+                            }
+                        }));
+                    if processed.is_err() {
+                        log::error!(
+                            "bridge: panic while processing bridge event line; continuing"
+                        );
+                    }
+                    if s.contains("\"ev\":\"bridge_transport_probe\"") {
+                        probe_count = probe_count.wrapping_add(1);
+                        if probe_count % 10 == 1 {
+                            log::debug!(
+                                "bridge: TCP heartbeat — {} probe(s) received",
+                                probe_count
+                            );
                         }
                     }
                 }
-                // Pipe broken or zero bytes — client disconnected
-                _ => break,
+                Err(e) => {
+                    log::warn!("bridge: TCP read error: {e}");
+                    break;
+                }
             }
         }
     }
@@ -5267,6 +5235,22 @@ mod imp {
         if sent == 0 {
             return Err("SendInput failed for Ctrl+R".to_string());
         }
+        Ok(())
+    }
+
+    pub fn request_runtime_bridge_reconnect(stats_dir: &str) -> Result<(), String> {
+        let game_bin_dir = resolve_game_bin_dir(stats_dir)?;
+        let request_path = game_bin_dir.join("aimmod_bridge_reconnect.request");
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        std::fs::write(&request_path, format!("{now_ms}\n"))
+            .map_err(|e| format!("write {}: {e}", request_path.display()))?;
+        log::info!(
+            "bridge: requested runtime bridge reconnect via {}",
+            request_path.display()
+        );
         Ok(())
     }
 
@@ -6564,6 +6548,16 @@ pub fn trigger_hot_reload() -> Result<(), String> {
 
 #[cfg(not(target_os = "windows"))]
 pub fn trigger_hot_reload() -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn request_runtime_bridge_reconnect(stats_dir: &str) -> Result<(), String> {
+    imp::request_runtime_bridge_reconnect(stats_dir)
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn request_runtime_bridge_reconnect(_stats_dir: &str) -> Result<(), String> {
     Ok(())
 }
 

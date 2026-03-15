@@ -318,25 +318,33 @@ fn try_initialize(app: &AppHandle) -> anyhow::Result<SessionStoreInitReport> {
     }
 
     if should_refresh_repo_sql_audit(&conn)? {
-        match crate::stats_db::refresh_repo_sql_audit(app, Some(25)) {
-            Ok(summary) => {
-                if summary.incomplete_sessions > 0 {
-                    log::warn!(
-                        "session_store: integrity audit flagged {} incomplete session(s) across {} audited ids",
-                        summary.incomplete_sessions,
-                        summary.audited_session_ids,
-                    );
-                } else {
-                    log::info!(
-                        "session_store: integrity audit ok across {} audited ids",
-                        summary.audited_session_ids,
-                    );
+        // Run the audit off the setup thread so startup isn't blocked.
+        // The audit touches every session row (potentially thousands) and is
+        // purely diagnostic — nothing in the startup path depends on it.
+        let app_handle = app.clone();
+        let _ = std::thread::Builder::new()
+            .name("session-integrity-audit".into())
+            .spawn(move || {
+                match crate::stats_db::refresh_repo_sql_audit(&app_handle, Some(25)) {
+                    Ok(summary) => {
+                        if summary.incomplete_sessions > 0 {
+                            log::warn!(
+                                "session_store: integrity audit flagged {} incomplete session(s) across {} audited ids",
+                                summary.incomplete_sessions,
+                                summary.audited_session_ids,
+                            );
+                        } else {
+                            log::info!(
+                                "session_store: integrity audit ok across {} audited ids",
+                                summary.audited_session_ids,
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("session_store: integrity audit refresh failed: {error:?}");
+                    }
                 }
-            }
-            Err(error) => {
-                log::warn!("session_store: integrity audit refresh failed: {error:?}");
-            }
-        }
+            });
     } else {
         log::debug!("session_store: skipping repo sql audit refresh on startup (recently audited)");
     }

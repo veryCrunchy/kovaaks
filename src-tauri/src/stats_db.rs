@@ -2695,41 +2695,69 @@ pub fn refresh_repo_sql_audit(
     app: &AppHandle,
     failing_session_limit: Option<usize>,
 ) -> Result<RepoSqlAuditSummary> {
-    let conn = connect(app)?;
-    let mut stmt = conn.prepare(
-        "
-        SELECT session_id FROM (
-            SELECT id AS session_id FROM sessions
-            UNION
-            SELECT session_id FROM replay_assets
-        )
-        ORDER BY session_id ASC
-        ",
-    )?;
-    let session_ids = stmt
-        .query_map([], |row| row.get::<_, String>(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let mut conn = connect(app)?;
+    let session_ids = {
+        let mut stmt = conn.prepare(
+            "
+            SELECT session_id FROM (
+                SELECT id AS session_id FROM sessions
+                UNION
+                SELECT session_id FROM replay_assets
+            )
+            ORDER BY session_id ASC
+            ",
+        )?;
+        stmt.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
 
     let limit = failing_session_limit.unwrap_or(100);
     let mut failure_counts = std::collections::HashMap::<String, usize>::new();
     let mut incomplete_sessions = 0usize;
     let mut sessions = Vec::new();
+    let mut audits_to_persist: Vec<SessionSqlAudit> = Vec::new();
 
     for session_id in &session_ids {
         let audit = audit_session_sql_with_conn(&conn, session_id)?;
-        if audit.session_exists {
-            persist_session_sql_audit(app, &audit)?;
-        }
         if audit.has_issues() {
             incomplete_sessions += 1;
             for code in &audit.failure_classes {
                 *failure_counts.entry(code.clone()).or_insert(0) += 1;
             }
             if sessions.len() < limit {
-                sessions.push(audit);
+                sessions.push(audit.clone());
             }
         }
+        if audit.session_exists {
+            audits_to_persist.push(audit);
+        }
     }
+
+    // Write all audit results in a single transaction instead of one
+    // connection-open per session (which was O(n) connection overhead).
+    let now_ms = current_unix_ms();
+    let tx = conn.transaction()?;
+    {
+        let mut upd = tx.prepare(
+            "
+            UPDATE sessions
+            SET integrity_status = ?2,
+                integrity_failure_codes = ?3,
+                integrity_checked_at_unix_ms = ?4
+            WHERE id = ?1
+            ",
+        )?;
+        for audit in &audits_to_persist {
+            let status = if audit.has_issues() { "incomplete" } else { "ok" };
+            let failure_codes = if audit.failure_classes.is_empty() {
+                None
+            } else {
+                Some(audit.failure_classes.join(","))
+            };
+            upd.execute(params![audit.session_id, status, failure_codes, now_ms])?;
+        }
+    }
+    tx.commit()?;
 
     let mut failure_counts = failure_counts
         .into_iter()

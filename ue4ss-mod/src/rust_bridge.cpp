@@ -17,6 +17,7 @@ using bridge_last_error_fn = uint32_t (*)();
 using bridge_emit_i32_fn = bool (*)(const char*, int32_t);
 using bridge_emit_f32_fn = bool (*)(const char*, float);
 using bridge_emit_json_fn = bool (*)(const char*);
+using bridge_probe_transport_fn = bool (*)(const char*);
 using bridge_poll_command_fn = int32_t (*)(char*, uint32_t);
 
 struct RustApi {
@@ -28,6 +29,7 @@ struct RustApi {
     bridge_emit_i32_fn emit_i32 = nullptr;
     bridge_emit_f32_fn emit_f32 = nullptr;
     bridge_emit_json_fn emit_json = nullptr;
+    bridge_probe_transport_fn probe_transport = nullptr;
     bridge_poll_command_fn poll_command = nullptr;
 };
 
@@ -37,6 +39,10 @@ std::atomic<DWORD> g_last_win32_error{0};
 std::atomic<DWORD> g_last_transport_error{0};
 std::atomic<ULONGLONG> g_last_reconnect_attempt_ms{0};
 std::atomic<ULONGLONG> g_last_probe_attempt_ms{0};
+std::atomic<uint64_t> g_async_reconnect_event_seq{0};
+std::atomic<int32_t> g_async_reconnect_event_kind{0};
+std::atomic<DWORD> g_async_reconnect_event_win32{0};
+std::atomic<DWORD> g_async_reconnect_event_transport{0};
 std::atomic<bool> g_reconnect_worker_stop{false};
 std::thread g_reconnect_worker{};
 std::recursive_mutex g_api_mutex{};
@@ -75,6 +81,19 @@ void refresh_transport_error() {
     g_last_transport_error.store(GetLastError(), std::memory_order_relaxed);
 }
 
+void publish_async_reconnect_event(int32_t kind) {
+    g_async_reconnect_event_win32.store(
+        g_last_win32_error.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+    g_async_reconnect_event_transport.store(
+        g_last_transport_error.load(std::memory_order_relaxed),
+        std::memory_order_relaxed
+    );
+    g_async_reconnect_event_kind.store(kind, std::memory_order_release);
+    g_async_reconnect_event_seq.fetch_add(1, std::memory_order_acq_rel);
+}
+
 bool reconnect_now() {
     const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_api.init || !module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.init))) {
@@ -94,12 +113,16 @@ void reconnect_throttled() {
         return;
     }
     g_last_reconnect_attempt_ms.store(now, std::memory_order_relaxed);
-    (void)reconnect_now();
+    const bool ok = reconnect_now();
+    publish_async_reconnect_event(ok ? 1 : -1);
 }
 
 bool probe_connected_transport() {
     const std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
-    if (!g_api.emit_json || !module_still_loaded(g_api.module, reinterpret_cast<const void*>(g_api.emit_json))) {
+    const auto* probe_ptr = g_api.probe_transport
+        ? reinterpret_cast<const void*>(g_api.probe_transport)
+        : reinterpret_cast<const void*>(g_api.emit_json);
+    if (!probe_ptr || !module_still_loaded(g_api.module, probe_ptr)) {
         invalidate_api();
         return false;
     }
@@ -111,7 +134,10 @@ bool probe_connected_transport() {
     }
 
     g_last_probe_attempt_ms.store(now, std::memory_order_relaxed);
-    if (g_api.emit_json(k_transport_probe_json)) {
+    const bool ok = g_api.probe_transport
+        ? g_api.probe_transport(k_transport_probe_json)
+        : g_api.emit_json(k_transport_probe_json);
+    if (ok) {
         return true;
     }
 
@@ -133,6 +159,7 @@ void ensure_reconnect_worker() {
 
     g_reconnect_worker_stop.store(false, std::memory_order_release);
     g_reconnect_worker = std::thread([] {
+        bool last_connected = false;
         while (!g_reconnect_worker_stop.load(std::memory_order_acquire)) {
             bool api_ready = false;
             {
@@ -155,9 +182,21 @@ void ensure_reconnect_worker() {
                 if (connected) {
                     connected = probe_connected_transport();
                 }
-                if (!connected) {
+                if (connected) {
+                    if (!last_connected) {
+                        publish_async_reconnect_event(1);
+                    }
+                    last_connected = true;
+                } else {
+                    if (last_connected) {
+                        publish_async_reconnect_event(0);
+                    }
+                    last_connected = false;
                     reconnect_throttled();
                 }
+            } else if (last_connected) {
+                last_connected = false;
+                publish_async_reconnect_event(0);
             }
             Sleep(250);
         }
@@ -201,6 +240,7 @@ bool load_api() {
     g_api.emit_i32 = reinterpret_cast<bridge_emit_i32_fn>(GetProcAddress(mod, "bridge_emit_i32"));
     g_api.emit_f32 = reinterpret_cast<bridge_emit_f32_fn>(GetProcAddress(mod, "bridge_emit_f32"));
     g_api.emit_json = reinterpret_cast<bridge_emit_json_fn>(GetProcAddress(mod, "bridge_emit_json"));
+    g_api.probe_transport = reinterpret_cast<bridge_probe_transport_fn>(GetProcAddress(mod, "bridge_probe_transport"));
     g_api.poll_command = reinterpret_cast<bridge_poll_command_fn>(GetProcAddress(mod, "bridge_poll_command"));
 
     if (!g_api.init || !g_api.shutdown || !g_api.emit_i32 || !g_api.emit_f32 || !g_api.emit_json) {
@@ -295,7 +335,11 @@ bool RustBridge::is_connected() {
         invalidate_api();
         return false;
     }
-    return g_api.is_connected();
+    if (!g_api.is_connected()) {
+        refresh_transport_error();
+        return false;
+    }
+    return probe_connected_transport();
 }
 
 const wchar_t* RustBridge::last_dll_path() {
@@ -309,6 +353,25 @@ uint32_t RustBridge::last_win32_error() {
 
 uint32_t RustBridge::last_transport_error() {
     return static_cast<uint32_t>(g_last_transport_error.load(std::memory_order_relaxed));
+}
+
+bool RustBridge::read_async_reconnect_event(RustBridgeReconnectEvent& out_event) {
+    const uint64_t sequence = g_async_reconnect_event_seq.load(std::memory_order_acquire);
+    if (sequence == 0) {
+        return false;
+    }
+
+    out_event.sequence = sequence;
+    const int32_t kind = g_async_reconnect_event_kind.load(std::memory_order_acquire);
+    out_event.kind = static_cast<RustBridgeReconnectEventKind>(kind);
+    out_event.connected = kind > 0;
+    out_event.win32_error = static_cast<uint32_t>(
+        g_async_reconnect_event_win32.load(std::memory_order_acquire)
+    );
+    out_event.transport_error = static_cast<uint32_t>(
+        g_async_reconnect_event_transport.load(std::memory_order_acquire)
+    );
+    return true;
 }
 
 bool RustBridge::emit_i32(const char* ev, int32_t value) {

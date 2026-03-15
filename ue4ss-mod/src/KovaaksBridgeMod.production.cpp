@@ -572,6 +572,7 @@ public:
         ModAuthors = STR("veryCrunchy");
 
         verbose_logs_ = false;
+        http_trace_enabled_ = env_flag_enabled("AIMMOD_HTTP_TRACE");
         s_instance_ = this;
 
         if (kovaaks::RustBridge::startup()) {
@@ -664,10 +665,6 @@ public:
     }
 
     auto on_update() -> void override {
-        if (updates_disabled_) {
-            return;
-        }
-
         const uint64_t now_ms = GetTickCount64();
         if (!rust_ready_) {
             if (now_ms >= next_rust_startup_retry_ms_) {
@@ -675,6 +672,19 @@ public:
                 if (kovaaks::RustBridge::startup()) {
                     rust_ready_ = true;
                     emit_bridge_ready_banner();
+                    pending_bridge_recovered_snapshot_ = true;
+                    runtime_log_line("[bridge_reconnect] rust bridge startup recovered");
+                } else if (now_ms >= next_rust_reconnect_log_ms_) {
+                    next_rust_reconnect_log_ms_ = now_ms + 5000;
+                    std::array<char, 256> log_buf{};
+                    std::snprintf(
+                        log_buf.data(),
+                        log_buf.size(),
+                        "[bridge_reconnect] startup pending win32=%lu transport=%lu",
+                        static_cast<unsigned long>(kovaaks::RustBridge::last_win32_error()),
+                        static_cast<unsigned long>(kovaaks::RustBridge::last_transport_error())
+                    );
+                    runtime_log_line(log_buf.data());
                 }
             }
             if (!rust_ready_) {
@@ -682,19 +692,47 @@ public:
             }
         }
 
-        if (!kovaaks::RustBridge::is_connected() && now_ms >= next_rust_reconnect_retry_ms_) {
-            next_rust_reconnect_retry_ms_ = now_ms + 500;
-            (void)kovaaks::RustBridge::reconnect();
+        kovaaks::RustBridgeReconnectEvent reconnect_event{};
+        if (kovaaks::RustBridge::read_async_reconnect_event(reconnect_event)
+            && reconnect_event.sequence != last_rust_reconnect_event_seq_) {
+            last_rust_reconnect_event_seq_ = reconnect_event.sequence;
+            if (reconnect_event.kind == kovaaks::RustBridgeReconnectEventKind::Connected) {
+                pending_bridge_recovered_snapshot_ = true;
+                runtime_log_line("[bridge_reconnect] reconnect worker observed connected");
+            } else if (reconnect_event.kind == kovaaks::RustBridgeReconnectEventKind::Disconnected) {
+                if (now_ms >= next_rust_reconnect_log_ms_) {
+                    next_rust_reconnect_log_ms_ = now_ms + 5000;
+                    runtime_log_line("[bridge_reconnect] reconnect worker observed disconnect");
+                }
+            } else if (now_ms >= next_rust_reconnect_log_ms_) {
+                next_rust_reconnect_log_ms_ = now_ms + 5000;
+                std::array<char, 256> log_buf{};
+                std::snprintf(
+                    log_buf.data(),
+                    log_buf.size(),
+                    "[bridge_reconnect] reconnect worker failed win32=%lu transport=%lu",
+                    static_cast<unsigned long>(reconnect_event.win32_error),
+                    static_cast<unsigned long>(reconnect_event.transport_error)
+                );
+                runtime_log_line(log_buf.data());
+            }
         }
-#if defined(_MSC_VER)
-        __try {
-            on_update_impl();
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            handle_runtime_fault("on_update");
+
+        if (updates_disabled_) {
+            if (pending_bridge_recovered_snapshot_ && rust_ready_ && kovaaks::RustBridge::is_connected()) {
+                refresh_live_runtime_hooks_after_reconnect(now_ms);
+                if (emit_requested_state_snapshot_safe(now_ms, "bridge_recovered_disabled")) {
+                    pending_bridge_recovered_snapshot_ = false;
+                    runtime_log_line("[bridge_reconnect] emitted recovery snapshot while updates disabled");
+                }
+            }
+            if (now_ms >= next_updates_disabled_log_ms_) {
+                next_updates_disabled_log_ms_ = now_ms + 10000;
+                runtime_log_line("[bridge_reconnect] updates disabled; reconnect-only mode active");
+            }
+            return;
         }
-#else
-        on_update_impl();
-#endif
+        on_update_impl_safe();
     }
 
 private:
@@ -1007,8 +1045,9 @@ private:
         return !out_scenario_name.empty() || !out_scenario_id.empty() || !out_scenario_manager_id.empty();
     }
 
-    auto emit_requested_state_snapshot(uint64_t now_ms, const std::string& request_reason) -> void {
+    auto emit_requested_state_snapshot(uint64_t now_ms, const std::string& request_reason) -> bool {
         const auto reason = kmod_replay::sanitize_state_request_reason(request_reason);
+        bool emitted_ok = true;
         std::string scenario_name{};
         std::string scenario_id{};
         std::string scenario_manager_id{};
@@ -1071,7 +1110,7 @@ private:
             static_cast<int>(game_state_code),
             game_state
         );
-        kovaaks::RustBridge::emit_json(metadata.data());
+        emitted_ok = kovaaks::RustBridge::emit_json(metadata.data()) && emitted_ok;
 
         if (!scenario_name.empty()) {
             std::array<char, 512> scenario_msg{};
@@ -1081,7 +1120,7 @@ private:
                 "{\"ev\":\"ui_scenario_name\",\"field\":\"%s\",\"source\":\"state_manager\"}",
                 scenario_name_escaped.c_str()
             );
-            kovaaks::RustBridge::emit_json(scenario_msg.data());
+            emitted_ok = kovaaks::RustBridge::emit_json(scenario_msg.data()) && emitted_ok;
         }
         std::array<char, 2048> snapshot{};
         std::snprintf(
@@ -1115,7 +1154,7 @@ private:
             static_cast<int>(game_state_code),
             game_state
         );
-        kovaaks::RustBridge::emit_json(snapshot.data());
+        emitted_ok = kovaaks::RustBridge::emit_json(snapshot.data()) && emitted_ok;
 
         std::array<char, 320> ack{};
         std::snprintf(
@@ -1125,16 +1164,16 @@ private:
             reason.c_str(),
             static_cast<unsigned long long>(now_ms)
         );
-        kovaaks::RustBridge::emit_json(ack.data());
+        emitted_ok = kovaaks::RustBridge::emit_json(ack.data()) && emitted_ok;
         maybe_emit_user_management_build_tag();
-        maybe_emit_user_management_snapshot(now_ms, true);
+        maybe_emit_user_management_snapshot_safe(now_ms, true);
+        return emitted_ok;
     }
 
     auto emit_requested_state_snapshot_safe(uint64_t now_ms, const std::string& request_reason) -> bool {
 #if defined(_MSC_VER)
         __try {
-            emit_requested_state_snapshot(now_ms, request_reason);
-            return true;
+            return emit_requested_state_snapshot(now_ms, request_reason);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             ++replay_fault_count_;
             replay_fault_backoff_until_ms_ = now_ms + 1500;
@@ -1152,8 +1191,45 @@ private:
             return false;
         }
 #else
-        emit_requested_state_snapshot(now_ms, request_reason);
-        return true;
+        return emit_requested_state_snapshot(now_ms, request_reason);
+#endif
+    }
+
+    void on_update_impl_safe() {
+#if defined(_MSC_VER)
+        __try {
+            on_update_impl();
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            handle_runtime_fault("on_update");
+        }
+#else
+        on_update_impl();
+#endif
+    }
+
+    void maybe_emit_user_management_snapshot_safe(uint64_t now_ms, bool force) {
+        if (now_ms < user_management_fault_backoff_until_ms_) {
+            return;
+        }
+#if defined(_MSC_VER)
+        __try {
+            maybe_emit_user_management_snapshot(now_ms, force);
+            user_management_fault_count_ = 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            ++user_management_fault_count_;
+            user_management_fault_backoff_until_ms_ = now_ms + 15000;
+            std::array<char, 256> line{};
+            std::snprintf(
+                line.data(),
+                line.size(),
+                "[user_mgmt] fault trapped; backoff active count=%u",
+                static_cast<unsigned int>(user_management_fault_count_)
+            );
+            runtime_log_line(line.data());
+        }
+#else
+        maybe_emit_user_management_snapshot(now_ms, force);
+        user_management_fault_count_ = 0;
 #endif
     }
 
@@ -1816,6 +1892,17 @@ private:
         return !out_trace.url_path.empty() || !out_trace.request_body.empty();
     }
 
+    bool should_trace_http_request_url(std::string_view url_path) const {
+        if (url_path.empty()) {
+            return false;
+        }
+        if (verbose_logs_ || http_trace_enabled_) {
+            return true;
+        }
+        return url_path.find("DownloadTopAdjacentLeaderboardEntries") != std::string_view::npos
+            || url_path.find("leaderboard") != std::string_view::npos;
+    }
+
     RC::Unreal::UObject* read_http_trace_return_object(RC::Unreal::UFunction* fn, void* params) {
         if (!fn || !params) {
             return nullptr;
@@ -1932,11 +2019,17 @@ private:
         }
 
         if (fn == targets_.send_sa_http_request) {
+            if (!http_trace_enabled_) {
+                return;
+            }
             InGameHttpTraceRequest trace{};
             trace.id = next_http_trace_request_id_++;
             trace.created_ms = GetTickCount64();
             read_object_param_full_name(fn, params, "worldcontextobject", trace.context_name);
             read_http_trace_request_params(fn, params, trace);
+            if (!should_trace_http_request_url(trace.url_path)) {
+                return;
+            }
             if (!trace.auth_token.empty()) {
                 last_sa_http_auth_token_ = trace.auth_token;
             }
@@ -2023,7 +2116,9 @@ private:
             http_trace_hook_bindings_.emplace_back(fn, callback_id);
         };
 
-        bind(targets_.send_sa_http_request);
+        if (http_trace_enabled_) {
+            bind(targets_.send_sa_http_request);
+        }
         bind(targets_.sa_http_invoke_success);
         bind(targets_.sa_http_invoke_error);
         http_trace_hooks_registered_ = !http_trace_hook_bindings_.empty();
@@ -2067,8 +2162,19 @@ private:
             next_scenario_resolve_ms_ = 0;
         }
 
+        if (pending_bridge_recovered_snapshot_ && rust_ready_ && kovaaks::RustBridge::is_connected()) {
+            refresh_live_runtime_hooks_after_reconnect(now);
+            flush_pending_shot_telemetry(now, true);
+            if (emit_requested_state_snapshot_safe(now, "bridge_recovered")) {
+                pending_bridge_recovered_snapshot_ = false;
+                runtime_log_line("[bridge_reconnect] emitted recovery snapshot");
+            } else {
+                runtime_log_line("[bridge_reconnect] recovery snapshot emit failed; will retry");
+            }
+        }
+
         maybe_emit_user_management_build_tag();
-        maybe_emit_user_management_snapshot(now, false);
+        maybe_emit_user_management_snapshot_safe(now, false);
 
         resolve_targets(false);
         auto* receiver = resolve_state_receiver_instance(now);
@@ -2951,20 +3057,25 @@ private:
             }
         }
         if (bridge_connected && !last_bridge_connected_) {
+            refresh_live_runtime_hooks_after_reconnect(now);
             flush_pending_shot_telemetry(now, true);
-            (void)emit_requested_state_snapshot_safe(now, "bridge_connected");
+            const bool snapshot_emitted = emit_requested_state_snapshot_safe(now, "bridge_connected");
             next_bridge_keepalive_snapshot_ms_ = now + 2000;
-            std::array<char, 256> sbuf{};
-            std::snprintf(
-                sbuf.data(),
-                sbuf.size(),
-                "[state_snapshot] emitted reason=%s ts_ms=%llu",
-                "bridge_connected",
-                static_cast<unsigned long long>(now)
-            );
-            runtime_log_line(sbuf.data());
-            if (verbose_logs_) {
-                events_log_line(sbuf.data());
+            if (snapshot_emitted) {
+                std::array<char, 256> sbuf{};
+                std::snprintf(
+                    sbuf.data(),
+                    sbuf.size(),
+                    "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                    "bridge_connected",
+                    static_cast<unsigned long long>(now)
+                );
+                runtime_log_line(sbuf.data());
+                if (verbose_logs_) {
+                    events_log_line(sbuf.data());
+                }
+            } else {
+                runtime_log_line("[state_snapshot] emit failed reason=bridge_connected");
             }
         }
         if (bridge_connected && (challenge_state_edge || scenario_state_edge)) {
@@ -2991,18 +3102,28 @@ private:
                 if (command.kind == kmod_replay::BridgeCommandKind::StateSnapshotRequest) {
                     const auto request_reason = command.reason.empty() ? std::string{"unknown"} : command.reason;
                     flush_pending_shot_telemetry(now, true);
-                    (void)emit_requested_state_snapshot_safe(now, request_reason);
-                    std::array<char, 256> sbuf{};
-                    std::snprintf(
-                        sbuf.data(),
-                        sbuf.size(),
-                        "[state_snapshot] emitted reason=%s ts_ms=%llu",
-                        request_reason.c_str(),
-                        static_cast<unsigned long long>(now)
-                    );
-                    runtime_log_line(sbuf.data());
-                    if (verbose_logs_) {
-                        events_log_line(sbuf.data());
+                    if (emit_requested_state_snapshot_safe(now, request_reason)) {
+                        std::array<char, 256> sbuf{};
+                        std::snprintf(
+                            sbuf.data(),
+                            sbuf.size(),
+                            "[state_snapshot] emitted reason=%s ts_ms=%llu",
+                            request_reason.c_str(),
+                            static_cast<unsigned long long>(now)
+                        );
+                        runtime_log_line(sbuf.data());
+                        if (verbose_logs_) {
+                            events_log_line(sbuf.data());
+                        }
+                    } else {
+                        std::array<char, 256> sbuf{};
+                        std::snprintf(
+                            sbuf.data(),
+                            sbuf.size(),
+                            "[state_snapshot] emit failed reason=%s",
+                            request_reason.c_str()
+                        );
+                        runtime_log_line(sbuf.data());
                     }
                 } else {
                     (void)replay_playback_command_safe(now, command);
@@ -3384,9 +3505,12 @@ private:
     uint64_t fault_backoff_until_ms_{0};
     uint64_t next_critical_recover_allowed_ms_{0};
     uint64_t next_rust_startup_retry_ms_{0};
-    uint64_t next_rust_reconnect_retry_ms_{0};
+    uint64_t next_rust_reconnect_log_ms_{0};
+    uint64_t next_updates_disabled_log_ms_{0};
+    uint64_t last_rust_reconnect_event_seq_{0};
     uint32_t critical_read_miss_streak_{0};
     uint32_t zero_signal_streak_{0};
+    bool pending_bridge_recovered_snapshot_{false};
 
     int32_t last_kills_total_{std::numeric_limits<int32_t>::min()};
     int32_t last_shots_fired_{std::numeric_limits<int32_t>::min()};
@@ -3458,6 +3582,7 @@ private:
     bool replay_fault_latched_{false};
     bool replay_capture_disabled_{false};
     bool verbose_logs_{false};
+    bool http_trace_enabled_{false};
     uint64_t next_diag_log_ms_{0};
     bool updates_disabled_{false};
     uint32_t fault_count_{0};
@@ -3474,6 +3599,8 @@ private:
     std::unordered_map<RC::Unreal::UObject*, InGameHttpTraceRequest> pending_http_trace_requests_{};
     bool live_pull_snapshot_dirty_{false};
     bool user_management_build_tag_sent_{false};
+    uint64_t user_management_fault_backoff_until_ms_{0};
+    uint32_t user_management_fault_count_{0};
 
     // Keep user identity and friend resolution isolated from the core bridge loop.
     #include "kmod/user_management.inl"
@@ -3518,6 +3645,17 @@ private:
             return 0;
         }
         return now_ms - then_ms;
+    }
+
+    void refresh_live_runtime_hooks_after_reconnect(uint64_t now) {
+        unregister_live_metric_hooks();
+        unregister_http_trace_hooks();
+        reset_runtime_resolvers();
+        next_targets_resolve_ms_ = 0;
+        resolve_targets(true);
+        last_runtime_progress_ms_ = now;
+        last_state_change_emit_ms_ = now;
+        runtime_log_line("[bridge_reconnect] refreshed live metric hooks after reconnect");
     }
 
     void emit_lifecycle_start(uint64_t now) {
