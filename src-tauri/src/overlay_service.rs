@@ -1,7 +1,8 @@
 use crate::{
     FriendProfile, benchmark_overlay, bridge, current_overlay_runtime_notice, file_watcher,
-    kovaaks_theme, mouse_hook, session_store,
+    hub_api, kovaaks_theme, mouse_hook, session_store,
 };
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -13,17 +14,33 @@ use tauri::{AppHandle, Manager};
 const OVERLAY_PORT: u16 = 43115;
 static STARTED: AtomicBool = AtomicBool::new(false);
 static PALETTE_CACHE: OnceLock<Mutex<Option<CachedPalette>>> = OnceLock::new();
+static HUB_PB_CACHE: OnceLock<Mutex<HashMap<HubPbCacheKey, CachedHubPb>>> = OnceLock::new();
 
 /// Incremented every time overlay state changes. SSE loops wait on this.
 static STATE_VERSION: AtomicU64 = AtomicU64::new(0);
 
 const PALETTE_CACHE_TTL: Duration = Duration::from_secs(5);
+const HUB_PB_CACHE_TTL: Duration = Duration::from_secs(120);
+const HUB_PB_RETRY_DELAY: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 struct CachedPalette {
     path: String,
     loaded_at: Instant,
     palette: kovaaks_theme::KovaaksPalette,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct HubPbCacheKey {
+    handle: String,
+    scenario_slug: String,
+}
+
+#[derive(Debug, Clone)]
+struct CachedHubPb {
+    score: Option<f64>,
+    refresh_after: Instant,
+    in_flight: bool,
 }
 
 fn state_notify() -> &'static (Mutex<u64>, Condvar) {
@@ -33,6 +50,10 @@ fn state_notify() -> &'static (Mutex<u64>, Condvar) {
 
 fn palette_cache() -> &'static Mutex<Option<CachedPalette>> {
     PALETTE_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn hub_pb_cache() -> &'static Mutex<HashMap<HubPbCacheKey, CachedHubPb>> {
+    HUB_PB_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Call this whenever overlay-relevant state changes. Wakes all SSE connections.
@@ -208,7 +229,7 @@ fn serve_sse(
         "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-store\r\nConnection: keep-alive\r\nAccess-Control-Allow-Origin: *\r\n\r\n"
     )?;
 
-    let mut last_payload = String::new();
+    let mut last_signature = String::new();
     let mut last_version = STATE_VERSION.load(Ordering::Relaxed);
     let (lock, cvar) = state_notify();
     loop {
@@ -219,12 +240,13 @@ fn serve_sse(
         }
         last_version = STATE_VERSION.load(Ordering::Relaxed);
 
-        let payload =
-            serde_json::to_string(&build_state(app, settings)).unwrap_or_else(|_| "{}".to_string());
-        if payload != last_payload {
+        let state = build_state(app, settings);
+        let signature = overlay_state_signature_json(&state).unwrap_or_else(|_| "{}".to_string());
+        if signature != last_signature {
+            let payload = serde_json::to_string(&state).unwrap_or_else(|_| "{}".to_string());
             stream.write_all(format!("data: {payload}\n\n").as_bytes())?;
             stream.flush()?;
-            last_payload = payload;
+            last_signature = signature;
         }
     }
 }
@@ -340,10 +362,141 @@ fn normalize_scenario_name(value: &str) -> String {
         .to_string()
 }
 
+fn slugify_scenario_name(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut last_was_dash = false;
+
+    for ch in value.trim().chars().flat_map(|ch| ch.to_lowercase()) {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    out.trim_matches('-').to_string()
+}
+
 fn current_overlay_user() -> Option<FriendProfile> {
     bridge::current_kovaaks_user()
         .as_ref()
         .and_then(crate::friend_profile_from_bridge_user)
+}
+
+fn current_overlay_hub_handle() -> Option<String> {
+    let user = bridge::current_kovaaks_user()?;
+    let handle = user.username.trim();
+    if handle.is_empty() {
+        None
+    } else {
+        Some(handle.to_string())
+    }
+}
+
+fn local_personal_best_score(app: &AppHandle, scenario_name: &str) -> Option<f64> {
+    let normalized = normalize_scenario_name(scenario_name);
+    session_store::get_personal_best_for_scenario(app, &normalized).map(|value| value as f64)
+}
+
+fn cached_hub_personal_best_score(
+    app: &AppHandle,
+    handle: &str,
+    scenario_name: &str,
+) -> Option<f64> {
+    let scenario_slug = slugify_scenario_name(scenario_name);
+    if scenario_slug.is_empty() {
+        return None;
+    }
+
+    let key = HubPbCacheKey {
+        handle: handle.trim().to_string(),
+        scenario_slug,
+    };
+    if key.handle.is_empty() {
+        return None;
+    }
+
+    let now = Instant::now();
+    let mut cached_score = None;
+    let mut should_fetch = false;
+
+    if let Ok(mut cache) = hub_pb_cache().lock() {
+        if let Some(entry) = cache.get_mut(&key) {
+            cached_score = entry.score;
+            if !entry.in_flight && now >= entry.refresh_after {
+                entry.in_flight = true;
+                should_fetch = true;
+            }
+        } else {
+            cache.insert(
+                key.clone(),
+                CachedHubPb {
+                    score: None,
+                    refresh_after: now,
+                    in_flight: true,
+                },
+            );
+            should_fetch = true;
+        }
+    }
+
+    if should_fetch {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let response = hub_api::get_player_scenario_history(
+                &app,
+                key.handle.clone(),
+                key.scenario_slug.clone(),
+            )
+            .await;
+
+            if let Ok(mut cache) = hub_pb_cache().lock() {
+                if let Some(entry) = cache.get_mut(&key) {
+                    entry.in_flight = false;
+                    match response {
+                        Ok(history) => {
+                            entry.score =
+                                if history.best_score.is_finite() && history.best_score > 0.0 {
+                                    Some(history.best_score)
+                                } else {
+                                    None
+                                };
+                            entry.refresh_after = Instant::now() + HUB_PB_CACHE_TTL;
+                            notify_state_changed();
+                        }
+                        Err(error) => {
+                            entry.refresh_after = Instant::now() + HUB_PB_RETRY_DELAY;
+                            log::debug!(
+                                "overlay_service: hub pb lookup failed for handle={} scenario_slug={}: {error:#}",
+                                key.handle,
+                                key.scenario_slug
+                            );
+                        }
+                    }
+                }
+            }
+        });
+    }
+
+    cached_score
+}
+
+fn resolve_personal_best_score(app: &AppHandle, scenario_name: Option<&str>) -> Option<f64> {
+    let scenario_name = scenario_name?.trim();
+    if scenario_name.is_empty() {
+        return None;
+    }
+
+    let local_pb = local_personal_best_score(app, scenario_name);
+    if let Some(handle) = current_overlay_hub_handle() {
+        if let Some(score) = cached_hub_personal_best_score(app, &handle, scenario_name) {
+            return Some(score);
+        }
+    }
+
+    local_pb
 }
 
 fn normalized_hex(value: Option<&String>) -> Option<String> {
@@ -546,6 +699,12 @@ fn resolved_overlay_presets(
         .collect()
 }
 
+fn overlay_state_signature_json(state: &OverlayStateEnvelope) -> Result<String, serde_json::Error> {
+    let mut signature = state.clone();
+    signature.generated_at_unix_ms = 0;
+    serde_json::to_string(&signature)
+}
+
 fn build_state(
     app: &AppHandle,
     settings: &Arc<std::sync::Mutex<crate::settings::AppSettings>>,
@@ -562,11 +721,7 @@ fn build_state(
             .as_ref()
             .map(|payload| payload.result.scenario.clone())
     });
-    let personal_best_score = scenario_name
-        .as_deref()
-        .map(normalize_scenario_name)
-        .and_then(|name| session_store::get_personal_best_for_scenario(app, &name))
-        .map(|value| value as f64);
+    let personal_best_score = resolve_personal_best_score(app, scenario_name.as_deref());
     let runtime_loaded = bridge::current_game_pid()
         .map(bridge::is_ue4ss_loaded_for_pid)
         .unwrap_or(false);
