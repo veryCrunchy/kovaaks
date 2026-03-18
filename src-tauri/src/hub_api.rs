@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use once_cell::sync::Lazy;
@@ -14,18 +15,30 @@ static HUB_CLIENT: Lazy<Client> = Lazy::new(|| {
         .build()
         .expect("failed to build AimMod Hub API client")
 });
+static BENCHMARK_LIST_CACHE: Lazy<Mutex<Option<CachedBenchmarkList>>> =
+    Lazy::new(|| Mutex::new(None));
 
 const CONNECT_PROTOCOL_VERSION: &str = "1";
+const HUB_REQUEST_MAX_ATTEMPTS: usize = 3;
+const HUB_REQUEST_RETRY_DELAYS_MS: [u64; HUB_REQUEST_MAX_ATTEMPTS - 1] = [350, 1000];
+const BENCHMARK_LIST_CACHE_TTL: Duration = Duration::from_secs(60 * 15);
 const GET_OVERVIEW_PATH: &str = "/aimmod.hub.v1.HubService/GetOverview";
 const SEARCH_PATH: &str = "/aimmod.hub.v1.HubService/Search";
 const LIST_REPLAYS_PATH: &str = "/aimmod.hub.v1.HubService/ListReplays";
 const GET_PROFILE_PATH: &str = "/aimmod.hub.v1.HubService/GetProfile";
 const GET_SCENARIO_PATH: &str = "/aimmod.hub.v1.HubService/GetScenarioPage";
 const GET_BENCHMARK_PAGE_PATH: &str = "/aimmod.hub.v1.HubService/GetBenchmarkPage";
+const LIST_BENCHMARKS_PATH: &str = "/aimmod.hub.v1.HubService/ListBenchmarks";
 const GET_RUN_PATH: &str = "/aimmod.hub.v1.HubService/GetRun";
 const GET_AIM_PROFILE_PATH: &str = "/aimmod.hub.v1.HubService/GetAimProfile";
 const GET_AIM_FINGERPRINT_PATH: &str = "/aimmod.hub.v1.HubService/GetAimFingerprint";
 const GET_PLAYER_SCENARIO_HISTORY_PATH: &str = "/aimmod.hub.v1.HubService/GetPlayerScenarioHistory";
+
+#[derive(Debug, Clone)]
+struct CachedBenchmarkList {
+    fetched_at: Instant,
+    payload: HubBenchmarkListResponse,
+}
 
 fn de_u64ish<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
@@ -210,6 +223,123 @@ pub struct HubBenchmarkPageResponse {
     pub overall_rank: Option<HubBenchmarkRankVisual>,
     #[serde(default)]
     pub categories: Vec<HubBenchmarkCategoryPage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubBenchmarkListItem {
+    #[serde(default)]
+    pub benchmark_id: u32,
+    #[serde(default)]
+    pub benchmark_name: String,
+    #[serde(default)]
+    pub benchmark_icon_url: String,
+    #[serde(default)]
+    pub benchmark_author: String,
+    #[serde(default)]
+    pub benchmark_type: String,
+    #[serde(default)]
+    pub player_count: u32,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubBenchmarkListResponse {
+    #[serde(default)]
+    pub benchmarks: Vec<HubBenchmarkListItem>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubExternalRankVisual {
+    #[serde(default)]
+    pub rank_index: u32,
+    #[serde(default)]
+    pub rank_name: String,
+    #[serde(default)]
+    pub icon_url: String,
+    #[serde(default)]
+    pub color: String,
+    #[serde(default)]
+    pub frame_url: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubExternalThreshold {
+    #[serde(default)]
+    pub rank_index: u32,
+    #[serde(default)]
+    pub rank_name: String,
+    #[serde(default)]
+    pub icon_url: String,
+    #[serde(default)]
+    pub color: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubExternalScenarioPage {
+    #[serde(default)]
+    pub scenario_name: String,
+    pub score: f64,
+    #[serde(default)]
+    pub leaderboard_rank: u32,
+    #[serde(default)]
+    pub leaderboard_id: u32,
+    #[serde(default)]
+    pub rank_index: u32,
+    #[serde(default)]
+    pub rank_name: String,
+    #[serde(default)]
+    pub rank_icon_url: String,
+    #[serde(default)]
+    pub rank_color: String,
+    #[serde(default)]
+    pub thresholds: Vec<HubExternalThreshold>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubExternalCategoryPage {
+    #[serde(default)]
+    pub category_name: String,
+    #[serde(default)]
+    pub category_rank: u32,
+    #[serde(default)]
+    pub scenarios: Vec<HubExternalScenarioPage>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubExternalBenchmarkPageResponse {
+    #[serde(default)]
+    pub steam_id: String,
+    #[serde(default)]
+    pub kovaaks_username: String,
+    #[serde(default)]
+    pub is_aimmod_user: bool,
+    #[serde(default)]
+    pub aimmod_handle: String,
+    #[serde(default)]
+    pub benchmark_id: u32,
+    #[serde(default)]
+    pub benchmark_name: String,
+    #[serde(default)]
+    pub benchmark_icon_url: String,
+    #[serde(default)]
+    pub overall_rank_index: u32,
+    #[serde(default)]
+    pub overall_rank_name: String,
+    #[serde(default)]
+    pub overall_rank_icon: String,
+    #[serde(default)]
+    pub overall_rank_color: String,
+    #[serde(default)]
+    pub ranks: Vec<HubExternalRankVisual>,
+    #[serde(default)]
+    pub categories: Vec<HubExternalCategoryPage>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -595,7 +725,7 @@ fn hub_base_url(app: &AppHandle) -> anyhow::Result<String> {
     Ok(base_url)
 }
 
-async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
+async fn post_connect_json_once<TReq: Serialize, TResp: DeserializeOwned>(
     app: &AppHandle,
     path: &str,
     payload: &TReq,
@@ -624,6 +754,29 @@ async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
         .with_context(|| format!("error decoding response body: {body}"))?;
     strip_null_fields(&mut value);
     serde_json::from_value::<TResp>(value).context("error decoding response body")
+}
+
+async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
+    app: &AppHandle,
+    path: &str,
+    payload: &TReq,
+) -> anyhow::Result<TResp> {
+    let mut last_error = None;
+
+    for attempt in 0..HUB_REQUEST_MAX_ATTEMPTS {
+        match post_connect_json_once(app, path, payload).await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < HUB_REQUEST_MAX_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(HUB_REQUEST_RETRY_DELAYS_MS[attempt]))
+                        .await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("hub request failed")))
 }
 
 pub async fn get_overview(app: &AppHandle) -> anyhow::Result<HubOverviewResponse> {
@@ -679,6 +832,78 @@ pub async fn get_benchmark_page(
         },
     )
     .await
+}
+
+pub async fn list_benchmarks(app: &AppHandle) -> anyhow::Result<HubBenchmarkListResponse> {
+    if let Ok(cache) = BENCHMARK_LIST_CACHE.lock() {
+        if let Some(entry) = cache.as_ref() {
+            if entry.fetched_at.elapsed() < BENCHMARK_LIST_CACHE_TTL {
+                return Ok(entry.payload.clone());
+            }
+        }
+    }
+
+    match post_connect_json::<_, HubBenchmarkListResponse>(
+        app,
+        LIST_BENCHMARKS_PATH,
+        &serde_json::json!({}),
+    )
+    .await
+    {
+        Ok(payload) => {
+            if let Ok(mut cache) = BENCHMARK_LIST_CACHE.lock() {
+                *cache = Some(CachedBenchmarkList {
+                    fetched_at: Instant::now(),
+                    payload: payload.clone(),
+                });
+            }
+            Ok(payload)
+        }
+        Err(error) => {
+            if let Ok(cache) = BENCHMARK_LIST_CACHE.lock() {
+                if let Some(entry) = cache.as_ref() {
+                    log::warn!(
+                        "hub_api: using cached benchmark list after request failure: {error}"
+                    );
+                    return Ok(entry.payload.clone());
+                }
+            }
+            Err(error)
+        }
+    }
+}
+
+pub async fn get_external_benchmark_page(
+    app: &AppHandle,
+    steam_id: String,
+    benchmark_id: u32,
+) -> anyhow::Result<HubExternalBenchmarkPageResponse> {
+    let base_url = hub_base_url(app)?;
+    let response = HUB_CLIENT
+        .get(format!("{base_url}/api/lookup/benchmark"))
+        .query(&[
+            ("q", steam_id.trim()),
+            ("benchmarkId", &benchmark_id.to_string()),
+        ])
+        .send()
+        .await
+        .with_context(|| {
+            format!(
+                "error sending external benchmark request for steam_id={} benchmark_id={}",
+                steam_id, benchmark_id
+            )
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("external benchmark request returned {status}: {body}");
+    }
+
+    response
+        .json::<HubExternalBenchmarkPageResponse>()
+        .await
+        .context("error decoding external benchmark response")
 }
 
 pub async fn get_run(app: &AppHandle, run_id: String) -> anyhow::Result<HubRunResponse> {

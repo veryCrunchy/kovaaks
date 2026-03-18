@@ -13,6 +13,7 @@ export default defineConfig(async () => ({
     rollupOptions: {
       input: {
         main: "index.html",
+        browserOverlay: "browser-overlay.html",
         logs: "logs.html",
         stats: "stats.html",
       },

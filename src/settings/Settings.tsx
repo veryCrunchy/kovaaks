@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { AppSettings, MonitorInfo } from "../types/settings";
 import type { FriendProfile } from "../types/friends";
 import { FriendManager } from "./FriendManager";
+import { OverlayStudio } from "./OverlayStudio";
 import { useUpdater } from "../hooks/useUpdater";
 import { Btn, FieldGroup, GlassCard, Toggle } from "../design/ui";
 import { C, accentAlpha } from "../design/tokens";
@@ -13,7 +14,7 @@ const StatsWindowEmbed = lazy(() =>
 );
 const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
 
-type Tab = "general" | "friends" | "stats";
+type Tab = "general" | "overlays" | "friends" | "stats";
 
 interface SettingsProps {
   onClose?: () => void;
@@ -25,6 +26,7 @@ interface SettingsProps {
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
   { id: "general",    label: "General",       icon: "⚙" },
+  { id: "overlays",   label: "Overlay Studio", icon: "◫" },
   { id: "friends",    label: "Friends",        icon: "◎" },
   { id: "stats",      label: "Session Stats",  icon: "▦" },
 ];
@@ -324,6 +326,7 @@ export function Settings({
             confirmReset={confirmReset}
           />
         )}
+        {activeTab === "overlays" && <OverlayStudio settings={settings} onChange={setSettings} />}
         {activeTab === "friends" && <FriendManager settings={settings} onChange={setSettings} />}
         {activeTab === "stats" && (
           <Suspense fallback={LOADING_PLACEHOLDER}>
@@ -392,6 +395,15 @@ interface FfmpegStatus {
   path: string | null;
 }
 
+interface ReplayResourceEstimate {
+  captureLoad: string;
+  encodeLoad: string;
+  overallLoad: string;
+  estimatedStorageMbPerMin: number;
+  estimatedBufferMb: number;
+  estimatedRetainedGb: number | null;
+}
+
 function formatHubUserError(message: string | null | undefined): string | null {
   const raw = message?.trim();
   if (!raw) return null;
@@ -410,6 +422,54 @@ function formatHubUserError(message: string | null | undefined): string | null {
     return "Could not connect to AimMod Hub. Retry later.";
   }
   return raw;
+}
+
+function replayUsageLabel(score: number): string {
+  if (score < 0.85) return "Low";
+  if (score < 1.35) return "Moderate";
+  if (score < 2.2) return "High";
+  return "Very High";
+}
+
+function replayUsageColor(label: string): string {
+  if (label === "Very High") return C.warn;
+  if (label === "High") return C.text;
+  return C.textMuted;
+}
+
+function estimateReplayResourceUsage(settings: AppSettings): ReplayResourceEstimate {
+  const fpsFactor = Math.max(0.25, settings.replay_capture_fps / 24);
+  const widthFactor = Math.max(0.5, settings.replay_capture_width / 480);
+  const pixelFactor = widthFactor * widthFactor;
+  const framingFactor = settings.replay_capture_framing === "fullscreen" ? 1 : 0.38;
+  const qualityFactor =
+    settings.replay_capture_quality === "ultra"
+      ? 1.85
+      : settings.replay_capture_quality === "high"
+        ? 1.35
+        : 1;
+
+  const captureScore = fpsFactor * framingFactor;
+  const encodeScore = fpsFactor * pixelFactor * qualityFactor * (settings.replay_capture_framing === "fullscreen" ? 1.15 : 1);
+  const storageScore = fpsFactor * pixelFactor * qualityFactor;
+  const overallScore = Math.max(captureScore * 0.9, encodeScore, storageScore * 0.95);
+  const estimatedStorageMbPerMin = Math.max(2, Math.round(14 * storageScore));
+  const estimatedBufferMb = Math.max(8, Math.round(estimatedStorageMbPerMin * 3));
+  const retainedGbRaw = settings.replay_keep_count > 0
+    ? (estimatedBufferMb * settings.replay_keep_count) / 1024
+    : null;
+  const estimatedRetainedGb = retainedGbRaw == null
+    ? null
+    : Math.max(0.1, Math.round(retainedGbRaw * 10) / 10);
+
+  return {
+    captureLoad: replayUsageLabel(captureScore),
+    encodeLoad: replayUsageLabel(encodeScore),
+    overallLoad: replayUsageLabel(overallScore),
+    estimatedStorageMbPerMin,
+    estimatedBufferMb,
+    estimatedRetainedGb,
+  };
 }
 
 type GeneralSection = "basics" | "overlay" | "appearance" | "replay" | "hub" | "hud";
@@ -448,6 +508,16 @@ function GeneralSettings({
   const [ffmpegBusy, setFfmpegBusy] = useState(false);
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<GeneralSection>("basics");
+
+  const replayResourceUsage = useMemo(
+    () => estimateReplayResourceUsage(settings),
+    [
+      settings.replay_capture_fps,
+      settings.replay_capture_width,
+      settings.replay_capture_framing,
+      settings.replay_capture_quality,
+    ],
+  );
 
   const update = <K extends keyof AppSettings>(key: K, value: AppSettings[K]) =>
     onChange({ ...settings, [key]: value });
@@ -1037,6 +1107,182 @@ function GeneralSettings({
                 </div>
                 <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
                   Higher framerates make replay video smoother, but they also increase replay size and capture work.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Replay framing</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[
+                      { value: "cropped" as const, label: "Focused crop" },
+                      { value: "fullscreen" as const, label: "Full game window" },
+                    ].map(({ value, label }) => {
+                      const active = settings.replay_capture_framing === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => update("replay_capture_framing", value)}
+                          className="am-btn"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Focused crop keeps the action centered and the files lighter. Full game window records the whole KovaaK client area.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Replay resolution</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[480, 720, 1080].map((preset) => {
+                      const active = settings.replay_capture_width === preset;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => update("replay_capture_width", preset)}
+                          className="am-btn tabular-nums"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {preset}px
+                        </button>
+                      );
+                    })}
+                    <input
+                      type="number"
+                      min={320}
+                      max={1920}
+                      step={10}
+                      value={settings.replay_capture_width}
+                      onChange={(e) => {
+                        const next = parseInt(e.target.value, 10);
+                        if (!Number.isNaN(next)) {
+                          update("replay_capture_width", Math.min(1920, Math.max(320, next)));
+                        }
+                      }}
+                      className="am-input w-24 tabular-nums"
+                    />
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Higher widths preserve more detail in replay exports, but they use more memory, disk, and encoding time.
+                </p>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <span className="text-sm" style={{ color: C.textSub }}>Recording quality</span>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {[
+                      { value: "balanced" as const, label: "Balanced" },
+                      { value: "high" as const, label: "High detail" },
+                      { value: "ultra" as const, label: "Ultra detail" },
+                    ].map(({ value, label }) => {
+                      const active = settings.replay_capture_quality === value;
+                      return (
+                        <button
+                          key={value}
+                          type="button"
+                          onClick={() => update("replay_capture_quality", value)}
+                          className="am-btn"
+                          style={{
+                            padding: "4px 10px",
+                            minHeight: 0,
+                            borderRadius: 7,
+                            fontSize: 11,
+                            background: active ? C.accentDim : C.surface,
+                            border: `1px solid ${active ? C.accentBorder : C.border}`,
+                            color: active ? C.accent : C.textMuted,
+                            fontFamily: "inherit",
+                          }}
+                        >
+                          {label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+                <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                  Higher quality preserves more detail in each frame, but increases encoding cost and replay size.
+                </p>
+              </div>
+
+              <div
+                className="rounded-lg border p-3"
+                style={{ borderColor: C.borderSub, background: "rgba(255,255,255,0.02)" }}
+              >
+                <div className="text-sm" style={{ color: C.textSub }}>Estimated resource usage</div>
+                <div
+                  className="mt-2 grid gap-2"
+                  style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}
+                >
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Overall</div>
+                    <div className="text-sm mt-1" style={{ color: replayUsageColor(replayResourceUsage.overallLoad) }}>
+                      {replayResourceUsage.overallLoad}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Capture load</div>
+                    <div className="text-sm mt-1" style={{ color: replayUsageColor(replayResourceUsage.captureLoad) }}>
+                      {replayResourceUsage.captureLoad}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Encode load</div>
+                    <div className="text-sm mt-1" style={{ color: replayUsageColor(replayResourceUsage.encodeLoad) }}>
+                      {replayResourceUsage.encodeLoad}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Estimated disk</div>
+                    <div className="text-sm mt-1 tabular-nums" style={{ color: C.text }}>
+                      ~{replayResourceUsage.estimatedStorageMbPerMin} MB/min
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>3-minute buffer</div>
+                    <div className="text-sm mt-1 tabular-nums" style={{ color: C.text }}>
+                      ~{replayResourceUsage.estimatedBufferMb} MB
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase" style={{ color: C.textFaint, letterSpacing: "0.1em" }}>Retained cap</div>
+                    <div className="text-sm mt-1 tabular-nums" style={{ color: C.text }}>
+                      {replayResourceUsage.estimatedRetainedGb == null
+                        ? "Unlimited"
+                        : `~${replayResourceUsage.estimatedRetainedGb} GB`}
+                    </div>
+                  </div>
+                </div>
+                <p className="text-xs mt-2" style={{ color: C.textFaint, lineHeight: 1.55 }}>
+                  These estimates are approximate and update from your current framerate, framing, resolution, recording quality, and replay retention limit.
                 </p>
               </div>
 

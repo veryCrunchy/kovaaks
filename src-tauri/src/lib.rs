@@ -251,6 +251,11 @@ fn get_is_debug_build() -> bool {
 }
 
 #[tauri::command]
+fn get_obs_overlay_url() -> String {
+    "http://127.0.0.1:43115/browser-overlay.html?surface=obs".to_string()
+}
+
+#[tauri::command]
 fn toggle_layout_huds(app: AppHandle) -> Result<(), String> {
     app.emit("toggle-layout-huds", ())
         .map_err(|e| e.to_string())
@@ -373,6 +378,7 @@ fn start_ue4ss_reinject_monitor(app: AppHandle, stats_dir: String) {
 fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
 
 mod app_version;
+mod benchmark_overlay;
 mod bridge;
 mod discord_rpc;
 mod file_watcher;
@@ -382,6 +388,7 @@ mod kovaaks_api;
 mod kovaaks_theme;
 mod logger;
 mod mouse_hook;
+mod overlay_service;
 mod replay_store;
 mod sapi;
 mod scenario_index;
@@ -449,8 +456,9 @@ fn get_overlay_origin(app: AppHandle) -> OverlayOrigin {
 fn configure_overlay_window(win: &tauri::WebviewWindow) {
     use windows::Win32::UI::WindowsAndMessaging::{
         GWL_EXSTYLE, GWL_STYLE, GetWindowLongW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongW, SetWindowPos,
-        WS_EX_OVERLAPPEDWINDOW, WS_OVERLAPPEDWINDOW, WS_POPUP,
+        SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowDisplayAffinity, SetWindowLongW,
+        SetWindowPos, WDA_EXCLUDEFROMCAPTURE, WDA_MONITOR, WS_EX_OVERLAPPEDWINDOW,
+        WS_OVERLAPPEDWINDOW, WS_POPUP,
     };
 
     let _ = win.unmaximize();
@@ -485,6 +493,12 @@ fn configure_overlay_window(win: &tauri::WebviewWindow) {
                     | SWP_NOACTIVATE
                     | SWP_FRAMECHANGED,
             );
+        }
+    }
+
+    unsafe {
+        if SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE).is_err() {
+            let _ = SetWindowDisplayAffinity(hwnd, WDA_MONITOR);
         }
     }
 }
@@ -622,6 +636,13 @@ fn save_settings(
     if new_settings.hub_api_base_url.trim().is_empty() {
         new_settings.hub_api_base_url = settings::DEFAULT_HUB_API_BASE_URL.to_string();
     }
+    new_settings.replay_capture_width =
+        settings::normalize_replay_capture_width(new_settings.replay_capture_width);
+    new_settings.replay_capture_framing =
+        settings::normalize_replay_capture_framing(&new_settings.replay_capture_framing);
+    new_settings.replay_capture_quality =
+        settings::normalize_replay_capture_quality(&new_settings.replay_capture_quality);
+    settings::normalize_overlay_settings(&mut new_settings);
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
     *s = new_settings.clone();
     settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
@@ -630,6 +651,9 @@ fn save_settings(
     mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
     screen_recorder::set_replay_capture_fps(new_settings.replay_capture_fps);
+    screen_recorder::set_replay_capture_width(new_settings.replay_capture_width);
+    screen_recorder::set_replay_capture_framing(&new_settings.replay_capture_framing);
+    screen_recorder::set_replay_capture_quality(&new_settings.replay_capture_quality);
     replay_store::apply_replay_retention(&app, Some(new_settings.replay_keep_count as usize), None);
     replay_store::maybe_install_ffmpeg_for_replay_media(app.clone(), new_settings.clone());
     hub_sync::queue_pending_session_sync(&app);
@@ -648,6 +672,9 @@ fn reset_settings(state: tauri::State<AppState>, app: AppHandle) -> Result<AppSe
     mouse_hook::set_feedback_enabled(defaults.live_feedback_enabled);
     mouse_hook::set_feedback_verbosity(defaults.live_feedback_verbosity);
     screen_recorder::set_replay_capture_fps(defaults.replay_capture_fps);
+    screen_recorder::set_replay_capture_width(defaults.replay_capture_width);
+    screen_recorder::set_replay_capture_framing(&defaults.replay_capture_framing);
+    screen_recorder::set_replay_capture_quality(&defaults.replay_capture_quality);
     replay_store::apply_replay_retention(&app, Some(defaults.replay_keep_count as usize), None);
     let _ = app.emit("settings-changed", ());
     Ok(defaults)
@@ -741,6 +768,13 @@ async fn hub_get_benchmark_page(
     benchmark_id: u32,
 ) -> Result<hub_api::HubBenchmarkPageResponse, String> {
     hub_api::get_benchmark_page(&app, handle, benchmark_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn hub_list_benchmarks(app: AppHandle) -> Result<hub_api::HubBenchmarkListResponse, String> {
+    hub_api::list_benchmarks(&app)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2095,6 +2129,7 @@ pub fn run() {
             hub_get_profile,
             hub_get_scenario,
             hub_get_benchmark_page,
+            hub_list_benchmarks,
             hub_get_run,
             hub_get_player_scenario_history,
             hub_get_aim_profile,
@@ -2153,6 +2188,7 @@ pub fn run() {
             ue4ss_reload_runtime_flags,
             get_overlay_runtime_notice,
             get_is_debug_build,
+            get_obs_overlay_url,
             toggle_layout_huds,
             // list_sapi_voices and speak_with_sapi are preserved in lib.rs + sapi.rs
             // for future use but not registered until a working voice backend is confirmed.
@@ -2238,11 +2274,18 @@ pub fn run() {
             mouse_hook::set_feedback_enabled(loaded.live_feedback_enabled);
             mouse_hook::set_feedback_verbosity(loaded.live_feedback_verbosity);
             screen_recorder::set_replay_capture_fps(loaded.replay_capture_fps);
+            screen_recorder::set_replay_capture_width(loaded.replay_capture_width);
+            screen_recorder::set_replay_capture_framing(&loaded.replay_capture_framing);
+            screen_recorder::set_replay_capture_quality(&loaded.replay_capture_quality);
             replay_store::maybe_install_ffmpeg_for_replay_media(app.handle().clone(), loaded.clone());
             replay_store::apply_replay_retention(&app.handle(), Some(loaded.replay_keep_count as usize), None);
 
             // Start pipe server before injection so early UE4SS events are not lost.
             bridge::start(app.handle().clone());
+            {
+                let state = app.state::<AppState>();
+                overlay_service::start(app.handle().clone(), state.settings.clone());
+            }
             if let Err(e) = bridge::start_log_tailer(app.handle().clone(), &loaded.stats_dir) {
                 log::warn!("Failed to start UE4SS log tailer: {e}");
             }

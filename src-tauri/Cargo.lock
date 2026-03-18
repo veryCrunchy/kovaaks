@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "aimmod"
-version = "1.7.1"
+version = "1.7.2"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -49,6 +49,7 @@ dependencies = [
  "tokio",
  "urlencoding",
  "which",
+ "windows 0.61.3",
  "windows 0.62.2",
  "winreg 0.52.0",
  "zip",

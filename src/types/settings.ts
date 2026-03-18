@@ -1,4 +1,8 @@
 import type { FriendProfile } from "./friends";
+import type {
+  OverlayPreset,
+  OverlaySurfaceAssignments,
+} from "./overlayPresets";
 
 // ─── Screen regions ────────────────────────────────────────────────────────────
 
@@ -47,8 +51,14 @@ export interface AppSettings {
   hub_account_label: string;
   /** Target replay capture framerate for recorded screen frames. */
   replay_capture_fps: number;
+  /** Target width for encoded replay frames after downscaling. */
+  replay_capture_width: number;
+  /** Capture quality preset for encoded replay frames. */
+  replay_capture_quality: "balanced" | "high" | "ultra";
   /** How many non-favorited replays to keep locally. Zero means unlimited. */
   replay_keep_count: number;
+  /** Whether replay video captures the full game window or a center crop. */
+  replay_capture_framing: "cropped" | "fullscreen";
   /** Which replays should upload replay media to AimMod Hub. */
   replay_media_upload_mode: "off" | "favorites" | "favorites_and_pb" | "all";
   /** Replay media upload quality preset. Higher presets can later be reserved for Plus tiers. */
@@ -63,6 +73,16 @@ export interface AppSettings {
   palette_color_overrides: Record<string, string>;
   /** Overlay HUD opacity (0–1). Default 1.0. */
   hud_opacity: number;
+  /** Shared overlay presets used for OBS, private desktop, and in-game browser surfaces. */
+  overlay_presets: OverlayPreset[];
+  /** Active fallback preset when a specific surface does not choose its own preset. */
+  active_overlay_preset_id: string;
+  /** Per-surface preset selections. */
+  active_surface_assignments: OverlaySurfaceAssignments;
+  /** Benchmarks selected for benchmark overlay widgets. */
+  overlay_selected_benchmark_ids: number[];
+  /** Preferred benchmark for the full benchmark widget. */
+  overlay_primary_benchmark_id: number | null;
 }
 
 export interface MonitorInfo {
