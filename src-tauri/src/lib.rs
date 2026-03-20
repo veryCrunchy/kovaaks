@@ -383,6 +383,7 @@ mod bridge;
 mod discord_rpc;
 mod file_watcher;
 mod hub_api;
+mod hub_live_activity;
 mod hub_sync;
 mod kovaaks_api;
 mod kovaaks_theme;
@@ -631,6 +632,10 @@ fn save_settings(
     state: tauri::State<AppState>,
     app: AppHandle,
 ) -> Result<(), String> {
+    let persisted_hub_api_base_url = settings::load_persisted(&app)
+        .map(|settings| settings.hub_api_base_url)
+        .unwrap_or_else(|_| settings::DEFAULT_HUB_API_BASE_URL.to_string());
+
     new_settings.hub_api_base_url =
         settings::normalize_hub_api_base_url(&new_settings.hub_api_base_url);
     if new_settings.hub_api_base_url.trim().is_empty() {
@@ -643,19 +648,32 @@ fn save_settings(
     new_settings.replay_capture_quality =
         settings::normalize_replay_capture_quality(&new_settings.replay_capture_quality);
     settings::normalize_overlay_settings(&mut new_settings);
+
+    let mut persisted_settings = new_settings.clone();
+    if settings::hub_api_base_url_launch_override().is_some() {
+        persisted_settings.hub_api_base_url = persisted_hub_api_base_url;
+    }
+
+    let mut effective_settings = persisted_settings.clone();
+    settings::apply_runtime_overrides(&mut effective_settings);
+
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
-    *s = new_settings.clone();
-    settings::persist(&app, &new_settings).map_err(|e| e.to_string())?;
-    file_watcher::restart(&app, &new_settings.stats_dir);
-    mouse_hook::set_dpi(new_settings.mouse_dpi);
-    mouse_hook::set_feedback_enabled(new_settings.live_feedback_enabled);
-    mouse_hook::set_feedback_verbosity(new_settings.live_feedback_verbosity);
-    screen_recorder::set_replay_capture_fps(new_settings.replay_capture_fps);
-    screen_recorder::set_replay_capture_width(new_settings.replay_capture_width);
-    screen_recorder::set_replay_capture_framing(&new_settings.replay_capture_framing);
-    screen_recorder::set_replay_capture_quality(&new_settings.replay_capture_quality);
-    replay_store::apply_replay_retention(&app, Some(new_settings.replay_keep_count as usize), None);
-    replay_store::maybe_install_ffmpeg_for_replay_media(app.clone(), new_settings.clone());
+    *s = effective_settings.clone();
+    settings::persist(&app, &persisted_settings).map_err(|e| e.to_string())?;
+    file_watcher::restart(&app, &effective_settings.stats_dir);
+    mouse_hook::set_dpi(effective_settings.mouse_dpi);
+    mouse_hook::set_feedback_enabled(effective_settings.live_feedback_enabled);
+    mouse_hook::set_feedback_verbosity(effective_settings.live_feedback_verbosity);
+    screen_recorder::set_replay_capture_fps(effective_settings.replay_capture_fps);
+    screen_recorder::set_replay_capture_width(effective_settings.replay_capture_width);
+    screen_recorder::set_replay_capture_framing(&effective_settings.replay_capture_framing);
+    screen_recorder::set_replay_capture_quality(&effective_settings.replay_capture_quality);
+    replay_store::apply_replay_retention(
+        &app,
+        Some(effective_settings.replay_keep_count as usize),
+        None,
+    );
+    replay_store::maybe_install_ffmpeg_for_replay_media(app.clone(), effective_settings.clone());
     hub_sync::queue_pending_session_sync(&app);
     let _ = app.emit("settings-changed", ());
     Ok(())
@@ -663,10 +681,12 @@ fn save_settings(
 
 #[tauri::command]
 fn reset_settings(state: tauri::State<AppState>, app: AppHandle) -> Result<AppSettings, String> {
-    let defaults = settings::load_default();
+    let persisted_defaults = AppSettings::default();
+    let mut defaults = persisted_defaults.clone();
+    settings::apply_runtime_overrides(&mut defaults);
     let mut s = state.settings.lock().map_err(|e| e.to_string())?;
     *s = defaults.clone();
-    settings::persist(&app, &defaults).map_err(|e| e.to_string())?;
+    settings::persist(&app, &persisted_defaults).map_err(|e| e.to_string())?;
     file_watcher::restart(&app, &defaults.stats_dir);
     mouse_hook::set_dpi(defaults.mouse_dpi);
     mouse_hook::set_feedback_enabled(defaults.live_feedback_enabled);
@@ -2087,6 +2107,10 @@ fn apply_window_titles(app: &AppHandle) {
 pub fn run() {
     // Our logger emits to stderr AND to the Tauri logs window
     logger::init().unwrap_or_else(|_| eprintln!("logger already set"));
+    settings::init_runtime_launch_overrides();
+    if let Some(override_url) = settings::hub_api_base_url_launch_override() {
+        log::info!("Using launch-time AimMod Hub override: {override_url}");
+    }
 
     let initial_settings = settings::load_default();
     let app_state = AppState {
@@ -2285,6 +2309,7 @@ pub fn run() {
             {
                 let state = app.state::<AppState>();
                 overlay_service::start(app.handle().clone(), state.settings.clone());
+                hub_live_activity::start(app.handle().clone(), state.settings.clone());
             }
             if let Err(e) = bridge::start_log_tailer(app.handle().clone(), &loaded.stats_dir) {
                 log::warn!("Failed to start UE4SS log tailer: {e}");

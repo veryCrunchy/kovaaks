@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
 use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
-pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.app";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.hub";
 pub const DEFAULT_REPLAY_CAPTURE_FPS: u32 = 24;
 pub const DEFAULT_REPLAY_CAPTURE_WIDTH: u32 = 480;
 pub const DEFAULT_REPLAY_KEEP_COUNT: u32 = 150;
@@ -362,10 +363,55 @@ impl Default for AppSettings {
 }
 
 pub fn load_default() -> AppSettings {
-    AppSettings::default()
+    let mut settings = AppSettings::default();
+    apply_runtime_overrides(&mut settings);
+    settings
 }
 
-pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
+pub fn init_runtime_launch_overrides() {
+    let _ = hub_api_base_url_launch_override();
+}
+
+pub fn hub_api_base_url_launch_override() -> Option<String> {
+    static OVERRIDE: OnceLock<Option<String>> = OnceLock::new();
+    OVERRIDE
+        .get_or_init(parse_hub_api_base_url_launch_override)
+        .clone()
+}
+
+fn parse_hub_api_base_url_launch_override() -> Option<String> {
+    let mut args = std::env::args();
+    while let Some(arg) = args.next() {
+        if let Some(value) = arg.strip_prefix("--hub-api-base-url=") {
+            let normalized = normalize_hub_api_base_url(value);
+            return if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            };
+        }
+
+        if arg == "--hub-api-base-url" {
+            let next = args.next().unwrap_or_default();
+            let normalized = normalize_hub_api_base_url(&next);
+            return if normalized.is_empty() {
+                None
+            } else {
+                Some(normalized)
+            };
+        }
+    }
+
+    None
+}
+
+pub fn apply_runtime_overrides(settings: &mut AppSettings) {
+    if let Some(override_url) = hub_api_base_url_launch_override() {
+        settings.hub_api_base_url = override_url;
+    }
+}
+
+pub fn load_persisted(app: &AppHandle) -> anyhow::Result<AppSettings> {
     use tauri_plugin_store::StoreExt;
     let store = app.store(STORE_PATH)?;
     if let Some(val) = store.get(STORE_KEY) {
@@ -408,6 +454,12 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
         }
     }
     Ok(AppSettings::default())
+}
+
+pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
+    let mut settings = load_persisted(app)?;
+    apply_runtime_overrides(&mut settings);
+    Ok(settings)
 }
 
 pub fn persist(app: &AppHandle, settings: &AppSettings) -> anyhow::Result<()> {
@@ -610,13 +662,35 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
         return String::new();
     }
 
-    let migrated = if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.app") {
-        format!("https://aimmod.app{}", rest)
+    let migrated = if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.hub") {
+        format!("https://aimmod.hub{}", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.hub") {
+        format!("https://aimmod.hub{}", rest)
+    } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.hub") {
+        format!(
+            "https://aimmod.hub{}",
+            if rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{}", rest)
+            }
+        )
+    } else if let Some(rest) = trimmed.strip_prefix("aimmod.hub") {
+        format!(
+            "https://aimmod.hub{}",
+            if rest.is_empty() || rest.starts_with('/') {
+                rest.to_string()
+            } else {
+                format!("/{}", rest)
+            }
+        )
+    } else if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.app") {
+        format!("https://aimmod.hub{}", rest)
     } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.app") {
-        format!("https://aimmod.app{}", rest)
+        format!("https://aimmod.hub{}", rest)
     } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.app") {
         format!(
-            "https://aimmod.app{}",
+            "https://aimmod.hub{}",
             if rest.starts_with('/') {
                 rest.to_string()
             } else {
@@ -625,7 +699,7 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
         )
     } else if let Some(rest) = trimmed.strip_prefix("aimmod.app") {
         format!(
-            "https://aimmod.app{}",
+            "https://aimmod.hub{}",
             if rest.is_empty() || rest.starts_with('/') {
                 rest.to_string()
             } else {

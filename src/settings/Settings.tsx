@@ -12,7 +12,7 @@ import { C, accentAlpha } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
-const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
+const DEFAULT_HUB_API_BASE_URL = "https://aimmod.hub";
 
 type Tab = "general" | "overlays" | "friends" | "stats";
 
@@ -503,7 +503,6 @@ function GeneralSettings({
   const [hubLinkBusy, setHubLinkBusy] = useState(false);
   const [hubResyncBusy, setHubResyncBusy] = useState(false);
   const [hubLinkError, setHubLinkError] = useState<string | null>(null);
-  const [showHubApiField, setShowHubApiField] = useState(false);
   const [ffmpegStatus, setFfmpegStatus] = useState<FfmpegStatus | null>(null);
   const [ffmpegBusy, setFfmpegBusy] = useState(false);
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
@@ -566,11 +565,6 @@ function GeneralSettings({
   useEffect(() => {
     void refreshFfmpegStatus();
   }, [refreshFfmpegStatus]);
-
-  useEffect(() => {
-    const current = settings.hub_api_base_url.trim();
-    setShowHubApiField(Boolean(current && current !== DEFAULT_HUB_API_BASE_URL));
-  }, [settings.hub_api_base_url]);
 
   useEffect(() => {
     void refreshHubStatus();
@@ -1504,29 +1498,7 @@ function GeneralSettings({
                       {(settings.hub_api_base_url || DEFAULT_HUB_API_BASE_URL).replace(/^https?:\/\//, "")}
                     </span>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setShowHubApiField((value) => !value)}
-                    className="am-btn am-btn-ghost"
-                    style={{
-                      padding: "4px 8px",
-                      minHeight: 0,
-                      fontSize: 10,
-                      opacity: 0.72,
-                    }}
-                  >
-                    {showHubApiField ? "Hide" : "Change"}
-                  </button>
                 </div>
-                {showHubApiField ? (
-                  <input
-                    type="text"
-                    value={settings.hub_api_base_url || DEFAULT_HUB_API_BASE_URL}
-                    onChange={(e) => update("hub_api_base_url", e.target.value)}
-                    placeholder={DEFAULT_HUB_API_BASE_URL}
-                    className="am-input w-full font-mono"
-                  />
-                ) : null}
               </div>
 
               <div

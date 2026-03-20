@@ -74,6 +74,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 sha2 = "0.10"
 which = "8"
 zip = { version = "4", default-features = false, features = ["deflate"] }
+tungstenite = { version = "0.28", features = ["native-tls"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
