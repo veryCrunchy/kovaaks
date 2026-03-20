@@ -60,6 +60,8 @@ static WATCH_RETRY_RUNNING: AtomicBool = AtomicBool::new(false);
 /// The same file must not be reprocessed within 10 seconds.
 static PROCESSED: Lazy<Mutex<HashMap<PathBuf, Instant>>> = Lazy::new(|| Mutex::new(HashMap::new()));
 static WATCHER_STARTED_AT: Lazy<Mutex<Option<SystemTime>>> = Lazy::new(|| Mutex::new(None));
+static LAST_SESSION_COMPLETE: Lazy<Mutex<Option<SessionCompletePayload>>> =
+    Lazy::new(|| Mutex::new(None));
 
 const DEDUP_WINDOW: Duration = Duration::from_secs(10);
 // ─── Public API ────────────────────────────────────────────────────────────────
@@ -99,6 +101,13 @@ pub fn restart(app: &AppHandle, stats_dir: &str) {
         *guard = None;
     }
     start(app.clone(), stats_dir);
+}
+
+pub fn last_session_complete_payload() -> Option<SessionCompletePayload> {
+    LAST_SESSION_COMPLETE
+        .lock()
+        .ok()
+        .and_then(|payload| payload.clone())
 }
 
 pub fn import_csv_history(app: &AppHandle, stats_dir: &str) -> Result<CsvImportSummary, String> {
@@ -373,14 +382,16 @@ fn process_stats_csv(app: AppHandle, path: PathBuf) {
                         }
                     }
                 });
-            let _ = app.emit(
-                EVENT_SESSION_COMPLETE,
-                SessionCompletePayload {
-                    result: result.clone(),
-                    stats_panel: stats_panel.clone(),
-                    run_snapshot: run_snapshot.clone(),
-                },
-            );
+            let payload = SessionCompletePayload {
+                result: result.clone(),
+                stats_panel: stats_panel.clone(),
+                run_snapshot: run_snapshot.clone(),
+            };
+            if let Ok(mut last) = LAST_SESSION_COMPLETE.lock() {
+                *last = Some(payload.clone());
+            }
+            crate::overlay_service::notify_state_changed();
+            let _ = app.emit(EVENT_SESSION_COMPLETE, payload);
             crate::hub_sync::queue_session_upload(
                 &app,
                 crate::hub_sync::SessionUploadInput {

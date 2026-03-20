@@ -140,6 +140,7 @@ static FEEDBACK_VERBOSITY: AtomicU8 = AtomicU8::new(1);
 /// Stored handle so the rdev callback (static fn) can emit hotkey events.
 static APP_HANDLE: Lazy<Mutex<Option<AppHandle>>> = Lazy::new(|| Mutex::new(None));
 static ACTIVE_SCENARIO_TYPE: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("Unknown".to_string()));
+static LAST_LIVE_FEEDBACK: Lazy<Mutex<Option<LiveFeedback>>> = Lazy::new(|| Mutex::new(None));
 
 struct SharedState {
     events: Vec<RawMouseEvent>,
@@ -182,7 +183,7 @@ static COMPLETED_CAPTURES: Lazy<Mutex<VecDeque<CompletedReplayCapture>>> =
 
 pub const EVENT_MOUSE_METRICS: &str = "mouse-metrics";
 const MAX_COMPLETED_CAPTURES: usize = 12;
-const RAW_REPLAY_SAMPLE_INTERVAL_MS: u64 = 8;
+const RAW_REPLAY_SAMPLE_INTERVAL_MS: u64 = 4;
 const MAX_RAW_REPLAY_POINTS: usize = 60_000;
 const RAW_REPLAY_TRIM_POINTS: usize = 10_000;
 
@@ -580,6 +581,13 @@ fn merge_replay_captures(
 pub fn get_latest_metrics() -> Option<MouseMetrics> {
     let s = STATE.lock().ok()?;
     s.session_metrics.last().map(|p| p.metrics.clone())
+}
+
+pub fn get_latest_live_feedback() -> Option<LiveFeedback> {
+    LAST_LIVE_FEEDBACK
+        .lock()
+        .ok()
+        .and_then(|feedback| feedback.clone())
 }
 
 /// Compute a session-averaged smoothness snapshot from all per-second MetricPoints
@@ -1140,14 +1148,15 @@ fn maybe_emit(
     if *cooldowns.get(key).unwrap_or(&0) > 0 {
         return;
     }
-    let _ = app.emit(
-        EVENT_LIVE_FEEDBACK,
-        LiveFeedback {
-            message: msg.to_string(),
-            kind: kind.to_string(),
-            metric: key.to_string(),
-        },
-    );
+    let payload = LiveFeedback {
+        message: msg.to_string(),
+        kind: kind.to_string(),
+        metric: key.to_string(),
+    };
+    if let Ok(mut latest) = LAST_LIVE_FEEDBACK.lock() {
+        *latest = Some(payload.clone());
+    }
+    let _ = app.emit(EVENT_LIVE_FEEDBACK, payload);
     cooldowns.insert(key, 12); // 12-second cooldown
 }
 

@@ -155,6 +155,12 @@ export function BridgeStateDebugHUD() {
         <span style={{ color: isSessionActive ? C.accent : C.textSub }}>{fmtBool(isSessionActive)}</span>
         <span style={{ color: C.textMuted }}>elapsed_seconds</span>
         <span style={{ color: C.textSub }}>{elapsedSeconds}</span>
+        <span style={{ color: C.textMuted }}>session_time_secs</span>
+        <span style={{ color: C.textSub }}>{fmtNum(stats?.session_time_secs, 3)}</span>
+        <span style={{ color: C.textMuted }}>challenge_seconds_total</span>
+        <span style={{ color: C.textSub }}>{fmtNum(stats?.challenge_seconds_total, 3)}</span>
+        <span style={{ color: C.textMuted }}>challenge_time_length</span>
+        <span style={{ color: C.textSub }}>{fmtNum(stats?.challenge_time_length, 3)}</span>
         <span style={{ color: C.textMuted }}>scenario_name</span>
         <span style={{ color: scenarioName ? C.text : C.textFaint }}>{scenarioName ?? "null"}</span>
         <span style={{ color: C.textMuted }}>game_state</span>
@@ -175,6 +181,8 @@ export function BridgeStateDebugHUD() {
         <span style={{ color: C.textSub }}>{fmtNum(stats?.queue_time_remaining, 3)}</span>
         <span style={{ color: C.textMuted }}>time_remaining</span>
         <span style={{ color: C.textSub }}>{fmtNum(stats?.time_remaining, 3)}</span>
+        <span style={{ color: C.textMuted }}>spm</span>
+        <span style={{ color: C.textSub }}>{fmtNum(stats?.spm, 3)}</span>
         <span style={{ color: C.textMuted }}>score_from_metrics</span>
         <span style={{ color: C.textSub }}>{liveScore ?? "null"}</span>
         <span style={{ color: C.textMuted }}>metric_score_total</span>

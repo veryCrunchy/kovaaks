@@ -386,18 +386,117 @@ fn current_overlay_user() -> Option<FriendProfile> {
 }
 
 fn current_overlay_hub_handle() -> Option<String> {
-    let user = bridge::current_kovaaks_user()?;
-    let handle = user.username.trim();
-    if handle.is_empty() {
-        None
-    } else {
-        Some(handle.to_string())
-    }
+    let bridge_user = bridge::current_kovaaks_user();
+    let profile_user = current_overlay_user();
+
+    let candidates = bridge_user
+        .as_ref()
+        .map(|user| {
+            let aimmod_identity = user
+                .linked_accounts
+                .iter()
+                .find(|account| account.provider.eq_ignore_ascii_case("aimmod"));
+            let steam_identity = user
+                .linked_accounts
+                .iter()
+                .find(|account| account.provider.eq_ignore_ascii_case("steam"));
+            [
+                user.username.trim(),
+                aimmod_identity
+                    .map(|account| account.username.trim())
+                    .unwrap_or(""),
+                aimmod_identity
+                    .map(|account| account.display_name.trim())
+                    .unwrap_or(""),
+                user.display_name.trim(),
+                steam_identity
+                    .map(|account| account.username.trim())
+                    .unwrap_or(""),
+            ]
+        })
+        .unwrap_or(["", "", "", "", ""]);
+
+    candidates
+        .into_iter()
+        .chain(
+            profile_user
+                .as_ref()
+                .map(|user| [user.username.trim(), user.steam_account_name.trim()])
+                .unwrap_or(["", ""]),
+        )
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 fn local_personal_best_score(app: &AppHandle, scenario_name: &str) -> Option<f64> {
     let normalized = normalize_scenario_name(scenario_name);
     session_store::get_personal_best_for_scenario(app, &normalized).map(|value| value as f64)
+}
+
+fn fetch_hub_personal_best_score_sync(
+    app: &AppHandle,
+    handle: &str,
+    scenario_slug: &str,
+) -> anyhow::Result<Option<f64>> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| anyhow::anyhow!("failed to create overlay pb runtime: {error}"))?;
+    let history = runtime.block_on(async {
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            hub_api::get_player_scenario_history(
+                app,
+                handle.to_string(),
+                scenario_slug.to_string(),
+            ),
+        )
+        .await
+    });
+
+    match history {
+        Ok(Ok(history)) => Ok(
+            if history.best_score.is_finite() && history.best_score > 0.0 {
+                Some(history.best_score)
+            } else {
+                None
+            },
+        ),
+        Ok(Err(error)) => Err(error),
+        Err(_) => Err(anyhow::anyhow!(
+            "timed out fetching hub pb for handle={handle} scenario_slug={scenario_slug}"
+        )),
+    }
+}
+
+fn spawn_hub_personal_best_refresh(app: AppHandle, key: HubPbCacheKey) {
+    let _ = std::thread::Builder::new()
+        .name("overlay-hub-pb".into())
+        .spawn(move || {
+            let response = fetch_hub_personal_best_score_sync(&app, &key.handle, &key.scenario_slug);
+
+            if let Ok(mut cache) = hub_pb_cache().lock() {
+                if let Some(entry) = cache.get_mut(&key) {
+                    entry.in_flight = false;
+                    match response {
+                        Ok(score) => {
+                            entry.score = score;
+                            entry.refresh_after = Instant::now() + HUB_PB_CACHE_TTL;
+                            notify_state_changed();
+                        }
+                        Err(error) => {
+                            entry.refresh_after = Instant::now() + HUB_PB_RETRY_DELAY;
+                            log::warn!(
+                                "overlay_service: hub pb lookup failed for handle={} scenario_slug={}: {error:#}",
+                                key.handle,
+                                key.scenario_slug
+                            );
+                        }
+                    }
+                }
+            }
+        });
 }
 
 fn cached_hub_personal_best_score(
@@ -420,6 +519,7 @@ fn cached_hub_personal_best_score(
 
     let now = Instant::now();
     let mut cached_score = None;
+    let mut should_fetch_now = false;
     let mut should_fetch = false;
 
     if let Ok(mut cache) = hub_pb_cache().lock() {
@@ -427,7 +527,11 @@ fn cached_hub_personal_best_score(
             cached_score = entry.score;
             if !entry.in_flight && now >= entry.refresh_after {
                 entry.in_flight = true;
-                should_fetch = true;
+                if entry.score.is_some() {
+                    should_fetch = true;
+                } else {
+                    should_fetch_now = true;
+                }
             }
         } else {
             cache.insert(
@@ -438,46 +542,41 @@ fn cached_hub_personal_best_score(
                     in_flight: true,
                 },
             );
-            should_fetch = true;
+            should_fetch_now = true;
+        }
+    }
+
+    if should_fetch_now {
+        match fetch_hub_personal_best_score_sync(app, &key.handle, &key.scenario_slug) {
+            Ok(score) => {
+                if let Ok(mut cache) = hub_pb_cache().lock() {
+                    if let Some(entry) = cache.get_mut(&key) {
+                        entry.score = score;
+                        entry.in_flight = false;
+                        entry.refresh_after = Instant::now() + HUB_PB_CACHE_TTL;
+                    }
+                }
+                return score;
+            }
+            Err(error) => {
+                if let Ok(mut cache) = hub_pb_cache().lock() {
+                    if let Some(entry) = cache.get_mut(&key) {
+                        entry.score = None;
+                        entry.in_flight = false;
+                        entry.refresh_after = Instant::now() + HUB_PB_RETRY_DELAY;
+                    }
+                }
+                log::warn!(
+                    "overlay_service: initial hub pb lookup failed for handle={} scenario_slug={}: {error:#}",
+                    key.handle,
+                    key.scenario_slug
+                );
+            }
         }
     }
 
     if should_fetch {
-        let app = app.clone();
-        tauri::async_runtime::spawn(async move {
-            let response = hub_api::get_player_scenario_history(
-                &app,
-                key.handle.clone(),
-                key.scenario_slug.clone(),
-            )
-            .await;
-
-            if let Ok(mut cache) = hub_pb_cache().lock() {
-                if let Some(entry) = cache.get_mut(&key) {
-                    entry.in_flight = false;
-                    match response {
-                        Ok(history) => {
-                            entry.score =
-                                if history.best_score.is_finite() && history.best_score > 0.0 {
-                                    Some(history.best_score)
-                                } else {
-                                    None
-                                };
-                            entry.refresh_after = Instant::now() + HUB_PB_CACHE_TTL;
-                            notify_state_changed();
-                        }
-                        Err(error) => {
-                            entry.refresh_after = Instant::now() + HUB_PB_RETRY_DELAY;
-                            log::debug!(
-                                "overlay_service: hub pb lookup failed for handle={} scenario_slug={}: {error:#}",
-                                key.handle,
-                                key.scenario_slug
-                            );
-                        }
-                    }
-                }
-            }
-        });
+        spawn_hub_personal_best_refresh(app.clone(), key.clone());
     }
 
     cached_score

@@ -16,7 +16,7 @@ use crate::file_watcher::SessionResult;
 use crate::session_store::{ShotTimingSnapshot, SmoothnessSnapshot, StatsPanelSnapshot};
 
 pub const HUB_SCHEMA_VERSION: u32 = 11;
-pub const HUB_REPLAY_MEDIA_SCHEMA_VERSION: u32 = 2;
+pub const HUB_REPLAY_MEDIA_SCHEMA_VERSION: u32 = 3;
 pub const HUB_MOUSE_PATH_SCHEMA_VERSION: u32 = 2;
 const CONNECT_PROTOCOL_VERSION: &str = "1";
 const INGEST_PATH: &str = "/aimmod.hub.v1.HubService/IngestSession";
@@ -1019,6 +1019,8 @@ async fn upload_session(app: &AppHandle, input: SessionUploadInput) -> anyhow::R
     crate::session_store::mark_session_hub_uploaded(app, &input.session_id);
     try_upload_replay_media_for_session(app, &input.result, &input.session_id).await;
     try_upload_mouse_path_for_session(app, &input.session_id).await;
+    crate::benchmark_overlay::invalidate();
+    crate::overlay_service::notify_state_changed();
     record_sync_success(app, Some(&input.session_id));
     refresh_pending_count(app);
     log::info!("hub_sync: uploaded session {}", input.session_id);

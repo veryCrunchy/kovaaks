@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import { OverlayRenderer } from "./OverlayRenderer";
 import { getAssignedPreset } from "./presetUtils";
+import { BridgeStateDebugHUD } from "../overlay/BridgeStateDebugHUD";
 import type { OverlayStateEnvelope } from "../types/overlayRuntime";
 import type { AppSettings } from "../types/settings";
 
@@ -9,7 +11,7 @@ const BASE_WIDTH = 1920;
 const BASE_HEIGHT = 1080;
 const OVERLAY_STATE_URL = "http://127.0.0.1:43115/api/streamer-overlay/state";
 const OVERLAY_EVENTS_URL = "http://127.0.0.1:43115/api/streamer-overlay/events";
-const DESKTOP_SURFACE = "desktop_private";
+const GAME_SURFACE = "in_game";
 
 function cloneState<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
@@ -23,10 +25,20 @@ interface DesktopOverlayProps {
 export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps) {
   const [overlayState, setOverlayState] = useState<OverlayStateEnvelope | null>(null);
   const [layoutState, setLayoutState] = useState<OverlayStateEnvelope | null>(null);
+  const [showDebugHud, setShowDebugHud] = useState(false);
   const [viewport, setViewport] = useState({ width: window.innerWidth, height: window.innerHeight });
   const hostRef = useRef<HTMLDivElement | null>(null);
   const dragRef = useRef<{ widgetId: string; startX: number; startY: number; originX: number; originY: number } | null>(null);
   const layoutDirtyRef = useRef(false);
+
+  useEffect(() => {
+    const unlisten = listen<void>("toggle-debug-state-overlay", () => {
+      setShowDebugHud((current) => !current);
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -92,7 +104,7 @@ export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps
 
   const renderState = layoutMode ? (layoutState ?? overlayState) : overlayState;
   const preset = useMemo(
-    () => (renderState ? getAssignedPreset(renderState, DESKTOP_SURFACE) : null),
+    () => (renderState ? getAssignedPreset(renderState, GAME_SURFACE) : null),
     [renderState],
   );
   const scaleX = viewport.width / BASE_WIDTH;
@@ -102,9 +114,9 @@ export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps
     setLayoutState((current) => {
       if (!current) return current;
       const next = cloneState(current);
-      const presetId = next.active_surface_assignments.desktop_private || next.active_overlay_preset_id;
+      const presetId = next.active_surface_assignments[GAME_SURFACE] || next.active_overlay_preset_id;
       const targetPreset = next.overlay_presets.find((entry) => entry.id === presetId);
-      const placement = targetPreset?.surface_variants?.desktop_private?.widget_layouts?.[widgetId];
+      const placement = targetPreset?.surface_variants?.[GAME_SURFACE]?.widget_layouts?.[widgetId];
       if (!targetPreset || !placement) return current;
       Object.assign(placement, patch);
       layoutDirtyRef.current = true;
@@ -118,16 +130,16 @@ export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps
     layoutDirtyRef.current = false;
 
     const settings = await invoke<AppSettings>("get_settings");
-    const presetId = settings.active_surface_assignments.desktop_private || settings.active_overlay_preset_id;
+    const presetId = settings.active_surface_assignments[GAME_SURFACE] || settings.active_overlay_preset_id;
     const sourcePreset = currentLayout.overlay_presets.find((entry) => entry.id === presetId);
     if (!sourcePreset) return;
 
     const nextSettings = cloneState(settings);
     const targetPreset = nextSettings.overlay_presets.find((entry) => entry.id === presetId);
-    if (!targetPreset?.surface_variants?.desktop_private) return;
+    if (!targetPreset?.surface_variants?.[GAME_SURFACE]) return;
 
-    targetPreset.surface_variants.desktop_private.widget_layouts =
-      cloneState(sourcePreset.surface_variants.desktop_private.widget_layouts);
+    targetPreset.surface_variants[GAME_SURFACE].widget_layouts =
+      cloneState(sourcePreset.surface_variants[GAME_SURFACE].widget_layouts);
 
     await invoke("save_settings", { newSettings: nextSettings });
   };
@@ -181,7 +193,7 @@ export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps
       >
         <OverlayRenderer
           preset={preset}
-          surface={DESKTOP_SURFACE}
+          surface={GAME_SURFACE}
           state={renderState}
           style={{ width: BASE_WIDTH, height: BASE_HEIGHT }}
           renderWidgetChrome={({ widgetId, placement, element }) => (
@@ -208,6 +220,19 @@ export function DesktopOverlay({ layoutMode, snapGridSize }: DesktopOverlayProps
           )}
         />
       </div>
+      {showDebugHud && (
+        <div
+          style={{
+            position: "absolute",
+            top: 18,
+            right: 18,
+            zIndex: 1000,
+            pointerEvents: "none",
+          }}
+        >
+          <BridgeStateDebugHUD />
+        </div>
+      )}
     </div>
   );
 }

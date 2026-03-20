@@ -89,6 +89,34 @@ struct BridgeStatsPanelEvent {
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct BridgeOverlayStatsSnapshot {
+    pub session_time_secs: Option<f64>,
+    pub score_total: Option<f64>,
+    pub score_total_derived: Option<f64>,
+    pub kills: Option<u32>,
+    pub kps: Option<f64>,
+    pub accuracy_hits: Option<u32>,
+    pub accuracy_shots: Option<u32>,
+    pub accuracy_pct: Option<f64>,
+    pub damage_dealt: Option<f64>,
+    pub damage_total: Option<f64>,
+    pub spm: Option<f64>,
+    pub ttk_secs: Option<f64>,
+    pub challenge_seconds_total: Option<f64>,
+    pub challenge_time_length: Option<f64>,
+    pub time_remaining: Option<f64>,
+    pub queue_time_remaining: Option<f64>,
+    pub is_in_challenge: Option<bool>,
+    pub is_in_scenario: Option<bool>,
+    pub scenario_is_paused: Option<bool>,
+    pub game_state_code: Option<i32>,
+    pub game_state: Option<String>,
+    pub scenario_name: Option<String>,
+    pub scenario_type: String,
+    pub scenario_subtype: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct BridgeTickStreamV1 {
     pub sample_hz: Option<u32>,
     pub keyframe_interval_ms: Option<u32>,
@@ -857,7 +885,7 @@ mod imp {
     const PAYLOAD_DEPLOY_INFO_FILE: &str = ".kovaaks_overlay_deploy_info.txt";
     const IN_GAME_OVERLAY_DIST_DIR: &str = "dist";
     const IN_GAME_OVERLAY_TARGET_DIR: &str = "aimmod_overlay";
-    const IN_GAME_OVERLAY_INDEX_FILE: &str = "index.html";
+    const IN_GAME_OVERLAY_INDEX_FILE: &str = "browser-overlay.html";
     const IN_GAME_OVERLAY_URL_FILE: &str = "kovaaks_in_game_overlay_url.txt";
 
     const LOG_RING_CAPACITY: usize = 1200;
@@ -865,7 +893,6 @@ mod imp {
     const SESSION_IDLE_WATCHDOG_TICK: Duration = Duration::from_millis(300);
     const EARLY_SESSION_END_GUARD: Duration = Duration::from_millis(2500);
     const INJECTION_MIN_PROCESS_AGE: Duration = Duration::from_secs(8);
-
 
     fn sanitize_state_request_reason(reason: &str) -> String {
         let mut out = String::with_capacity(reason.len());
@@ -2558,6 +2585,39 @@ mod imp {
             .and_then(|state| state.friend_scores.clone())
     }
 
+    pub(super) fn current_overlay_stats_snapshot() -> super::BridgeOverlayStatsSnapshot {
+        bridge_compat_state()
+            .lock()
+            .ok()
+            .map(|state| super::BridgeOverlayStatsSnapshot {
+                session_time_secs: state.stats.session_time_secs,
+                score_total: state.stats.score_total,
+                score_total_derived: state.stats.score_total_derived,
+                kills: state.stats.kills,
+                kps: state.stats.kps,
+                accuracy_hits: state.stats.accuracy_hits,
+                accuracy_shots: state.stats.accuracy_shots,
+                accuracy_pct: state.stats.accuracy_pct,
+                damage_dealt: state.stats.damage_dealt,
+                damage_total: state.stats.damage_total,
+                spm: state.stats.spm,
+                ttk_secs: state.stats.ttk_secs,
+                challenge_seconds_total: state.stats.challenge_seconds_total,
+                challenge_time_length: state.stats.challenge_time_length,
+                time_remaining: state.stats.time_remaining,
+                queue_time_remaining: state.stats.queue_time_remaining,
+                is_in_challenge: state.stats.is_in_challenge,
+                is_in_scenario: state.stats.is_in_scenario,
+                scenario_is_paused: state.stats.scenario_is_paused,
+                game_state_code: Some(state.stats.game_state_code),
+                game_state: Some(state.stats.game_state.clone()),
+                scenario_name: state.stats.scenario_name.clone(),
+                scenario_type: state.stats.scenario_type.clone(),
+                scenario_subtype: state.stats.scenario_subtype.clone(),
+            })
+            .unwrap_or_default()
+    }
+
     fn update_bridge_current_user(app: &AppHandle, user: super::BridgeCurrentUserProfile) {
         if let Ok(mut state) = bridge_identity_state().lock() {
             state.current_user = Some(user.clone());
@@ -2659,6 +2719,7 @@ mod imp {
 
     fn emit_stats_panel_update(app: &AppHandle, stats: &BridgeStatsPanelEvent) {
         let _ = app.emit(super::EVENT_STATS_PANEL_UPDATE, stats);
+        crate::overlay_service::notify_state_changed();
         crate::mouse_hook::set_tracking_paused(
             stats.scenario_is_paused == Some(true) || stats.game_state_code == 5,
         );
@@ -4606,76 +4667,70 @@ mod imp {
                         continue;
                     }
                     let s = s.to_owned();
-                    let processed =
-                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            let maybe_replay_ready =
-                                s.contains("\"ev\":\"replay_playback_");
-                            let maybe_replay_stream = s
-                                .contains("\"ev\":\"replay_context\"")
-                                || s.contains("\"ev\":\"replay_tick_keyframe\"")
-                                || s.contains("\"ev\":\"replay_tick_delta\"")
-                                || s.contains("\"ev\":\"replay_tick_end\"");
-                            let maybe_shot_telemetry = s
-                                .contains("\"ev\":\"shot_fired_telemetry\"")
-                                || s.contains("\"ev\":\"shot_hit_telemetry\"")
-                                || s.contains("\"ev\":\"shot_telemetry_batch\"");
-                            if maybe_replay_ready {
-                                note_in_game_replay_event(&s);
+                    let processed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        let maybe_replay_ready = s.contains("\"ev\":\"replay_playback_");
+                        let maybe_replay_stream = s.contains("\"ev\":\"replay_context\"")
+                            || s.contains("\"ev\":\"replay_tick_keyframe\"")
+                            || s.contains("\"ev\":\"replay_tick_delta\"")
+                            || s.contains("\"ev\":\"replay_tick_end\"");
+                        let maybe_shot_telemetry = s.contains("\"ev\":\"shot_fired_telemetry\"")
+                            || s.contains("\"ev\":\"shot_hit_telemetry\"")
+                            || s.contains("\"ev\":\"shot_telemetry_batch\"");
+                        if maybe_replay_ready {
+                            note_in_game_replay_event(&s);
+                        }
+                        if maybe_replay_stream {
+                            observe_replay_stream_raw(&s);
+                        }
+                        if maybe_shot_telemetry {
+                            observe_shot_telemetry_raw(&s);
+                        }
+                        let parsed_event = super::parse_bridge_payload(&s);
+                        let is_noisy_bridge_event = |ev: &str| {
+                            matches!(
+                                ev,
+                                "process_event_activity"
+                                    | "hook_probe"
+                                    | "hook_focus_probe"
+                                    | "hook_focus_probe_typed"
+                                    | "class_hook_probe"
+                                    | "script_hook_probe"
+                                    | "bridge_transport_probe"
+                                    | "pull_source"
+                                    | "pull_snapshot"
+                                    | "shot_fired_telemetry"
+                                    | "shot_hit_telemetry"
+                                    | "shot_telemetry_batch"
+                            ) || ev.starts_with("pull_")
+                        };
+                        let suppress_bridge_log_event = parsed_event
+                            .as_ref()
+                            .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
+                        if !suppress_bridge_log_event {
+                            log::info!("bridge event: {s}");
+                            emit_ue4ss_log(app, format!("[bridge] {s}"));
+                            let _ = app.emit(super::BRIDGE_EVENT, s.clone());
+                        }
+                        if let Some(parsed) = parsed_event {
+                            observe_run_metric_event(&parsed);
+                            emit_bridge_compat_events(app, &parsed);
+                            if is_stats_flow_event(&parsed) {
+                                mark_stats_flow_activity(
+                                    parsed.ev.as_str(),
+                                    parsed.ev.starts_with("pull_"),
+                                );
                             }
-                            if maybe_replay_stream {
-                                observe_replay_stream_raw(&s);
+                            if is_noisy_bridge_event(&parsed.ev) {
+                                return;
                             }
-                            if maybe_shot_telemetry {
-                                observe_shot_telemetry_raw(&s);
+                            let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
+                            if super::is_frontend_metric_event_name(&parsed.ev) {
+                                let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
                             }
-                            let parsed_event = super::parse_bridge_payload(&s);
-                            let is_noisy_bridge_event = |ev: &str| {
-                                matches!(
-                                    ev,
-                                    "process_event_activity"
-                                        | "hook_probe"
-                                        | "hook_focus_probe"
-                                        | "hook_focus_probe_typed"
-                                        | "class_hook_probe"
-                                        | "script_hook_probe"
-                                        | "bridge_transport_probe"
-                                        | "pull_source"
-                                        | "pull_snapshot"
-                                        | "shot_fired_telemetry"
-                                        | "shot_hit_telemetry"
-                                        | "shot_telemetry_batch"
-                                ) || ev.starts_with("pull_")
-                            };
-                            let suppress_bridge_log_event = parsed_event
-                                .as_ref()
-                                .map_or(false, |parsed| is_noisy_bridge_event(&parsed.ev));
-                            if !suppress_bridge_log_event {
-                                log::info!("bridge event: {s}");
-                                emit_ue4ss_log(app, format!("[bridge] {s}"));
-                                let _ = app.emit(super::BRIDGE_EVENT, s.clone());
-                            }
-                            if let Some(parsed) = parsed_event {
-                                observe_run_metric_event(&parsed);
-                                emit_bridge_compat_events(app, &parsed);
-                                if is_stats_flow_event(&parsed) {
-                                    mark_stats_flow_activity(
-                                        parsed.ev.as_str(),
-                                        parsed.ev.starts_with("pull_"),
-                                    );
-                                }
-                                if is_noisy_bridge_event(&parsed.ev) {
-                                    return;
-                                }
-                                let _ = app.emit(super::BRIDGE_PARSED_EVENT, &parsed);
-                                if super::is_frontend_metric_event_name(&parsed.ev) {
-                                    let _ = app.emit(super::BRIDGE_METRIC_EVENT, &parsed);
-                                }
-                            }
-                        }));
+                        }
+                    }));
                     if processed.is_err() {
-                        log::error!(
-                            "bridge: panic while processing bridge event line; continuing"
-                        );
+                        log::error!("bridge: panic while processing bridge event line; continuing");
                     }
                     if s.contains("\"ev\":\"bridge_transport_probe\"") {
                         probe_count = probe_count.wrapping_add(1);
@@ -5668,6 +5723,13 @@ mod imp {
         }
 
         let overlay_url = to_file_url(overlay_index);
+        let overlay_url = if overlay_index.file_name().and_then(|name| name.to_str())
+            == Some(IN_GAME_OVERLAY_INDEX_FILE)
+        {
+            format!("{overlay_url}?surface=in_game")
+        } else {
+            overlay_url
+        };
         let overlay_url_path = game_bin_dir.join(IN_GAME_OVERLAY_URL_FILE);
         std::fs::write(&overlay_url_path, format!("{}\n", overlay_url)).map_err(|e| {
             format!(
@@ -6671,6 +6733,16 @@ pub fn current_kovaaks_friend_scores() -> Option<BridgeFriendScoresSnapshot> {
 #[cfg(not(target_os = "windows"))]
 pub fn current_kovaaks_friend_scores() -> Option<BridgeFriendScoresSnapshot> {
     None
+}
+
+#[cfg(target_os = "windows")]
+pub fn current_overlay_stats_snapshot() -> BridgeOverlayStatsSnapshot {
+    imp::current_overlay_stats_snapshot()
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn current_overlay_stats_snapshot() -> BridgeOverlayStatsSnapshot {
+    BridgeOverlayStatsSnapshot::default()
 }
 
 #[cfg(target_os = "windows")]

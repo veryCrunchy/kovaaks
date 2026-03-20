@@ -1,5 +1,6 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { C, accentAlpha } from "./design/tokens";
 import { useAppTheme } from "./hooks/useAppTheme";
 import { DesktopOverlay } from "./overlay-system/DesktopOverlay";
@@ -53,6 +54,15 @@ export default function App() {
     const onKeyDown = (event: KeyboardEvent) => {
       const tagName = (event.target as HTMLElement | null)?.tagName ?? "";
       const inField = tagName === "INPUT" || tagName === "TEXTAREA" || tagName === "SELECT";
+      if (event.key === "F10") {
+        event.preventDefault();
+        setMode((current) => {
+          if (current === "layout") return "overlay";
+          setReturnMode(current === "settings" ? "settings" : "overlay");
+          return "layout";
+        });
+        return;
+      }
       if (!inField && event.shiftKey && event.key === "?") {
         event.preventDefault();
         setHelpOpen(true);
@@ -74,6 +84,11 @@ export default function App() {
       setGridMode(false);
     }
   }, [mode]);
+
+  useEffect(() => {
+    const passthroughEnabled = mode === "overlay" && !helpOpen;
+    void invoke("set_mouse_passthrough", { enabled: passthroughEnabled }).catch(console.error);
+  }, [mode, helpOpen]);
 
   return (
     <div
@@ -244,6 +259,7 @@ export default function App() {
             title: "Overlay",
             items: [
               { keys: "F8", action: "Open or close Settings" },
+              { keys: "F9", action: "Toggle bridge debug HUD" },
               { keys: "F10", action: "Toggle overlay layout mode" },
               { keys: "?", action: "Open this shortcuts panel" },
             ],

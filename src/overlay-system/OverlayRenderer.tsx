@@ -1,5 +1,5 @@
 import type { CSSProperties, ReactNode } from "react";
-import { useEffect, useRef } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import type { OverlayStateEnvelope } from "../types/overlayRuntime";
 import type { RawPositionPoint } from "../types/mouse";
 import type {
@@ -11,6 +11,7 @@ import type {
 import { normalizeTextTransform } from "./presetUtils";
 
 const MOUSE_PATH_API = "http://127.0.0.1:43115/api/streamer-overlay/mouse-path";
+const MIN_PROGRESS_FOR_DIRECT_PROJECTION = 0.08;
 
 interface OverlayRendererProps {
   preset: OverlayPreset;
@@ -81,6 +82,15 @@ function cardStyle(
 }
 
 function activeScore(state: OverlayStateEnvelope): number | null {
+  if (liveRunActive(state)) {
+    return (
+      state.stats_panel?.score_total
+      ?? state.stats_panel?.score_total_derived
+      ?? state.session_result?.score
+      ?? null
+    );
+  }
+
   return (
     state.session_result?.score
     ?? state.stats_panel?.score_total
@@ -106,6 +116,162 @@ function fmtPct(value: number | null | undefined): string {
   return `${value.toFixed(1)}%`;
 }
 
+function finitePositive(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+function finiteNonNegative(value: number | null | undefined): number | null {
+  return value != null && Number.isFinite(value) && value >= 0 ? value : null;
+}
+
+function liveRunActive(state: OverlayStateEnvelope): boolean {
+  const stats = state.stats_panel;
+  if (!stats) return false;
+  return stats.is_in_challenge === true
+    || stats.is_in_scenario === true
+    || stats.game_state_code === 4
+    || stats.game_state_code === 5;
+}
+
+function countdownStageActive(state: OverlayStateEnvelope): boolean {
+  const stats = state.stats_panel;
+  if (!stats) return false;
+  const queueRemaining = finitePositive(stats.queue_time_remaining);
+  return queueRemaining != null && stats.is_in_challenge !== true && stats.game_state_code !== 4;
+}
+
+function pbPaceLiveActive(state: OverlayStateEnvelope): boolean {
+  return liveRunActive(state) && !countdownStageActive(state);
+}
+
+function activeElapsedSeconds(state: OverlayStateEnvelope, preview: boolean): number | null {
+  if (!liveRunActive(state)) {
+    const resultDuration = finitePositive(state.session_result?.duration_secs);
+    if (resultDuration != null) return resultDuration;
+  }
+
+  const challengeElapsed = finitePositive(state.stats_panel?.challenge_seconds_total);
+  if (challengeElapsed != null) return challengeElapsed;
+
+  const challengeLength = finitePositive(state.stats_panel?.challenge_time_length);
+  const timeRemaining = finitePositive(state.stats_panel?.time_remaining);
+  if (challengeLength != null && timeRemaining != null) {
+    return Math.max(0, challengeLength - timeRemaining);
+  }
+
+  const sessionElapsed = finitePositive(state.stats_panel?.session_time_secs);
+  if (sessionElapsed != null) {
+    return sessionElapsed;
+  }
+
+  return preview ? 33 : null;
+}
+
+function activeChallengeLength(state: OverlayStateEnvelope, preview: boolean): number | null {
+  const liveLength = finitePositive(state.stats_panel?.challenge_time_length);
+  if (liveLength != null) return liveLength;
+
+  if (!liveRunActive(state)) {
+    const resultDuration = finitePositive(state.session_result?.duration_secs);
+    if (resultDuration != null) return resultDuration;
+  }
+
+  const timeRemaining = finitePositive(state.stats_panel?.time_remaining);
+  const challengeElapsed = finitePositive(state.stats_panel?.challenge_seconds_total);
+  if (challengeElapsed != null && timeRemaining != null) {
+    return challengeElapsed + timeRemaining;
+  }
+
+  return preview ? 60 : null;
+}
+
+function activeTimeRemainingSeconds(state: OverlayStateEnvelope, preview: boolean): number | null {
+  const timeRemaining = finitePositive(state.stats_panel?.time_remaining);
+  if (timeRemaining != null) return timeRemaining;
+
+  const total = activeChallengeLength(state, preview);
+  const elapsed = activeElapsedSeconds(state, preview);
+  if (total != null && elapsed != null && Number.isFinite(total) && Number.isFinite(elapsed)) {
+    return Math.max(0, total - elapsed);
+  }
+
+  return null;
+}
+
+function currentLiveSpm(state: OverlayStateEnvelope, preview: boolean): number | null {
+  const spm = finitePositive(state.stats_panel?.spm);
+  if (spm != null) return spm;
+
+  return preview ? 1502 : null;
+}
+
+function activeProgressRatio(state: OverlayStateEnvelope, preview: boolean): number | null {
+  const total = activeChallengeLength(state, preview);
+  if (total == null || !Number.isFinite(total) || total <= 0) {
+    return null;
+  }
+
+  const elapsed = activeElapsedSeconds(state, preview);
+  if (elapsed == null || !Number.isFinite(elapsed)) {
+    const timeRemaining = activeTimeRemainingSeconds(state, preview);
+    if (timeRemaining != null && Number.isFinite(timeRemaining)) {
+      return Math.max(0, Math.min((total - timeRemaining) / total, 1));
+    }
+    return null;
+  }
+
+  return Math.max(0, Math.min(elapsed / total, 1));
+}
+
+function currentProjectedFinalScore(state: OverlayStateEnvelope, preview: boolean): number | null {
+  const score = activeScore(state) ?? (preview ? 826 : null);
+  if (score == null) return null;
+  if (!liveRunActive(state) && state.session_result) return score;
+
+  const total = activeChallengeLength(state, preview);
+  if (total != null && Number.isFinite(total) && total > 0) {
+    const spm = currentLiveSpm(state, preview);
+    if (spm != null && Number.isFinite(spm) && spm > 0) {
+      return Math.round((spm * total) / 60);
+    }
+  }
+
+  const progress = activeProgressRatio(state, preview);
+  if (progress != null && progress >= MIN_PROGRESS_FOR_DIRECT_PROJECTION) {
+    return Math.round(score / progress);
+  }
+
+  return score;
+}
+
+function pbPaceSnapshot(state: OverlayStateEnvelope, preview: boolean) {
+  const score = activeScore(state) ?? (preview ? 826 : null);
+  const pb = state.personal_best_score ?? (preview ? 912 : null);
+  const paceLive = preview || pbPaceLiveActive(state);
+  const progress = paceLive ? activeProgressRatio(state, preview) : null;
+  const projected = paceLive ? currentProjectedFinalScore(state, preview) : null;
+  const targetNow = pb != null && progress != null ? pb * progress : null;
+  const paceDeltaNow = score != null && targetNow != null ? score - targetNow : null;
+  const projectedDelta = projected != null && pb != null ? projected - pb : null;
+  const currentSpm = paceLive ? currentLiveSpm(state, preview) : null;
+  const total = activeChallengeLength(state, preview);
+  const requiredSpm = pb != null && total != null && total > 0 ? pb / (total / 60) : null;
+  const liveDelta = paceLive ? paceDeltaNow : null;
+
+  return {
+    score,
+    pb,
+    progress,
+    projected,
+    targetNow,
+    paceDeltaNow,
+    projectedDelta,
+    liveDelta,
+    currentSpm,
+    requiredSpm,
+  };
+}
+
 function templateVars(state: OverlayStateEnvelope, preview: boolean): Record<string, string> {
   const stats = state.stats_panel;
   const session = state.session_result;
@@ -113,9 +279,15 @@ function templateVars(state: OverlayStateEnvelope, preview: boolean): Record<str
   const metrics = state.mouse_metrics;
   const friend = selectedFriendScore(state);
   const benchmarkMatch = state.benchmark_state?.current_scenario_matches?.[0];
-  const score = activeScore(state) ?? (preview ? 826 : null);
-  const pb = state.personal_best_score ?? (preview ? 912 : null);
-  const pbDelta = score != null && pb != null ? score - pb : null;
+  const {
+    score,
+    pb,
+    projected,
+    liveDelta,
+    projectedDelta,
+    currentSpm,
+    requiredSpm,
+  } = pbPaceSnapshot(state, preview);
 
   return {
     player_name: state.current_user?.steam_account_name || state.current_user?.username || (preview ? "Streamer Preview" : "Waiting for player"),
@@ -126,7 +298,11 @@ function templateVars(state: OverlayStateEnvelope, preview: boolean): Record<str
     spm: fmt(stats?.spm ?? (preview ? 814 : null)),
     kps: fmt(stats?.kps ?? (preview ? 2.9 : null), 1),
     pb_score: fmt(pb),
-    pb_delta: pbDelta == null ? "--" : `${pbDelta >= 0 ? "+" : ""}${fmt(pbDelta)}`,
+    pb_delta: liveDelta == null ? "--" : `${liveDelta >= 0 ? "+" : ""}${fmt(liveDelta)}`,
+    projected_score: fmt(projected),
+    projected_pb_delta: projectedDelta == null ? "--" : `${projectedDelta >= 0 ? "+" : ""}${fmt(projectedDelta)}`,
+    current_spm: fmt(currentSpm),
+    required_spm: fmt(requiredSpm),
     friend_name: friend?.name || (preview ? "Rival" : "No opponent"),
     friend_score: fmt(friend?.score ?? (preview ? 947 : null)),
     smoothness: fmt(metrics?.smoothness ?? (preview ? 82 : null)),
@@ -366,18 +542,67 @@ function ProgressBarWidget({ preset, state, preview, compatibilityMode, config }
 }
 
 function PbPaceWidget({ preset, state, preview, compatibilityMode, config }: WidgetProps) {
-  const score = activeScore(state) ?? (preview ? 826 : null);
-  const pb = state.personal_best_score ?? (preview ? 912 : null);
-  const delta = score != null && pb != null ? score - pb : null;
+  const liveSession = pbPaceLiveActive(state);
+  const countdownActive = countdownStageActive(state);
+  const snapshot = pbPaceSnapshot(state, preview);
+  const lockedSnapshotRef = useRef<ReturnType<typeof pbPaceSnapshot> | null>(null);
+  const previousLiveRef = useRef(false);
+
+  const hasMeaningfulLiveSnapshot =
+    (snapshot.score != null && snapshot.score > 0)
+    || (snapshot.projected != null && snapshot.projected > 0)
+    || (snapshot.currentSpm != null && snapshot.currentSpm > 0);
+
+  if (liveSession && hasMeaningfulLiveSnapshot) {
+    lockedSnapshotRef.current = snapshot;
+  }
+
+  if (!liveSession && previousLiveRef.current && lockedSnapshotRef.current == null && hasMeaningfulLiveSnapshot) {
+    lockedSnapshotRef.current = snapshot;
+  }
+
+  previousLiveRef.current = liveSession;
+
+  const shouldUseLockedSnapshot =
+    !liveSession
+    && lockedSnapshotRef.current != null
+    && !countdownActive
+    && (
+      (snapshot.score == null || snapshot.score <= 0)
+      || (snapshot.currentSpm == null || snapshot.currentSpm <= 0)
+      || (snapshot.projected == null || snapshot.projected <= 0)
+      || state.session_result != null
+    );
+
+  const displaySnapshot = shouldUseLockedSnapshot
+    ? (lockedSnapshotRef.current ?? snapshot)
+    : snapshot;
+
+  const {
+    pb,
+    projected,
+    liveDelta,
+    projectedDelta,
+    currentSpm,
+    requiredSpm,
+  } = displaySnapshot;
+
+  const delta = liveSession || shouldUseLockedSnapshot ? liveDelta : projectedDelta;
+  const titleValue = liveSession || shouldUseLockedSnapshot
+    ? fmt(projected)
+    : fmt(activeScore(state) ?? projected);
+  const subtitleValue = liveSession || shouldUseLockedSnapshot
+    ? `PB ${fmt(pb)} · ${fmt(currentSpm)} / ${fmt(requiredSpm)} spm`
+    : `Personal best ${fmt(pb)}`;
   return (
     <WidgetFrame preset={preset} config={config} eyebrow={boundText(config, "eyebrow_template", "PB Pace", state, preview)} compatibilityMode={compatibilityMode}>
       <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10, alignItems: "center" }}>
         <div>
           <div style={{ fontSize: 24, fontWeight: 800, color: preset.theme.primary_color }}>
-            {boundText(config, "title_template", fmt(score), state, preview)}
+            {boundText(config, "title_template", titleValue, state, preview)}
           </div>
           <div style={{ opacity: 0.72, fontSize: 12 }}>
-            {boundText(config, "subtitle_template", `Personal best ${fmt(pb)}`, state, preview)}
+            {boundText(config, "subtitle_template", subtitleValue, state, preview)}
           </div>
         </div>
         <div
@@ -941,6 +1166,132 @@ export function OverlayRenderer({
   style,
   renderWidgetChrome,
 }: OverlayRendererProps) {
+  const countdownCompensationRef = useRef<{
+    scenarioName: string | null;
+    lastRawElapsed: number | null;
+    countdownOffset: number;
+    stableChallengeLength: number | null;
+    lastCorrectedElapsed: number | null;
+  }>({
+    scenarioName: null,
+    lastRawElapsed: null,
+    countdownOffset: 0,
+    stableChallengeLength: null,
+    lastCorrectedElapsed: null,
+  });
+
+  useEffect(() => {
+    const stats = state.stats_panel;
+    const rawElapsed = finiteNonNegative(stats?.challenge_seconds_total);
+    const queueRemaining = finitePositive(stats?.queue_time_remaining);
+    const rawChallengeLength = finitePositive(stats?.challenge_time_length);
+    const scenarioName = stats?.scenario_name?.trim() || null;
+    const active = liveRunActive(state);
+    const tracker = countdownCompensationRef.current;
+
+    if (!active) {
+      tracker.scenarioName = scenarioName;
+      tracker.lastRawElapsed = rawElapsed;
+      tracker.countdownOffset = 0;
+      tracker.stableChallengeLength = rawChallengeLength;
+      tracker.lastCorrectedElapsed = rawElapsed;
+      return;
+    }
+
+    const scenarioChanged = tracker.scenarioName !== scenarioName;
+    const elapsedReset = rawElapsed != null
+      && tracker.lastRawElapsed != null
+      && rawElapsed + 0.5 < tracker.lastRawElapsed;
+
+    if (scenarioChanged || elapsedReset) {
+      tracker.countdownOffset = 0;
+      tracker.lastCorrectedElapsed = null;
+      tracker.stableChallengeLength = rawChallengeLength;
+    }
+
+    if (rawChallengeLength != null) {
+      tracker.stableChallengeLength = rawChallengeLength;
+    }
+
+    const authoritativeChallengeActive =
+      stats?.is_in_challenge === true
+      || stats?.game_state_code === 4;
+    const queueStageActive =
+      !authoritativeChallengeActive
+      && (stats?.game_state_code === 2 || queueRemaining != null);
+
+    if (queueStageActive && rawElapsed != null) {
+      tracker.countdownOffset = Math.max(tracker.countdownOffset, rawElapsed);
+    }
+
+    if (rawElapsed != null) {
+      const correctedElapsed = Math.max(0, rawElapsed - tracker.countdownOffset);
+      if (
+        tracker.lastCorrectedElapsed != null
+        && correctedElapsed + 0.35 < tracker.lastCorrectedElapsed
+        && !elapsedReset
+      ) {
+        tracker.lastCorrectedElapsed = tracker.lastCorrectedElapsed;
+      } else {
+        tracker.lastCorrectedElapsed = tracker.lastCorrectedElapsed == null
+          ? correctedElapsed
+          : Math.max(tracker.lastCorrectedElapsed, correctedElapsed);
+      }
+    }
+
+    tracker.scenarioName = scenarioName;
+    tracker.lastRawElapsed = rawElapsed;
+  }, [
+    state.stats_panel?.challenge_seconds_total,
+    state.stats_panel?.challenge_time_length,
+    state.stats_panel?.queue_time_remaining,
+    state.stats_panel?.scenario_name,
+    state.stats_panel?.score_total,
+    state.stats_panel?.score_total_derived,
+    state.stats_panel?.spm,
+    state.stats_panel?.is_in_challenge,
+    state.stats_panel?.is_in_scenario,
+    state.stats_panel?.game_state_code,
+  ]);
+
+  const normalizedState = useMemo<OverlayStateEnvelope>(() => {
+    const stats = state.stats_panel;
+    const rawElapsed = finiteNonNegative(stats?.challenge_seconds_total);
+    if (!stats) {
+      return state;
+    }
+
+    const tracker = countdownCompensationRef.current;
+    const correctedElapsed = rawElapsed != null
+      ? (tracker.lastCorrectedElapsed ?? Math.max(0, rawElapsed - tracker.countdownOffset))
+      : stats.challenge_seconds_total;
+    const stableChallengeLength = tracker.stableChallengeLength ?? stats.challenge_time_length;
+
+    const elapsedUnchanged =
+      (correctedElapsed == null && stats.challenge_seconds_total == null)
+      || (correctedElapsed != null
+        && stats.challenge_seconds_total != null
+        && Math.abs(correctedElapsed - stats.challenge_seconds_total) < 0.0001);
+    const lengthUnchanged =
+      (stableChallengeLength == null && stats.challenge_time_length == null)
+      || (stableChallengeLength != null
+        && stats.challenge_time_length != null
+        && Math.abs(stableChallengeLength - stats.challenge_time_length) < 0.0001);
+
+    if (elapsedUnchanged && lengthUnchanged) {
+      return state;
+    }
+
+    return {
+      ...state,
+      stats_panel: {
+        ...stats,
+        challenge_seconds_total: correctedElapsed,
+        challenge_time_length: stableChallengeLength,
+      },
+    };
+  }, [state]);
+
   const surfaceVariant = preset.surface_variants[surface];
   const theme = preset.theme;
   const allowedWidgets = widgetFilter?.length ? new Set(widgetFilter) : null;
@@ -961,12 +1312,12 @@ export function OverlayRenderer({
         const Component = WIDGET_COMPONENTS[config?.widget_type || widgetId];
         if (!config || !Component) return null;
         if (allowedWidgets && !allowedWidgets.has(widgetId)) return null;
-        if (!config.enabled || !placement.visible) return null;
+        if (!placement.visible) return null;
         const element = (
           <div key={widgetId} style={widgetContainerStyle(placement, preview, coordinateScale)}>
             <Component
               preset={preset}
-              state={state}
+              state={normalizedState}
               preview={preview}
               compatibilityMode={compatibilityMode}
               config={config}

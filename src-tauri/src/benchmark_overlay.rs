@@ -57,6 +57,13 @@ struct BenchmarkOverlayCache {
     updated_at: Option<Instant>,
 }
 
+pub fn invalidate() {
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.refreshing = false;
+        cache.updated_at = None;
+    }
+}
+
 pub fn snapshot(
     app: &AppHandle,
     settings: &AppSettings,
@@ -169,6 +176,7 @@ fn spawn_refresh(app: AppHandle, key: CacheKey, scenario_name: String) {
                 cache.updated_at = Some(Instant::now());
             }
         }
+        crate::overlay_service::notify_state_changed();
     });
 }
 

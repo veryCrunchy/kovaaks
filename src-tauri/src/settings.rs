@@ -425,6 +425,7 @@ pub fn normalize_overlay_settings(settings: &mut AppSettings) {
 
     for preset in &mut settings.overlay_presets {
         normalize_overlay_preset(preset);
+        migrate_in_game_surface_from_desktop_private(preset);
     }
 
     settings.overlay_selected_benchmark_ids.sort_unstable();
@@ -464,6 +465,8 @@ pub fn normalize_overlay_settings(settings: &mut AppSettings) {
             *assignment = settings.active_overlay_preset_id.clone();
         }
     }
+
+    migrate_in_game_surface_assignment(settings);
 }
 
 fn normalize_overlay_preset(preset: &mut OverlayPreset) {
@@ -501,6 +504,40 @@ fn normalize_overlay_preset(preset: &mut OverlayPreset) {
         for (widget_id, placement) in default_overlay_layouts(&surface_id) {
             surface.widget_layouts.entry(widget_id).or_insert(placement);
         }
+    }
+}
+
+fn migrate_in_game_surface_from_desktop_private(preset: &mut OverlayPreset) {
+    let defaults = default_surface_variants();
+    let Some(default_in_game) = defaults.get("in_game") else {
+        return;
+    };
+    let Some(default_desktop_private) = defaults.get("desktop_private") else {
+        return;
+    };
+
+    let Some(in_game_surface) = preset.surface_variants.get("in_game").cloned() else {
+        return;
+    };
+    let Some(desktop_private_surface) = preset.surface_variants.get("desktop_private").cloned()
+    else {
+        return;
+    };
+
+    if in_game_surface == *default_in_game && desktop_private_surface != *default_desktop_private {
+        preset
+            .surface_variants
+            .insert("in_game".to_string(), desktop_private_surface);
+    }
+}
+
+fn migrate_in_game_surface_assignment(settings: &mut AppSettings) {
+    let default_assignment = default_overlay_surface_assignment_active();
+    if settings.active_surface_assignments.in_game == default_assignment
+        && settings.active_surface_assignments.desktop_private != default_assignment
+    {
+        settings.active_surface_assignments.in_game =
+            settings.active_surface_assignments.desktop_private.clone();
     }
 }
 

@@ -36,6 +36,10 @@ const TEMPLATE_VARIABLES = [
   "kps",
   "pb_score",
   "pb_delta",
+  "projected_score",
+  "projected_pb_delta",
+  "current_spm",
+  "required_spm",
   "friend_name",
   "friend_score",
   "smoothness",
@@ -70,9 +74,9 @@ interface BenchmarkListResponse {
 function surfaceLabel(surface: OverlaySurfaceId): string {
   switch (surface) {
     case "desktop_private":
-      return "Private Desktop";
+      return "Desktop Private";
     case "in_game":
-      return "In-Game";
+      return "Game Overlay";
     default:
       return "OBS";
   }
@@ -455,20 +459,13 @@ export function OverlayStudio({ settings, onChange }: OverlayStudioProps) {
     });
   };
 
-  const updateWidgetEnabled = (widgetId: string, enabled: boolean) => {
+  const updateSurfaceWidgetVisibility = (widgetId: string, visible: boolean) => {
     const currentSettings = settingsRef.current;
     const currentSurface = surfaceRef.current;
     const currentPreset = currentPresetForSurface(currentSettings, currentSurface);
     if (!currentPreset) return;
     updatePreset({
       ...currentPreset,
-      widgets: {
-        ...currentPreset.widgets,
-        [widgetId]: {
-          ...currentPreset.widgets[widgetId],
-          enabled,
-        },
-      },
       surface_variants: {
         ...currentPreset.surface_variants,
         [currentSurface]: {
@@ -477,7 +474,7 @@ export function OverlayStudio({ settings, onChange }: OverlayStudioProps) {
             ...currentPreset.surface_variants[currentSurface].widget_layouts,
             [widgetId]: {
               ...currentPreset.surface_variants[currentSurface].widget_layouts[widgetId],
-              visible: enabled,
+              visible,
             },
           },
         },
@@ -765,8 +762,8 @@ export function OverlayStudio({ settings, onChange }: OverlayStudioProps) {
                     >
                       <span style={{ fontSize: 12 }}>{widgetId.replace(/_/g, " ")}</span>
                       <Toggle
-                        checked={activePreset.widgets[widgetId].enabled}
-                        onChange={(value) => updateWidgetEnabled(widgetId, value)}
+                        checked={activePreset.surface_variants[surface].widget_layouts[widgetId]?.visible !== false}
+                        onChange={(value) => updateSurfaceWidgetVisibility(widgetId, value)}
                       />
                     </button>
                   ))}
@@ -1104,8 +1101,8 @@ export function OverlayStudio({ settings, onChange }: OverlayStudioProps) {
                   <span style={{ fontSize: 11, color: C.textSub }}>Custom source</span>
                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                     {OVERLAY_WIDGET_IDS.map((widgetId) => {
-                      const visible = sourcePreset?.widgets[widgetId]?.enabled
-                        && sourcePreset?.surface_variants?.[sourceSurface]?.widget_layouts?.[widgetId]?.visible !== false;
+                      const visible =
+                        sourcePreset?.surface_variants?.[sourceSurface]?.widget_layouts?.[widgetId]?.visible !== false;
                       const active = customSourceWidgets.includes(widgetId);
                       return (
                         <button
