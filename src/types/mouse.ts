@@ -56,9 +56,9 @@ export interface RawPositionPoint {
 }
 
 /**
- * A low-resolution JPEG frame captured from the centre of the game screen
- * during a session (5 fps, ≤320 px wide, quality 20).  Used as an underlay
- * in the mouse-path replay viewer so the user can see where targets were
+ * A replay JPEG frame captured from the game window during a session.
+ * Resolution and framing depend on the user's replay settings. Used as an
+ * underlay in the mouse-path replay viewer so the user can see where targets were
  * relative to their cursor movement.
  */
 export interface ScreenFrame {

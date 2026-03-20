@@ -512,6 +512,11 @@ export function MousePathViewer({
     [screenFrames, replayStartMs],
   );
 
+  const normalizedHitTimestamps = useMemo(
+    () => hitTimestampsMs.map((ts) => Math.max(0, ts - replayStartMs)),
+    [hitTimestampsMs, replayStartMs],
+  );
+
   const [isPlaying,    setIsPlaying]    = useState(false);
   const [playbackMs,   setPlaybackMs]   = useState(0);
   const [speed,        setSpeed]        = useState(1);
@@ -530,12 +535,12 @@ export function MousePathViewer({
     : 0;
   const durationMs = Math.max(lastPositionMs, lastFrameMs);
   const denseHitStream = useMemo(
-    () => shouldClusterHitIndicators(hitTimestampsMs, durationMs),
-    [durationMs, hitTimestampsMs],
+    () => shouldClusterHitIndicators(normalizedHitTimestamps, durationMs),
+    [durationMs, normalizedHitTimestamps],
   );
   const hitTimelineWindows = useMemo(
-    () => (denseHitStream ? clusterHitWindows(hitTimestampsMs) : []),
-    [denseHitStream, hitTimestampsMs],
+    () => (denseHitStream ? clusterHitWindows(normalizedHitTimestamps) : []),
+    [denseHitStream, normalizedHitTimestamps],
   );
 
   const overshoots = useCallback(() => detectOvershoots(positions), [positions])();
@@ -584,8 +589,8 @@ export function MousePathViewer({
       : durationMs > 0
         ? Math.min(1, playbackMs / durationMs)
         : -1;
-    drawPath(canvas, positions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW, hitTimestampsMs);
-  }, [positions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW, hitTimestampsMs]);
+    drawPath(canvas, positions, overshoots, fraction, showFull ? 0 : trailFadeMs, playbackMs, viewportW, normalizedHitTimestamps);
+  }, [positions, overshoots, playbackMs, durationMs, showFull, trailFadeMs, viewportW, normalizedHitTimestamps]);
 
   // ── Playback loop ─────────────────────────────────────────────────────────
   useEffect(() => {
@@ -900,7 +905,7 @@ export function MousePathViewer({
                           />
                         );
                       })
-                    : hitTimestampsMs.map((timestampMs, index) => (
+                    : normalizedHitTimestamps.map((timestampMs, index) => (
                         <div
                           key={`hit-${timestampMs}-${index}`}
                           title={`Hit at ${formatMs(timestampMs)}`}

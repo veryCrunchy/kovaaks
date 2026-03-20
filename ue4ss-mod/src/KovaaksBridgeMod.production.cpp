@@ -2143,7 +2143,7 @@ private:
         if (now < next_poll_ms_) {
             return;
         }
-        next_poll_ms_ = now + 16; // ~60Hz
+        next_poll_ms_ = now + 4; // ~250Hz — tighter shot-detect window reduces replay timestamp lag
 
         const bool expected_live_stream =
             lifecycle_active_

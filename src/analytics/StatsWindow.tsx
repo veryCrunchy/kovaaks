@@ -3620,13 +3620,29 @@ function ReplayTab({
     if (!nextRow) return;
     setSelectedContextKey(nextRow.key);
   };
+  const visibleReplayContextCoaching = useMemo(() => {
+    if (!selectedContextRow) return replayContextCoaching;
+    return replayContextCoaching.filter((signal) => signal.contextKey === selectedContextRow.key);
+  }, [replayContextCoaching, selectedContextRow]);
+  const replayBaseTs = useMemo(() => {
+    if (runSnapshot?.started_at_bridge_ts_ms != null) {
+      return runSnapshot.started_at_bridge_ts_ms;
+    }
+    return estimateReplayBridgeBaseTs(shotTelemetry, runTimeline);
+  }, [runSnapshot?.started_at_bridge_ts_ms, runTimeline, shotTelemetry]);
   const replaySelectionRange = useMemo(() => {
     if (!selectedContextRow) return null;
+    // Context row times are shot-relative (offset from shotTelemetryBaseTs = first shot's ts_ms).
+    // Position timestamps are run-relative (offset from replayBaseTs = started_at_bridge_ts_ms).
+    // Add the first-shot offset to convert shot-relative → run-relative before slicing positions.
+    const firstShotOffsetMs = Math.max(0, shotTelemetryBaseTs - replayBaseTs);
+    const startMs = selectedContextRow.startMs + firstShotOffsetMs;
+    const endMs = selectedContextRow.endMs + firstShotOffsetMs;
     return {
-      startMs: Math.max(0, selectedContextRow.startMs - 750),
-      endMs: selectedContextRow.endMs + 750,
+      startMs: Math.max(0, startMs - 750),
+      endMs: endMs + 750,
     };
-  }, [selectedContextRow]);
+  }, [selectedContextRow, shotTelemetryBaseTs, replayBaseTs]);
   const replayPayloadView = useMemo(() => {
     if (!replayPayload || !replaySelectionRange) return replayPayload;
     const positions = sliceRowsToRange(replayPayload.positions, replaySelectionRange.startMs, replaySelectionRange.endMs);
@@ -3641,16 +3657,6 @@ function ReplayTab({
       frames,
     };
   }, [replayPayload, replaySelectionRange]);
-  const visibleReplayContextCoaching = useMemo(() => {
-    if (!selectedContextRow) return replayContextCoaching;
-    return replayContextCoaching.filter((signal) => signal.contextKey === selectedContextRow.key);
-  }, [replayContextCoaching, selectedContextRow]);
-  const replayBaseTs = useMemo(() => {
-    if (runSnapshot?.started_at_bridge_ts_ms != null) {
-      return runSnapshot.started_at_bridge_ts_ms;
-    }
-    return estimateReplayBridgeBaseTs(shotTelemetry, runTimeline);
-  }, [runSnapshot?.started_at_bridge_ts_ms, runTimeline, shotTelemetry]);
   const replayTimelineMarkers = useMemo(() => {
     if (visibleShotTelemetry.length === 0) return [] as Array<{ id: string; timestamp_ms: number; color: string; label: string }>;
     const hitEvents = visibleShotTelemetry.filter((event) => event.event === "shot_hit");

@@ -14,8 +14,8 @@ use crate::mouse_hook::{MetricPoint, RawPositionPoint};
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-/// Keep every 3rd raw position sample (30fps → ~10fps, ~600 pts/min).
-const DOWNSAMPLE_FACTOR: usize = 3;
+/// Keep every other raw position sample (~62fps, ~3700 pts/min).
+const DOWNSAMPLE_FACTOR: usize = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplayMediaQuality {
@@ -61,7 +61,8 @@ impl ReplayMediaQuality {
 pub struct ReplayData {
     pub positions: Vec<RawPositionPoint>,
     pub metrics: Vec<MetricPoint>,
-    /// Screen frames captured at 5 fps, 320 px wide, JPEG quality 50.
+    /// Screen frames captured from the game window using the active replay
+    /// framing, framerate, and output-width settings.
     /// Absent in replays saved before this field was added.
     #[serde(default)]
     pub frames: Vec<crate::screen_recorder::ScreenFrame>,
@@ -650,6 +651,7 @@ fn encode_replay_video_to_path(
         .map_err(|e| format!("Could not create temporary export directory: {e}"))?;
 
     let decode_engine = base64::engine::general_purpose::STANDARD;
+    let mut frame_paths = Vec::with_capacity(replay.frames.len());
     for (index, frame) in replay.frames.iter().enumerate() {
         let jpeg = decode_engine
             .decode(frame.jpeg_b64.as_bytes())
@@ -662,9 +664,10 @@ fn encode_replay_video_to_path(
                 e
             )
         })?;
+        frame_paths.push(frame_path);
     }
 
-    let fps = infer_export_fps(&replay.frames).clamp(6, 60);
+    let concat_timeline_path = write_ffconcat_timeline(&temp_root, &replay.frames, &frame_paths)?;
     let [preset_flag, preset_value, crf_flag, crf_value] = encode_quality.ffmpeg_args();
     let ffmpeg_path = ensure_ffmpeg_available(app)?;
     let mut command = std::process::Command::new(&ffmpeg_path);
@@ -674,10 +677,20 @@ fn encode_replay_video_to_path(
         .arg("-hide_banner")
         .arg("-loglevel")
         .arg("error")
-        .arg("-framerate")
-        .arg(fps.to_string())
+        .arg("-f")
+        .arg("concat")
+        .arg("-safe")
+        .arg("0")
         .arg("-i")
-        .arg(temp_root.join("frame_%06d.jpg"))
+        .arg(&concat_timeline_path)
+        .arg("-vsync")
+        .arg("vfr")
+        // libx264 with yuv420p requires even width/height.
+        // Replays are encoded from stored frame data, and those dimensions may
+        // differ between sessions if the user changed capture settings over time.
+        // Pad to the next even size only when needed (no scaling/downsampling).
+        .arg("-vf")
+        .arg("pad=ceil(iw/2)*2:ceil(ih/2)*2")
         .arg("-c:v")
         .arg("libx264")
         .arg(preset_flag)
@@ -781,6 +794,75 @@ fn infer_export_fps(frames: &[crate::screen_recorder::ScreenFrame]) -> u32 {
     }
 
     (1000.0 / avg_delta_ms).round().clamp(6.0, 60.0) as u32
+}
+
+fn infer_export_frame_duration_ms(frames: &[crate::screen_recorder::ScreenFrame]) -> u64 {
+    if frames.len() < 2 {
+        return (1000.0 / infer_export_fps(frames).max(1) as f64)
+            .round()
+            .max(1.0) as u64;
+    }
+
+    let mut deltas = Vec::with_capacity(frames.len().saturating_sub(1));
+    for window in frames.windows(2) {
+        let delta = window[1]
+            .timestamp_ms
+            .saturating_sub(window[0].timestamp_ms);
+        if delta > 0 {
+            deltas.push(delta);
+        }
+    }
+
+    if deltas.is_empty() {
+        return (1000.0 / infer_export_fps(frames).max(1) as f64)
+            .round()
+            .max(1.0) as u64;
+    }
+
+    deltas.sort_unstable();
+    deltas[deltas.len() / 2].max(1)
+}
+
+fn write_ffconcat_timeline(
+    temp_root: &Path,
+    frames: &[crate::screen_recorder::ScreenFrame],
+    frame_paths: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if frame_paths.is_empty() || frames.is_empty() || frame_paths.len() != frames.len() {
+        return Err("Could not build replay timeline for ffmpeg export.".to_string());
+    }
+
+    fn ffconcat_file_line(path: &Path) -> String {
+        let escaped = path
+            .to_string_lossy()
+            .replace('\\', "/")
+            .replace('\'', "'\\''");
+        format!("file '{escaped}'\n")
+    }
+
+    let fallback_duration_ms = infer_export_frame_duration_ms(frames);
+    let mut timeline = String::from("ffconcat version 1.0\n");
+    for (index, path) in frame_paths.iter().enumerate() {
+        timeline.push_str(&ffconcat_file_line(path));
+        let duration_ms = if let Some(next) = frames.get(index + 1) {
+            next.timestamp_ms
+                .saturating_sub(frames[index].timestamp_ms)
+                .max(1)
+        } else {
+            fallback_duration_ms
+        };
+        let duration_secs = duration_ms.min(2_000) as f64 / 1000.0;
+        timeline.push_str(&format!("duration {:.6}\n", duration_secs));
+    }
+
+    if let Some(last) = frame_paths.last() {
+        timeline.push_str(&ffconcat_file_line(last));
+    }
+
+    let timeline_path = temp_root.join("frames.ffconcat");
+    fs::write(&timeline_path, timeline)
+        .map_err(|e| format!("Could not write replay ffmpeg timeline: {e}"))?;
+    Ok(timeline_path)
 }
 
 // ─── Public API ───────────────────────────────────────────────────────────────
