@@ -2748,7 +2748,11 @@ pub fn refresh_repo_sql_audit(
             ",
         )?;
         for audit in &audits_to_persist {
-            let status = if audit.has_issues() { "incomplete" } else { "ok" };
+            let status = if audit.has_issues() {
+                "incomplete"
+            } else {
+                "ok"
+            };
             let failure_codes = if audit.failure_classes.is_empty() {
                 None
             } else {

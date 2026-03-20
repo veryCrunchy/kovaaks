@@ -48,7 +48,10 @@ std::thread g_reconnect_worker{};
 std::recursive_mutex g_api_mutex{};
 
 constexpr ULONGLONG k_min_reconnect_interval_ms = 250;
-constexpr ULONGLONG k_connected_probe_interval_ms = 1500;
+// AimMod restarts can swap the bridge listener out from under the game process
+// while the old TCP socket still looks "connected". Probe frequently enough
+// that the reconnect worker notices app restarts almost immediately.
+constexpr ULONGLONG k_connected_probe_interval_ms = 250;
 constexpr const char* k_transport_probe_json = "{\"ev\":\"bridge_transport_probe\"}";
 
 bool module_still_loaded(HMODULE expected_module, const void* symbol_address) {

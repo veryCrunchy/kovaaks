@@ -167,10 +167,12 @@ pub fn init() -> Result<(), log::SetLoggerError> {
     // reasonably up-to-date for crash analysis.
     std::thread::Builder::new()
         .name("log-flusher".into())
-        .spawn(|| loop {
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            if let Some(f) = LOG_FILE.lock().as_mut() {
-                let _ = f.flush();
+        .spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                if let Some(f) = LOG_FILE.lock().as_mut() {
+                    let _ = f.flush();
+                }
             }
         })
         .ok();
