@@ -28,6 +28,7 @@ Thumbs.db
 
 # Editor
 .vscode/settings.json
+.vscode/c_cpp_properties.json
 .idea/
 
 # Logs
@@ -35,3 +36,11 @@ Thumbs.db
 
 ue4ss-mod/CXXHeaderDump
 ue4ss-mod/UHTHeaderDump
+ue4ss-mod/third_party/UE4SS.exp
+
+# Local runtime payloads / downloads
+src-tauri/ue4ss/
+external/UE4SSCPPTemplate/
+external/ue4ss-runtime/*.zip
+sessions.json
+HANDOFF.md
