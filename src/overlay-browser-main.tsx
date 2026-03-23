@@ -12,7 +12,7 @@ const BASE_HEIGHT = 1080;
 function surfaceFromLocation(): OverlaySurfaceId {
   const params = new URLSearchParams(window.location.search);
   const surface = params.get("surface");
-  if (surface === "in_game" || surface === "desktop_private") return surface;
+  if (surface === "in_game") return surface;
   return "obs";
 }
 

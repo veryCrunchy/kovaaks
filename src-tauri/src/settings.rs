@@ -13,6 +13,9 @@ pub const DEFAULT_REPLAY_CAPTURE_QUALITY: &str = "balanced";
 pub const DEFAULT_REPLAY_MEDIA_UPLOAD_MODE: &str = "favorites_and_pb";
 pub const DEFAULT_REPLAY_MEDIA_UPLOAD_QUALITY: &str = "standard";
 pub const DEFAULT_POST_SESSION_SUMMARY_DURATION_SECS: u32 = 20;
+pub const DEFAULT_COACHING_FOCUS_AREA: &str = "balanced";
+pub const DEFAULT_COACHING_CHALLENGE_PREFERENCE: &str = "balanced";
+pub const DEFAULT_COACHING_TIME_PREFERENCE: &str = "this_week";
 
 /// A rectangle defining an on-screen region.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default, PartialEq, Eq)]
@@ -40,8 +43,6 @@ pub struct FriendProfile {
 pub struct OverlaySurfaceAssignments {
     #[serde(default = "default_overlay_surface_assignment_active")]
     pub obs: String,
-    #[serde(default = "default_overlay_surface_assignment_active")]
-    pub desktop_private: String,
     #[serde(default = "default_overlay_surface_assignment_active")]
     pub in_game: String,
 }
@@ -226,6 +227,15 @@ pub struct AppSettings {
     /// Live feedback verbosity: 0=minimal, 1=standard, 2=verbose.
     #[serde(default = "default_feedback_verbosity")]
     pub live_feedback_verbosity: u8,
+    /// Which coaching lane should receive extra emphasis.
+    #[serde(default = "default_coaching_focus_area")]
+    pub coaching_focus_area: String,
+    /// How aggressively coaching should push progression over stability.
+    #[serde(default = "default_coaching_challenge_preference")]
+    pub coaching_challenge_preference: String,
+    /// Whether coaching should optimize for the next session or longer-term structure.
+    #[serde(default = "default_coaching_time_preference")]
+    pub coaching_time_preference: String,
     /// Whether text-to-speech is used to read live coaching notifications aloud.
     #[serde(default)]
     pub live_feedback_tts_enabled: bool,
@@ -300,7 +310,7 @@ pub struct AppSettings {
     /// Opacity for all overlay HUDs (0.0–1.0). Defaults to 1.0 (fully opaque).
     #[serde(default = "default_hud_opacity")]
     pub hud_opacity: f64,
-    /// Shared overlay preset library for OBS, private desktop, and in-game browser surfaces.
+    /// Shared overlay preset library for OBS and the in-game overlay surfaces.
     #[serde(default = "default_overlay_presets")]
     pub overlay_presets: Vec<OverlayPreset>,
     /// Active fallback overlay preset used when a specific surface has no override.
@@ -328,6 +338,9 @@ impl Default for AppSettings {
             selected_friend: None,
             live_feedback_enabled: true,
             live_feedback_verbosity: 1,
+            coaching_focus_area: default_coaching_focus_area(),
+            coaching_challenge_preference: default_coaching_challenge_preference(),
+            coaching_time_preference: default_coaching_time_preference(),
             live_feedback_tts_enabled: false,
             live_feedback_tts_voice: None,
             hud_vsmode_visible: true,
@@ -408,7 +421,21 @@ fn parse_hub_api_base_url_launch_override() -> Option<String> {
 pub fn apply_runtime_overrides(settings: &mut AppSettings) {
     if let Some(override_url) = hub_api_base_url_launch_override() {
         settings.hub_api_base_url = override_url;
+    } else if is_localhost_url(&settings.hub_api_base_url) {
+        // A localhost URL was saved from a previous dev-flag run but the flag
+        // is not present now — reset to the production default.
+        settings.hub_api_base_url = DEFAULT_HUB_API_BASE_URL.to_string();
     }
+}
+
+fn is_localhost_url(url: &str) -> bool {
+    let lower = url.trim().to_ascii_lowercase();
+    lower.starts_with("http://localhost")
+        || lower.starts_with("https://localhost")
+        || lower.starts_with("http://127.0.0.1")
+        || lower.starts_with("https://127.0.0.1")
+        || lower.starts_with("localhost:")
+        || lower.starts_with("127.0.0.1:")
 }
 
 pub fn load_persisted(app: &AppHandle) -> anyhow::Result<AppSettings> {
@@ -438,6 +465,13 @@ pub fn load_persisted(app: &AppHandle) -> anyhow::Result<AppSettings> {
                     normalize_replay_media_upload_mode(&settings.replay_media_upload_mode);
                 settings.replay_media_upload_quality =
                     normalize_replay_media_upload_quality(&settings.replay_media_upload_quality);
+                settings.coaching_focus_area =
+                    normalize_coaching_focus_area(&settings.coaching_focus_area);
+                settings.coaching_challenge_preference = normalize_coaching_challenge_preference(
+                    &settings.coaching_challenge_preference,
+                );
+                settings.coaching_time_preference =
+                    normalize_coaching_time_preference(&settings.coaching_time_preference);
                 normalize_overlay_settings(&mut settings);
                 return Ok(settings);
             }
@@ -465,6 +499,18 @@ pub fn load(app: &AppHandle) -> anyhow::Result<AppSettings> {
 pub fn persist(app: &AppHandle, settings: &AppSettings) -> anyhow::Result<()> {
     use tauri_plugin_store::StoreExt;
     let store = app.store(STORE_PATH)?;
+    // If the hub URL was injected via launch flag, don't persist it — the flag
+    // is ephemeral and writing it would break the next flag-free launch.
+    let to_save;
+    let settings = if hub_api_base_url_launch_override().is_some() {
+        to_save = AppSettings {
+            hub_api_base_url: DEFAULT_HUB_API_BASE_URL.to_string(),
+            ..settings.clone()
+        };
+        &to_save
+    } else {
+        settings
+    };
     store.set(STORE_KEY.to_string(), serde_json::to_value(settings)?);
     store.save()?;
     Ok(())
@@ -477,7 +523,6 @@ pub fn normalize_overlay_settings(settings: &mut AppSettings) {
 
     for preset in &mut settings.overlay_presets {
         normalize_overlay_preset(preset);
-        migrate_in_game_surface_from_desktop_private(preset);
     }
 
     settings.overlay_selected_benchmark_ids.sort_unstable();
@@ -505,7 +550,6 @@ pub fn normalize_overlay_settings(settings: &mut AppSettings) {
 
     for assignment in [
         &mut settings.active_surface_assignments.obs,
-        &mut settings.active_surface_assignments.desktop_private,
         &mut settings.active_surface_assignments.in_game,
     ] {
         if assignment.trim().is_empty()
@@ -517,8 +561,6 @@ pub fn normalize_overlay_settings(settings: &mut AppSettings) {
             *assignment = settings.active_overlay_preset_id.clone();
         }
     }
-
-    migrate_in_game_surface_assignment(settings);
 }
 
 fn normalize_overlay_preset(preset: &mut OverlayPreset) {
@@ -544,6 +586,8 @@ fn normalize_overlay_preset(preset: &mut OverlayPreset) {
         preset.surface_variants = default_surface_variants();
     }
 
+    preset.surface_variants.remove("desktop_private");
+
     for (widget_id, default_widget) in default_overlay_widget_configs() {
         preset.widgets.entry(widget_id).or_insert(default_widget);
     }
@@ -556,40 +600,6 @@ fn normalize_overlay_preset(preset: &mut OverlayPreset) {
         for (widget_id, placement) in default_overlay_layouts(&surface_id) {
             surface.widget_layouts.entry(widget_id).or_insert(placement);
         }
-    }
-}
-
-fn migrate_in_game_surface_from_desktop_private(preset: &mut OverlayPreset) {
-    let defaults = default_surface_variants();
-    let Some(default_in_game) = defaults.get("in_game") else {
-        return;
-    };
-    let Some(default_desktop_private) = defaults.get("desktop_private") else {
-        return;
-    };
-
-    let Some(in_game_surface) = preset.surface_variants.get("in_game").cloned() else {
-        return;
-    };
-    let Some(desktop_private_surface) = preset.surface_variants.get("desktop_private").cloned()
-    else {
-        return;
-    };
-
-    if in_game_surface == *default_in_game && desktop_private_surface != *default_desktop_private {
-        preset
-            .surface_variants
-            .insert("in_game".to_string(), desktop_private_surface);
-    }
-}
-
-fn migrate_in_game_surface_assignment(settings: &mut AppSettings) {
-    let default_assignment = default_overlay_surface_assignment_active();
-    if settings.active_surface_assignments.in_game == default_assignment
-        && settings.active_surface_assignments.desktop_private != default_assignment
-    {
-        settings.active_surface_assignments.in_game =
-            settings.active_surface_assignments.desktop_private.clone();
     }
 }
 
@@ -652,6 +662,15 @@ fn default_true() -> bool {
 }
 fn default_feedback_verbosity() -> u8 {
     1
+}
+fn default_coaching_focus_area() -> String {
+    DEFAULT_COACHING_FOCUS_AREA.to_string()
+}
+fn default_coaching_challenge_preference() -> String {
+    DEFAULT_COACHING_CHALLENGE_PREFERENCE.to_string()
+}
+fn default_coaching_time_preference() -> String {
+    DEFAULT_COACHING_TIME_PREFERENCE.to_string()
 }
 fn default_hub_api_base_url() -> String {
     DEFAULT_HUB_API_BASE_URL.to_string()
@@ -748,7 +767,6 @@ fn default_overlay_surface_assignment_active() -> String {
 fn default_overlay_surface_assignments() -> OverlaySurfaceAssignments {
     OverlaySurfaceAssignments {
         obs: default_overlay_surface_assignment_active(),
-        desktop_private: default_overlay_surface_assignment_active(),
         in_game: default_overlay_surface_assignment_active(),
     }
 }
@@ -855,8 +873,7 @@ fn default_overlay_preset_name() -> String {
     "Classic Stream".to_string()
 }
 fn default_overlay_preset_description() -> String {
-    "AimMod's default competitive HUD preset for OBS, in-game browser, and private desktop use."
-        .to_string()
+    "AimMod's default competitive HUD preset for OBS and the in-game overlay.".to_string()
 }
 fn default_overlay_preset_version() -> u32 {
     1
@@ -997,7 +1014,7 @@ fn default_overlay_layouts(
 }
 fn default_surface_variants() -> std::collections::HashMap<String, SurfaceVariantConfig> {
     let mut out = std::collections::HashMap::new();
-    for surface_id in ["obs", "desktop_private", "in_game"] {
+    for surface_id in ["obs", "in_game"] {
         out.insert(
             surface_id.to_string(),
             SurfaceVariantConfig {
@@ -1059,6 +1076,25 @@ fn normalize_replay_media_upload_quality(value: &str) -> String {
     match value.trim() {
         "standard" | "high" | "ultra" => value.trim().to_string(),
         _ => default_replay_media_upload_quality(),
+    }
+}
+pub fn normalize_coaching_focus_area(value: &str) -> String {
+    match value.trim() {
+        "balanced" | "precision" | "speed" | "control" | "consistency" | "endurance"
+        | "transfer" => value.trim().to_string(),
+        _ => default_coaching_focus_area(),
+    }
+}
+pub fn normalize_coaching_challenge_preference(value: &str) -> String {
+    match value.trim() {
+        "steady" | "balanced" | "aggressive" => value.trim().to_string(),
+        _ => default_coaching_challenge_preference(),
+    }
+}
+pub fn normalize_coaching_time_preference(value: &str) -> String {
+    match value.trim() {
+        "next_session" | "this_week" | "long_term" => value.trim().to_string(),
+        _ => default_coaching_time_preference(),
     }
 }
 

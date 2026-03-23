@@ -1,10 +1,15 @@
 import type { CSSProperties, ReactNode } from "react";
 import { useEffect, useMemo, useRef } from "react";
-import type { OverlayStateEnvelope } from "../types/overlayRuntime";
+import type {
+  OverlayBenchmarkScenarioMatch,
+  OverlayBenchmarkScenarioPage,
+  OverlayStateEnvelope,
+} from "../types/overlayRuntime";
 import type { RawPositionPoint } from "../types/mouse";
 import type {
   OverlayPreset,
   OverlaySurfaceId,
+  OverlayTheme,
   OverlayWidgetConfig,
   OverlayWidgetPlacement,
 } from "../types/overlayPresets";
@@ -37,6 +42,48 @@ type WidgetProps = {
   compatibilityMode: "default" | "obs";
   config: OverlayWidgetConfig;
 };
+
+function readCssVar(styles: CSSStyleDeclaration, name: string): string | null {
+  const value = styles.getPropertyValue(name).trim();
+  return value.length > 0 ? value : null;
+}
+
+function resolveTheme(preset: OverlayPreset): OverlayTheme {
+  if (preset.theme.color_sync_mode !== "app" || typeof document === "undefined") {
+    return preset.theme;
+  }
+
+  const styles = window.getComputedStyle(document.documentElement);
+  const primary = readCssVar(styles, "--am-accent");
+  const accent =
+    readCssVar(styles, "--am-teal-bright")
+    ?? readCssVar(styles, "--am-team")
+    ?? primary;
+  const danger = readCssVar(styles, "--am-danger");
+  const warning = readCssVar(styles, "--am-gold");
+  const info =
+    readCssVar(styles, "--am-info-weapon")
+    ?? readCssVar(styles, "--am-info-dodge");
+  const mutedText = readCssVar(styles, "--am-text-sub");
+  const surface = readCssVar(styles, "--am-surface");
+  const background = readCssVar(styles, "--am-bg-deep");
+
+  return {
+    ...preset.theme,
+    primary_color: primary ?? preset.theme.primary_color,
+    accent_color: accent ?? preset.theme.accent_color,
+    danger_color: danger ?? preset.theme.danger_color,
+    warning_color: warning ?? preset.theme.warning_color,
+    info_color: info ?? preset.theme.info_color,
+    muted_text_color: mutedText ?? preset.theme.muted_text_color,
+    background_color: background ?? preset.theme.background_color,
+    background_gradient_start: surface ?? background ?? preset.theme.background_gradient_start,
+    background_gradient_end: background ?? preset.theme.background_gradient_end,
+    surface_color: surface ?? preset.theme.surface_color,
+    border_color: primary ?? preset.theme.border_color,
+    glow_color: primary ?? preset.theme.glow_color,
+  };
+}
 
 function alpha(hex: string, opacity: number): string {
   const clean = hex.replace("#", "").trim();
@@ -272,13 +319,79 @@ function pbPaceSnapshot(state: OverlayStateEnvelope, preview: boolean) {
   };
 }
 
+function normalizeBenchmarkScenarioKey(value: string): string {
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function findBenchmarkScenarioPage(
+  state: OverlayStateEnvelope,
+  match: OverlayBenchmarkScenarioMatch,
+): OverlayBenchmarkScenarioPage | null {
+  const pages = state.benchmark_state?.matching_pages?.length
+    ? state.benchmark_state.matching_pages
+    : state.benchmark_state?.pages ?? [];
+  const wantedScenario = normalizeBenchmarkScenarioKey(match.scenario_name);
+
+  for (const page of pages) {
+    if (page.benchmarkId !== match.benchmark_id) continue;
+    for (const category of page.categories) {
+      if (category.categoryName !== match.category_name) continue;
+      const scenario = category.scenarios.find(
+        (entry) => normalizeBenchmarkScenarioKey(entry.scenarioName) === wantedScenario,
+      );
+      if (scenario) return scenario;
+    }
+  }
+
+  return null;
+}
+
+function resolveLiveBenchmarkMatch(
+  state: OverlayStateEnvelope,
+  match: OverlayBenchmarkScenarioMatch,
+  preview: boolean,
+): OverlayBenchmarkScenarioMatch {
+  const scenarioPage = findBenchmarkScenarioPage(state, match);
+  const sortedThresholds = [...(scenarioPage?.thresholds ?? [])].sort((a, b) => a.score - b.score);
+  const candidateScores = [
+    match.score,
+    state.personal_best_score,
+    activeScore(state),
+    preview ? 826 : null,
+  ].filter((value): value is number => value != null && Number.isFinite(value) && value >= 0);
+  const effectiveScore = candidateScores.length > 0 ? Math.max(...candidateScores) : match.score;
+  const achievedThreshold = [...sortedThresholds].reverse().find((threshold) => effectiveScore >= threshold.score) ?? null;
+  const nextThreshold = sortedThresholds.find((threshold) => threshold.score > effectiveScore) ?? null;
+  const progressPct = nextThreshold
+    ? Math.max(0, Math.min(100, (effectiveScore / nextThreshold.score) * 100))
+    : null;
+
+  return {
+    ...match,
+    score: effectiveScore,
+    rank_index: achievedThreshold?.rankIndex ?? scenarioPage?.rankIndex ?? match.rank_index,
+    rank_name: achievedThreshold?.rankName || scenarioPage?.rankName || match.rank_name,
+    rank_icon_url: achievedThreshold?.iconUrl || scenarioPage?.rankIconUrl || match.rank_icon_url,
+    rank_color: achievedThreshold?.color || scenarioPage?.rankColor || match.rank_color,
+    next_threshold_name: nextThreshold?.rankName ?? match.next_threshold_name,
+    next_threshold_score: nextThreshold?.score ?? match.next_threshold_score,
+    progress_pct: progressPct ?? match.progress_pct,
+  };
+}
+
 function templateVars(state: OverlayStateEnvelope, preview: boolean): Record<string, string> {
   const stats = state.stats_panel;
   const session = state.session_result;
   const feedback = state.live_feedback;
   const metrics = state.mouse_metrics;
   const friend = selectedFriendScore(state);
-  const benchmarkMatch = state.benchmark_state?.current_scenario_matches?.[0];
+  const benchmarkMatch = state.benchmark_state?.current_scenario_matches?.[0]
+    ? resolveLiveBenchmarkMatch(state, state.benchmark_state.current_scenario_matches[0], preview)
+    : null;
   const {
     score,
     pb,
@@ -697,7 +810,7 @@ function CoachingWidget({ preset, state, preview, compatibilityMode, config }: W
 function BenchmarkCurrentWidget({ preset, state, preview, compatibilityMode, config }: WidgetProps) {
   const benchmarkState = state.benchmark_state;
   const matches = benchmarkState?.current_scenario_matches?.length
-    ? benchmarkState.current_scenario_matches
+    ? benchmarkState.current_scenario_matches.map((match) => resolveLiveBenchmarkMatch(state, match, preview))
     : [];
 
   return (
@@ -756,14 +869,15 @@ function BenchmarkCurrentWidget({ preset, state, preview, compatibilityMode, con
         </div>
       ) : (
         <div style={{ color: preset.theme.muted_text_color, lineHeight: 1.55 }}>
-          {benchmarkState?.last_error
-            || (benchmarkState?.loading
-              ? "Loading benchmark progress..."
+          {benchmarkState?.loading
+            ? "Loading benchmark progress..."
+            : benchmarkState?.last_error
+              ? "Sync issue — retrying..."
               : benchmarkState?.selected_benchmark_ids?.length
                 ? "This scenario is not part of the selected benchmark set."
                 : preview
                   ? "Select one or more benchmarks in Overlay Studio to preview live benchmark progress here."
-                  : "Select one or more benchmarks in Overlay Studio to show live benchmark progress.")}
+                  : "Select one or more benchmarks in Overlay Studio to show live benchmark progress."}
         </div>
       )}
     </WidgetFrame>
@@ -794,12 +908,13 @@ function BenchmarkPageWidget({ preset, state, preview, compatibilityMode, config
         title="No benchmark page selected"
       >
         <div style={{ color: preset.theme.muted_text_color, lineHeight: 1.55 }}>
-          {benchmarkState?.last_error
-            || (benchmarkState?.loading
-              ? "Loading benchmark page..."
+          {benchmarkState?.loading
+            ? "Loading benchmark page..."
+            : benchmarkState?.last_error
+              ? "Sync issue — retrying..."
               : benchmarkState?.selected_benchmark_ids?.length
                 ? "No selected benchmark page is available for the current runtime yet."
-                : "Select benchmarks in Overlay Studio. This widget will render the chosen benchmark page and highlight the current scenario when it appears there.")}
+                : "Select benchmarks in Overlay Studio. This widget will render the chosen benchmark page and highlight the current scenario when it appears there."}
         </div>
       </WidgetFrame>
     );
@@ -1166,6 +1281,11 @@ export function OverlayRenderer({
   style,
   renderWidgetChrome,
 }: OverlayRendererProps) {
+  const resolvedPreset = useMemo<OverlayPreset>(() => ({
+    ...preset,
+    theme: resolveTheme(preset),
+  }), [preset]);
+
   const countdownCompensationRef = useRef<{
     scenarioName: string | null;
     lastRawElapsed: number | null;
@@ -1292,8 +1412,8 @@ export function OverlayRenderer({
     };
   }, [state]);
 
-  const surfaceVariant = preset.surface_variants[surface];
-  const theme = preset.theme;
+  const surfaceVariant = resolvedPreset.surface_variants[surface];
+  const theme = resolvedPreset.theme;
   const allowedWidgets = widgetFilter?.length ? new Set(widgetFilter) : null;
   const rootStyle: CSSProperties = {
     position: "relative",
@@ -1306,21 +1426,21 @@ export function OverlayRenderer({
   };
 
   return (
-    <div className={className} style={rootStyle}>
+      <div className={className} style={rootStyle}>
       {Object.entries(surfaceVariant?.widget_layouts ?? {}).map(([widgetId, placement]) => {
-        const config = preset.widgets[widgetId];
-        const Component = WIDGET_COMPONENTS[config?.widget_type || widgetId];
-        if (!config || !Component) return null;
+        const resolvedConfig = resolvedPreset.widgets[widgetId];
+        const Component = WIDGET_COMPONENTS[resolvedConfig?.widget_type || widgetId];
+        if (!resolvedConfig || !Component) return null;
         if (allowedWidgets && !allowedWidgets.has(widgetId)) return null;
         if (!placement.visible) return null;
         const element = (
           <div key={widgetId} style={widgetContainerStyle(placement, preview, coordinateScale)}>
             <Component
-              preset={preset}
+              preset={resolvedPreset}
               state={normalizedState}
               preview={preview}
               compatibilityMode={compatibilityMode}
-              config={config}
+              config={resolvedConfig}
             />
           </div>
         );

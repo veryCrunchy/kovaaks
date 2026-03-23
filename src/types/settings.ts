@@ -26,6 +26,12 @@ export interface AppSettings {
   live_feedback_enabled: boolean;
   /** Verbosity: 0=minimal, 1=standard, 2=verbose. */
   live_feedback_verbosity: number;
+  /** Which coaching lane should get extra emphasis in recommendations. */
+  coaching_focus_area: "balanced" | "precision" | "speed" | "control" | "consistency" | "endurance" | "transfer";
+  /** How hard the coaching should push progression versus stability. */
+  coaching_challenge_preference: "steady" | "balanced" | "aggressive";
+  /** Whether coaching should bias toward next-session actions or longer-term structure. */
+  coaching_time_preference: "next_session" | "this_week" | "long_term";
   /** Whether live coaching messages are read aloud via text-to-speech. */
   live_feedback_tts_enabled: boolean;
   /** Name of the selected TTS voice (SpeechSynthesisVoice.name). Null = auto. */
@@ -73,7 +79,7 @@ export interface AppSettings {
   palette_color_overrides: Record<string, string>;
   /** Overlay HUD opacity (0–1). Default 1.0. */
   hud_opacity: number;
-  /** Shared overlay presets used for OBS, private desktop, and in-game browser surfaces. */
+  /** Shared overlay presets used for OBS and the in-game overlay surface. */
   overlay_presets: OverlayPreset[];
   /** Active fallback preset when a specific surface does not choose its own preset. */
   active_overlay_preset_id: string;

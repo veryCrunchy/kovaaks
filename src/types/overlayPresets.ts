@@ -1,4 +1,4 @@
-export type OverlaySurfaceId = "obs" | "desktop_private" | "in_game";
+export type OverlaySurfaceId = "obs" | "in_game";
 
 export type OverlayWidgetId =
   | "header"
@@ -15,7 +15,6 @@ export type OverlayWidgetId =
 
 export interface OverlaySurfaceAssignments {
   obs: string;
-  desktop_private: string;
   in_game: string;
 }
 

@@ -25,7 +25,7 @@ const PREVIEW_BASE_WIDTH = 1920;
 const PREVIEW_BASE_HEIGHT = 1080;
 const BENCHMARK_CATALOG_MAX_ATTEMPTS = 4;
 const BENCHMARK_CATALOG_RETRY_DELAYS_MS = [500, 1200, 2400] as const;
-const SURFACES: OverlaySurfaceId[] = ["obs", "desktop_private", "in_game"];
+const SURFACES: OverlaySurfaceId[] = ["obs", "in_game"];
 const TEMPLATE_VARIABLES = [
   "player_name",
   "scenario_name",
@@ -73,8 +73,6 @@ interface BenchmarkListResponse {
 
 function surfaceLabel(surface: OverlaySurfaceId): string {
   switch (surface) {
-    case "desktop_private":
-      return "Desktop Private";
     case "in_game":
       return "Game Overlay";
     default:
@@ -383,7 +381,6 @@ export function OverlayStudio({ settings, onChange }: OverlayStudioProps) {
       active_overlay_preset_id: fallbackId,
       active_surface_assignments: {
         obs: currentSettings.active_surface_assignments.obs === currentPreset.id ? fallbackId : currentSettings.active_surface_assignments.obs,
-        desktop_private: currentSettings.active_surface_assignments.desktop_private === currentPreset.id ? fallbackId : currentSettings.active_surface_assignments.desktop_private,
         in_game: currentSettings.active_surface_assignments.in_game === currentPreset.id ? fallbackId : currentSettings.active_surface_assignments.in_game,
       },
     });
