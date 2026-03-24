@@ -85,7 +85,7 @@ export function PostSessionOverview({ preview = false, onDismissButtonRectChange
     statsPanel?.accuracy_pct != null
       ? `${statsPanel.accuracy_pct.toFixed(1)}%`
       : session.accuracy > 0
-      ? `${(session.accuracy * 100).toFixed(1)}%`
+      ? `${session.accuracy.toFixed(1)}%`
       : "--";
 
   const spmStr = statsPanel?.spm != null ? fmt(statsPanel.spm, 0) : "--";
@@ -184,7 +184,7 @@ export function PostSessionOverview({ preview = false, onDismissButtonRectChange
                   className="tabular-nums"
                   style={{ fontSize: 38, fontWeight: 800, color: "#fff", letterSpacing: "-0.02em", lineHeight: 1 }}
                 >
-                  {fmtScore(Math.round(session.score))}
+                  {fmtScore(session.score)}
                 </motion.span>
                 <span style={{ fontSize: 10, color: C.textFaint, fontWeight: 500 }}>pts</span>
               </div>

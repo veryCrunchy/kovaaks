@@ -348,12 +348,138 @@ fn try_initialize(app: &AppHandle) -> anyhow::Result<SessionStoreInitReport> {
     } else {
         log::debug!("session_store: skipping repo sql audit refresh on startup (recently audited)");
     }
+    match try_repair_accuracy_scale(app) {
+        Ok(0) => {}
+        Ok(updated) => {
+            log::info!(
+                "session_store: repaired legacy session accuracy scale for {} session(s)",
+                updated
+            );
+        }
+        Err(error) => {
+            log::warn!("session_store: could not repair legacy accuracy scale: {error:?}");
+        }
+    }
     log::info!("session_store: using stats db at {}", db_path.display());
     Ok(SessionStoreInitReport {
         imported_legacy: merge.imported,
         skipped_legacy_existing: merge.skipped_existing,
         total_after: merge.total_after,
     })
+}
+
+fn try_repair_accuracy_scale(app: &AppHandle) -> anyhow::Result<usize> {
+    let mut conn = crate::stats_db::connect(app)?;
+    let tx = conn.transaction()?;
+    let mut updated = 0usize;
+
+    updated += tx.execute(
+        "
+        UPDATE sessions
+        SET accuracy = accuracy * 100.0
+        WHERE accuracy > 0.0
+          AND accuracy <= 1.0
+        ",
+        [],
+    )?;
+
+    updated += tx.execute(
+        "
+        UPDATE session_stats_panels
+        SET accuracy_pct = (
+            SELECT s.accuracy
+            FROM sessions s
+            WHERE s.id = session_stats_panels.session_id
+        )
+        WHERE accuracy_pct IS NOT NULL
+          AND (
+            (accuracy_pct > 0.0 AND accuracy_pct <= 1.0)
+            OR accuracy_pct > 100.0
+          )
+        ",
+        [],
+    )?;
+
+    updated += tx.execute(
+        "
+        UPDATE session_run_summaries
+        SET accuracy_pct = CASE
+            WHEN shots_fired > 0.0 AND shots_hit >= 0.0 AND shots_hit <= shots_fired
+                THEN (shots_hit / shots_fired) * 100.0
+            WHEN accuracy_pct > 0.0 AND accuracy_pct <= 1.0
+                THEN accuracy_pct * 100.0
+            WHEN accuracy_pct > 100.0
+                THEN NULL
+            ELSE accuracy_pct
+        END
+        WHERE accuracy_pct IS NOT NULL
+          AND (
+            (accuracy_pct > 0.0 AND accuracy_pct <= 1.0)
+            OR accuracy_pct > 100.0
+          )
+        ",
+        [],
+    )?;
+
+    updated += tx.execute(
+        "
+        UPDATE session_run_timelines
+        SET accuracy_pct = CASE
+            WHEN shots_fired > 0.0 AND shots_hit >= 0.0 AND shots_hit <= shots_fired
+                THEN (shots_hit / shots_fired) * 100.0
+            WHEN accuracy_pct > 0.0 AND accuracy_pct <= 1.0
+                THEN accuracy_pct * 100.0
+            WHEN accuracy_pct > 100.0
+                THEN NULL
+            ELSE accuracy_pct
+        END
+        WHERE accuracy_pct IS NOT NULL
+          AND (
+            (accuracy_pct > 0.0 AND accuracy_pct <= 1.0)
+            OR accuracy_pct > 100.0
+          )
+        ",
+        [],
+    )?;
+
+    updated += tx.execute(
+        "
+        UPDATE session_replay_context_windows
+        SET accuracy_pct = CASE
+            WHEN fired_count > 0 AND hit_count >= 0 AND hit_count <= fired_count
+                THEN (hit_count * 100.0) / fired_count
+            ELSE NULL
+        END
+        WHERE accuracy_pct IS NOT NULL
+          AND (
+            (accuracy_pct > 0.0 AND accuracy_pct <= 1.0)
+            OR accuracy_pct > 100.0
+          )
+        ",
+        [],
+    )?;
+
+    updated += tx.execute(
+        "
+        UPDATE session_replay_context_windows
+        SET avg_timeline_accuracy_pct = CASE
+            WHEN avg_timeline_accuracy_pct > 0.0 AND avg_timeline_accuracy_pct <= 1.0
+                THEN avg_timeline_accuracy_pct * 100.0
+            WHEN avg_timeline_accuracy_pct > 100.0
+                THEN NULL
+            ELSE avg_timeline_accuracy_pct
+        END
+        WHERE avg_timeline_accuracy_pct IS NOT NULL
+          AND (
+            (avg_timeline_accuracy_pct > 0.0 AND avg_timeline_accuracy_pct <= 1.0)
+            OR avg_timeline_accuracy_pct > 100.0
+          )
+        ",
+        [],
+    )?;
+
+    tx.commit()?;
+    Ok(updated)
 }
 
 fn try_merge_sessions<I>(app: &AppHandle, records: I) -> anyhow::Result<SessionMergeResult>
@@ -1228,6 +1354,11 @@ fn stats_panel_from_row(row: &Row<'_>) -> rusqlite::Result<Option<StatsPanelSnap
     let Some(scenario_type) = scenario_type else {
         return Ok(None);
     };
+    let accuracy_pct = row.get::<_, Option<f32>>("stats_panel_accuracy_pct")?;
+    let session_accuracy = row
+        .get::<_, Option<f64>>("accuracy")?
+        .filter(|value| value.is_finite() && *value >= 0.0 && *value <= 100.0)
+        .map(|value| value as f32);
 
     Ok(Some(StatsPanelSnapshot {
         scenario_type,
@@ -1236,7 +1367,7 @@ fn stats_panel_from_row(row: &Row<'_>) -> rusqlite::Result<Option<StatsPanelSnap
             .get::<_, Option<i64>>("stats_panel_kills")?
             .map(|value| value as u32),
         avg_kps: row.get("stats_panel_avg_kps")?,
-        accuracy_pct: row.get("stats_panel_accuracy_pct")?,
+        accuracy_pct: normalize_stats_panel_accuracy_pct(accuracy_pct, session_accuracy),
         total_damage: row.get("stats_panel_total_damage")?,
         avg_ttk_ms: row.get("stats_panel_avg_ttk_ms")?,
         best_ttk_ms: row.get("stats_panel_best_ttk_ms")?,
@@ -1268,6 +1399,22 @@ fn shot_timing_from_row(row: &Row<'_>) -> rusqlite::Result<Option<ShotTimingSnap
         avg_shots_to_hit,
         corrective_shot_ratio,
     }))
+}
+
+fn normalize_stats_panel_accuracy_pct(
+    accuracy_pct: Option<f32>,
+    fallback_accuracy_pct: Option<f32>,
+) -> Option<f32> {
+    if let Some(value) = accuracy_pct.filter(|value| value.is_finite() && *value >= 0.0) {
+        if value <= 1.0 {
+            return Some((value * 100.0).clamp(0.0, 100.0));
+        }
+        if value <= 100.0 {
+            return Some(value);
+        }
+    }
+
+    fallback_accuracy_pct
 }
 
 fn deserialize_optional_json<T>(

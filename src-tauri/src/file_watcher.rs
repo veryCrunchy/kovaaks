@@ -256,6 +256,35 @@ fn process_stats_csv(app: AppHandle, path: PathBuf) {
                 );
             }
             let run_snapshot = crate::bridge::take_run_snapshot();
+            if let Some(snapshot) = run_snapshot.as_ref() {
+                let tick_keyframes = snapshot
+                    .tick_stream_v1
+                    .as_ref()
+                    .map(|stream| stream.keyframes.len())
+                    .unwrap_or(0);
+                let tick_deltas = snapshot
+                    .tick_stream_v1
+                    .as_ref()
+                    .map(|stream| stream.deltas.len())
+                    .unwrap_or(0);
+                if snapshot.tick_stream_v1.is_none() {
+                    log::warn!(
+                        "file_watcher: persisted run snapshot without tick stream for {} shot_events={} timeline_points={}",
+                        result.scenario,
+                        snapshot.shot_telemetry.len(),
+                        snapshot.timeline.len()
+                    );
+                } else {
+                    log::info!(
+                        "file_watcher: persisted run snapshot tick stream for {} keyframes={} deltas={} shot_events={} timeline_points={}",
+                        result.scenario,
+                        tick_keyframes,
+                        tick_deltas,
+                        snapshot.shot_telemetry.len(),
+                        snapshot.timeline.len()
+                    );
+                }
+            }
             // Drain path + metric + video buffers using the finalized
             // run timing so split capture segments from recovery/restarts
             // are matched back to the correct run before persistence.
@@ -529,9 +558,9 @@ fn parse_csv(path: &Path) -> anyhow::Result<SessionResult> {
         }
     }
 
-    // Compute accuracy from shot counts (0.0 if no shots recorded)
+    // Compute accuracy as a percentage (0..100) from shot counts.
     let accuracy = if hit_count + miss_count > 0 {
-        hit_count as f64 / (hit_count + miss_count) as f64
+        (hit_count as f64 / (hit_count + miss_count) as f64) * 100.0
     } else {
         0.0
     };

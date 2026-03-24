@@ -85,7 +85,13 @@ export function fmt(v: number | null | undefined, dec = 0): string {
 }
 
 export function fmtScore(n: number): string {
-  return n.toLocaleString();
+  if (!Number.isFinite(n)) return "--";
+  const rounded = Math.round(n);
+  if (Math.abs(n - rounded) < 0.0001) return rounded.toLocaleString();
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 2,
+  });
 }
 
 export function fmtDuration(secs: number): string {

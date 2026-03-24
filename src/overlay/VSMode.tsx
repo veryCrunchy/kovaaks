@@ -474,7 +474,7 @@ export function VSMode({ currentScenario, preview = false }: VSModeProps) {
             >
               <span style={{ fontSize: 9, color: C.textFaint, letterSpacing: "0.1em" }}>ACCURACY</span>
               <span className="tabular-nums" style={{ fontSize: 13, fontWeight: 600, color: C.textSub }}>
-                {(sessionResult.accuracy * 100).toFixed(1)}%
+                {sessionResult.accuracy.toFixed(1)}%
               </span>
             </div>
           )}

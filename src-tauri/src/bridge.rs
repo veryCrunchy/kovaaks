@@ -1171,6 +1171,72 @@ mod imp {
         }
     }
 
+    fn wait_for_replay_stream_flush_for_persistence(
+        request_started_at: Instant,
+        timeout: Duration,
+    ) -> bool {
+        const REPLAY_STREAM_GRACE_AFTER_FINALIZE: Duration = Duration::from_millis(250);
+        const REPLAY_STREAM_IDLE_SETTLE: Duration = Duration::from_millis(120);
+
+        let deadline = request_started_at + timeout;
+        let (baseline_revision, baseline_end_revision, had_tick_stream_signal) =
+            match run_capture_state().lock() {
+                Ok(state) => (
+                    state.replay_stream_revision,
+                    state.replay_tick_end_revision,
+                    run_capture_has_tick_stream_signal_locked(&state),
+                ),
+                Err(_) => return false,
+            };
+
+        loop {
+            let now = Instant::now();
+            let decision = match run_capture_state().lock() {
+                Ok(state) => {
+                    let has_tick_stream_signal = run_capture_has_tick_stream_signal_locked(&state);
+                    if !had_tick_stream_signal && !has_tick_stream_signal {
+                        if now.duration_since(request_started_at)
+                            >= REPLAY_STREAM_GRACE_AFTER_FINALIZE
+                        {
+                            Some(true)
+                        } else {
+                            Some(false)
+                        }
+                    } else if !has_tick_stream_signal {
+                        Some(true)
+                    } else {
+                        let saw_new_end = state.replay_tick_end_revision > baseline_end_revision;
+                        if saw_new_end {
+                            Some(true)
+                        } else if state.replay_stream_revision > baseline_revision {
+                            state.replay_stream_last_event_at.map(|last_event_at| {
+                                now.duration_since(last_event_at) >= REPLAY_STREAM_IDLE_SETTLE
+                            })
+                        } else if now.duration_since(request_started_at)
+                            >= REPLAY_STREAM_GRACE_AFTER_FINALIZE
+                        {
+                            Some(true)
+                        } else {
+                            Some(false)
+                        }
+                    }
+                }
+                Err(_) => None,
+            };
+
+            match decision {
+                Some(true) => return true,
+                Some(false) => {}
+                None => return false,
+            }
+
+            if now >= deadline {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     include!("bridge/replay_protocol.rs");
     include!("bridge/replay_handshake.rs");
     include!("bridge/replay_streamer.rs");
@@ -1279,6 +1345,9 @@ mod imp {
         shot_telemetry: Vec<super::BridgeShotTelemetryEvent>,
         shot_telemetry_summary: ShotTelemetrySummary,
         tick_stream_v1: super::BridgeTickStreamV1,
+        replay_stream_revision: u64,
+        replay_tick_end_revision: u64,
+        replay_stream_last_event_at: Option<Instant>,
     }
 
     fn run_capture_state() -> &'static Mutex<RunCaptureState> {
@@ -1298,6 +1367,36 @@ mod imp {
             Some(n) if n.is_finite() && n >= 0.0 => Some(n),
             _ => None,
         }
+    }
+
+    fn normalize_accuracy_pct(
+        value: Option<f64>,
+        shots_hit: Option<f64>,
+        shots_fired: Option<f64>,
+    ) -> Option<f64> {
+        if let (Some(hits), Some(shots)) = (shots_hit, shots_fired) {
+            if hits.is_finite() && shots.is_finite() && hits >= 0.0 && shots > 0.0 {
+                if hits <= shots + 0.0001 {
+                    return Some(((hits / shots) * 100.0).clamp(0.0, 100.0));
+                }
+            }
+        }
+
+        let direct = finite_non_negative(value)?;
+        if direct <= 1.0 {
+            Some((direct * 100.0).clamp(0.0, 100.0))
+        } else if direct <= 100.0 {
+            Some(direct)
+        } else {
+            None
+        }
+    }
+
+    fn run_capture_has_tick_stream_signal_locked(state: &RunCaptureState) -> bool {
+        state.tick_stream_v1.context.is_some()
+            || !state.tick_stream_v1.keyframes.is_empty()
+            || !state.tick_stream_v1.deltas.is_empty()
+            || state.replay_stream_revision > 0
     }
 
     fn percentile_from_sorted(sorted: &[f64], p: f64) -> Option<f64> {
@@ -1403,6 +1502,9 @@ mod imp {
         state.shot_telemetry.clear();
         state.shot_telemetry_summary = ShotTelemetrySummary::default();
         state.tick_stream_v1 = super::BridgeTickStreamV1::default();
+        state.replay_stream_revision = 0;
+        state.replay_tick_end_revision = 0;
+        state.replay_stream_last_event_at = None;
     }
 
     fn observe_pause_state_locked(state: &mut RunCaptureState, paused: bool) {
@@ -1559,10 +1661,6 @@ mod imp {
         };
         let t_sec = t_sec_f64.max(0.0).floor() as u32;
 
-        let computed_accuracy = match (state.metrics.shots_hit, state.metrics.shots_fired) {
-            (Some(hits), Some(shots)) if shots > 0.0 => Some((hits / shots) * 100.0),
-            _ => None,
-        };
         let computed_damage_eff = match (state.metrics.damage_done, state.metrics.damage_possible) {
             (Some(done), Some(possible)) if possible > 0.0 => Some((done / possible) * 100.0),
             _ => None,
@@ -1572,8 +1670,11 @@ mod imp {
             t_sec,
             score_per_minute: state.metrics.score_per_minute,
             kills_per_second: state.metrics.kills_per_second,
-            // Timeline points should prefer values derived from authoritative totals.
-            accuracy_pct: computed_accuracy.or(state.metrics.accuracy_pct),
+            accuracy_pct: normalize_accuracy_pct(
+                state.metrics.accuracy_pct,
+                state.metrics.shots_hit,
+                state.metrics.shots_fired,
+            ),
             damage_efficiency: computed_damage_eff.or(state.metrics.damage_efficiency),
             score_total: state.metrics.score_total,
             score_total_derived: state.metrics.score_total_derived,
@@ -1634,7 +1735,11 @@ mod imp {
         state.metrics.kills_per_second = finite_non_negative(stats.kps);
         state.metrics.shots_hit = stats.accuracy_hits.map(|v| v as f64);
         state.metrics.shots_fired = stats.accuracy_shots.map(|v| v as f64);
-        state.metrics.accuracy_pct = finite_non_negative(stats.accuracy_pct);
+        state.metrics.accuracy_pct = normalize_accuracy_pct(
+            stats.accuracy_pct,
+            state.metrics.shots_hit,
+            state.metrics.shots_fired,
+        );
         state.metrics.damage_done = finite_non_negative(stats.damage_dealt);
         state.metrics.damage_possible = finite_non_negative(stats.damage_total);
         state.metrics.damage_efficiency =
@@ -1841,7 +1946,11 @@ mod imp {
                     should_record = true;
                 }
                 "pull_accuracy" => {
-                    state.metrics.accuracy_pct = Some(value);
+                    state.metrics.accuracy_pct = normalize_accuracy_pct(
+                        Some(value),
+                        state.metrics.shots_hit,
+                        state.metrics.shots_fired,
+                    );
                     should_record = true;
                 }
                 "pull_score_total" => {
@@ -2145,6 +2254,8 @@ mod imp {
         let Ok(mut state) = run_capture_state().lock() else {
             return;
         };
+        state.replay_stream_revision = state.replay_stream_revision.saturating_add(1);
+        state.replay_stream_last_event_at = Some(Instant::now());
 
         match ev {
             "replay_context" => {
@@ -2229,6 +2340,7 @@ mod imp {
                 record_run_timeline_point_locked(&mut state, time_hint);
             }
             "replay_tick_end" => {
+                state.replay_tick_end_revision = state.replay_tick_end_revision.saturating_add(1);
                 if let Some(v) = obj.get("final_score_total").and_then(replay_json_number) {
                     if v.is_finite() && v >= 0.0 {
                         state.metrics.score_total = Some(v);
@@ -2462,7 +2574,11 @@ mod imp {
             damage_done: state.metrics.damage_done,
             damage_possible: state.metrics.damage_possible,
             damage_efficiency: state.metrics.damage_efficiency,
-            accuracy_pct: state.metrics.accuracy_pct,
+            accuracy_pct: normalize_accuracy_pct(
+                state.metrics.accuracy_pct,
+                state.metrics.shots_hit,
+                state.metrics.shots_fired,
+            ),
             peak_score_per_minute: state.peak_score_per_minute,
             peak_kills_per_second: state.peak_kills_per_second,
             paired_shot_hits,
@@ -2768,7 +2884,12 @@ mod imp {
             scenario_subtype: stats.scenario_subtype.clone(),
             kills: stats.kills,
             avg_kps: stats.kps.map(|value| value as f32),
-            accuracy_pct: stats.accuracy_pct.map(|value| value as f32),
+            accuracy_pct: normalize_accuracy_pct(
+                stats.accuracy_pct,
+                stats.accuracy_hits.map(|value| value as f64),
+                stats.accuracy_shots.map(|value| value as f64),
+            )
+            .map(|value| value as f32),
             total_damage: stats.damage_dealt.map(|value| value as f32),
             avg_ttk_ms: stats
                 .ttk_secs
@@ -2801,7 +2922,13 @@ mod imp {
         if !bridge_dll_connected_flag().load(Ordering::SeqCst) {
             return false;
         }
-        request_mod_state_sync_and_wait("session_complete_persist", timeout)
+        let request_started_at = Instant::now();
+        let state_sync_ok = request_mod_state_sync_and_wait("session_complete_persist", timeout);
+        let replay_flush_ok = wait_for_replay_stream_flush_for_persistence(
+            request_started_at,
+            timeout.saturating_sub(request_started_at.elapsed()),
+        );
+        state_sync_ok && replay_flush_ok
     }
 
     fn authoritative_run_time_hint_from_stats(stats: &BridgeStatsPanelEvent) -> Option<f64> {
@@ -3949,20 +4076,16 @@ mod imp {
                 state.score_metric_total = state.stats.score_total;
                 state.score_total_derived = state.stats.score_total_derived;
 
-                if let (Some(hits), Some(shots)) =
-                    (state.stats.accuracy_hits, state.stats.accuracy_shots)
-                {
-                    let next_pct = if shots > 0 {
-                        Some((hits as f64 / shots as f64) * 100.0)
-                    } else {
-                        Some(0.0)
-                    };
-                    if state.stats.accuracy_pct.map_or(true, |prev| {
-                        next_pct.map_or(true, |value| (prev - value).abs() > 0.0001)
-                    }) {
-                        state.stats.accuracy_pct = next_pct;
-                        should_emit_stats = true;
-                    }
+                let next_pct = normalize_accuracy_pct(
+                    state.stats.accuracy_pct,
+                    state.stats.accuracy_hits.map(|value| value as f64),
+                    state.stats.accuracy_shots.map(|value| value as f64),
+                );
+                if state.stats.accuracy_pct.map_or(true, |prev| {
+                    next_pct.map_or(true, |value| (prev - value).abs() > 0.0001)
+                }) {
+                    state.stats.accuracy_pct = next_pct;
+                    should_emit_stats = true;
                 }
 
                 if classification_inputs_changed
@@ -4393,20 +4516,16 @@ mod imp {
                 _ => {}
             }
 
-            if let (Some(hits), Some(shots)) =
-                (state.stats.accuracy_hits, state.stats.accuracy_shots)
-            {
-                let next_pct = if shots > 0 {
-                    Some((hits as f64 / shots as f64) * 100.0)
-                } else {
-                    Some(0.0)
-                };
-                if state.stats.accuracy_pct.map_or(true, |prev| {
-                    next_pct.map_or(true, |n| (prev - n).abs() > 0.0001)
-                }) {
-                    state.stats.accuracy_pct = next_pct;
-                    should_emit_stats = true;
-                }
+            let next_pct = normalize_accuracy_pct(
+                state.stats.accuracy_pct,
+                state.stats.accuracy_hits.map(|value| value as f64),
+                state.stats.accuracy_shots.map(|value| value as f64),
+            );
+            if state.stats.accuracy_pct.map_or(true, |prev| {
+                next_pct.map_or(true, |n| (prev - n).abs() > 0.0001)
+            }) {
+                state.stats.accuracy_pct = next_pct;
+                should_emit_stats = true;
             }
 
             if classification_inputs_changed
