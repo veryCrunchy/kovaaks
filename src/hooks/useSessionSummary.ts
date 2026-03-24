@@ -9,68 +9,20 @@ import type {
 } from "../types/overlay";
 import type { BridgeRunSnapshot, MouseMetrics } from "../types/mouse";
 import type { AppSettings } from "../types/settings";
+import {
+  buildRunCoachingTips,
+  buildRunMomentInsights,
+  normalizeBridgeRunTimeline,
+  type RunTimelinePoint,
+  type ScenarioRunSnapshot,
+} from "../coaching/engine";
 
-export interface RunCoachingTip {
-  id: string;
-  level: "good" | "tip" | "warning";
-  title: string;
-  detail: string;
-  windowStartSec?: number | null;
-  windowEndSec?: number | null;
-}
-
-export interface RunTimelinePoint {
-  tSec: number;
-  scorePerMinute: number | null;
-  killsPerSecond: number | null;
-  accuracyPct: number | null;
-  damageEfficiency: number | null;
-  scoreTotal: number | null;
-  scoreTotalDerived: number | null;
-  kills: number | null;
-  shotsFired: number | null;
-  shotsHit: number | null;
-}
-
-export interface RunMomentInsight {
-  id: string;
-  level: "good" | "tip" | "warning";
-  title: string;
-  detail: string;
-  metric: "spm" | "accuracy" | "kps" | "damage_eff";
-  startSec: number;
-  endSec: number;
-}
-
-export interface ScenarioRunSnapshot {
-  durationSecs: number | null;
-  scoreTotal: number | null;
-  scoreTotalDerived: number | null;
-  scorePerMinute: number | null;
-  shotsFired: number | null;
-  shotsHit: number | null;
-  kills: number | null;
-  killsPerSecond: number | null;
-  damageDone: number | null;
-  damagePossible: number | null;
-  damageEfficiency: number | null;
-  accuracyPct: number | null;
-  peakScorePerMinute: number | null;
-  peakKillsPerSecond: number | null;
-  shotFiredEvents: number;
-  shotHitEvents: number;
-  killEvents: number;
-  challengeQueuedEvents: number;
-  challengeStartEvents: number;
-  challengeEndEvents: number;
-  challengeCompleteEvents: number;
-  challengeCanceledEvents: number;
-  startedAtMs: number | null;
-  endedAtMs: number | null;
-  timeline: RunTimelinePoint[];
-  keyMoments: RunMomentInsight[];
-  tips: RunCoachingTip[];
-}
+export type {
+  RunCoachingTip,
+  RunMomentInsight,
+  RunTimelinePoint,
+  ScenarioRunSnapshot,
+} from "../coaching/engine";
 
 export interface SessionSummary {
   session: SessionResult;
@@ -153,334 +105,6 @@ function toPositiveOrNull(v: number | null): number | null {
   return v != null && Number.isFinite(v) && v >= 0 ? v : null;
 }
 
-function avg(values: number[]): number | null {
-  if (values.length === 0) return null;
-  return values.reduce((sum, val) => sum + val, 0) / values.length;
-}
-
-function valuesInRange(
-  points: RunTimelinePoint[],
-  startSec: number,
-  endSec: number,
-  pick: (point: RunTimelinePoint) => number | null,
-): number[] {
-  return points
-    .filter((point) => point.tSec >= startSec && point.tSec <= endSec)
-    .map(pick)
-    .filter((val): val is number => val != null && Number.isFinite(val));
-}
-
-interface RunWindowShotStats {
-  shotsFired: number;
-  shotsHit: number;
-  hitRatePct: number;
-  shotsPerHit: number;
-}
-
-function shotStatsInRange(
-  points: RunTimelinePoint[],
-  startSec: number,
-  endSec: number,
-): RunWindowShotStats | null {
-  const window = points.filter((point) => point.tSec >= startSec && point.tSec <= endSec);
-  if (window.length < 2) return null;
-
-  const firedVals = window
-    .map((point) => point.shotsFired)
-    .filter((val): val is number => val != null && Number.isFinite(val));
-  const hitVals = window
-    .map((point) => point.shotsHit)
-    .filter((val): val is number => val != null && Number.isFinite(val));
-
-  if (firedVals.length < 2 || hitVals.length < 2) return null;
-
-  const shotsFired = Math.max(0, Math.max(...firedVals) - Math.min(...firedVals));
-  const shotsHit = Math.max(0, Math.max(...hitVals) - Math.min(...hitVals));
-  if (shotsFired < 6) return null;
-
-  const hitRatePct = shotsFired > 0 ? (shotsHit / shotsFired) * 100 : 0;
-  const shotsPerHit = shotsHit > 0 ? shotsFired / shotsHit : shotsFired;
-
-  return {
-    shotsFired,
-    shotsHit,
-    hitRatePct,
-    shotsPerHit,
-  };
-}
-
-function buildRunMomentInsights(points: RunTimelinePoint[], durationSecs: number | null): RunMomentInsight[] {
-  if (points.length < 4) return [];
-  const totalSecs = Math.max(
-    1,
-    Math.round(durationSecs ?? points[points.length - 1]?.tSec ?? points.length),
-  );
-
-  const earlyStart = 0;
-  const earlyEnd = Math.max(1, Math.floor(totalSecs / 3));
-  const lateStart = Math.max(0, Math.floor((totalSecs * 2) / 3));
-  const lateEnd = totalSecs;
-
-  const earlySpm = avg(valuesInRange(points, earlyStart, earlyEnd, (p) => p.scorePerMinute));
-  const lateSpm = avg(valuesInRange(points, lateStart, lateEnd, (p) => p.scorePerMinute));
-
-  const earlyAcc = avg(valuesInRange(points, earlyStart, earlyEnd, (p) => p.accuracyPct));
-  const lateAcc = avg(valuesInRange(points, lateStart, lateEnd, (p) => p.accuracyPct));
-  const earlyShotStats = shotStatsInRange(points, earlyStart, earlyEnd);
-  const lateShotStats = shotStatsInRange(points, lateStart, lateEnd);
-
-  const midStart = earlyEnd;
-  const midEnd = Math.max(midStart + 1, lateStart);
-  const thirds = [
-    { label: "opening", startSec: earlyStart, endSec: earlyEnd },
-    { label: "mid-run", startSec: midStart, endSec: midEnd },
-    { label: "closing", startSec: lateStart, endSec: lateEnd },
-  ]
-    .map((window) => ({
-      ...window,
-      stats: shotStatsInRange(points, window.startSec, window.endSec),
-    }))
-    .filter((window) => window.stats != null) as Array<{
-    label: string;
-    startSec: number;
-    endSec: number;
-    stats: RunWindowShotStats;
-  }>;
-
-  const peakSpmPoint = points
-    .filter((p) => p.scorePerMinute != null)
-    .reduce<RunTimelinePoint | null>((best, curr) => {
-      if (curr.scorePerMinute == null) return best;
-      if (!best || best.scorePerMinute == null) return curr;
-      return curr.scorePerMinute > best.scorePerMinute ? curr : best;
-    }, null);
-
-  const minAccPoint = points
-    .filter((p) => p.accuracyPct != null)
-    .reduce<RunTimelinePoint | null>((worst, curr) => {
-      if (curr.accuracyPct == null) return worst;
-      if (!worst || worst.accuracyPct == null) return curr;
-      return curr.accuracyPct < worst.accuracyPct ? curr : worst;
-    }, null);
-
-  const moments: RunMomentInsight[] = [];
-
-  if (
-    earlySpm != null
-    && lateSpm != null
-    && earlySpm > 0
-    && (earlySpm - lateSpm) / earlySpm > 0.12
-  ) {
-    const accDelta =
-      earlyAcc != null && lateAcc != null
-        ? lateAcc - earlyAcc
-        : null;
-    const improvedAccuracy = accDelta != null && accDelta >= 2.5;
-
-    moments.push({
-      id: "moment-late-spm-fade",
-      level: improvedAccuracy ? "tip" : "warning",
-      title: improvedAccuracy ? "Speed→Accuracy Trade-off Late" : "Late-Run Pace Drop",
-      detail: improvedAccuracy
-        ? `Pace fell from ${Math.round(earlySpm)} to ${Math.round(lateSpm)} SPM while accuracy improved by ${accDelta!.toFixed(1)}%. Keep this control but add pace back gradually.`
-        : `Pace fell from ${Math.round(earlySpm)} to ${Math.round(lateSpm)} SPM in the final third without a meaningful accuracy gain.`,
-      metric: "spm",
-      startSec: lateStart,
-      endSec: lateEnd,
-    });
-  }
-
-  if (
-    earlyAcc != null
-    && lateAcc != null
-    && lateAcc - earlyAcc >= 3
-  ) {
-    moments.push({
-      id: "moment-accuracy-build",
-      level: "good",
-      title: "Accuracy Stabilized",
-      detail:
-        earlyShotStats && lateShotStats
-          ? `Accuracy improved from ${earlyAcc.toFixed(1)}% to ${lateAcc.toFixed(1)}%, and shots-per-hit improved ${earlyShotStats.shotsPerHit.toFixed(2)} → ${lateShotStats.shotsPerHit.toFixed(2)}.`
-          : `Accuracy improved from ${earlyAcc.toFixed(1)}% early to ${lateAcc.toFixed(1)}% late.`,
-      metric: "accuracy",
-      startSec: lateStart,
-      endSec: lateEnd,
-    });
-  }
-
-  if (thirds.length > 0) {
-    const worstCorrectionWindow = [...thirds]
-      .sort((a, b) => b.stats.shotsPerHit - a.stats.shotsPerHit)[0];
-
-    if (worstCorrectionWindow.stats.shotsPerHit >= 1.6) {
-      moments.push({
-        id: "moment-correction-window",
-        level: worstCorrectionWindow.stats.shotsPerHit >= 2.0 ? "warning" : "tip",
-        title: "Correction-Heavy Window",
-        detail: `${worstCorrectionWindow.label} needed ${worstCorrectionWindow.stats.shotsPerHit.toFixed(2)} shots per hit (${worstCorrectionWindow.stats.hitRatePct.toFixed(0)}% hit conversion).`,
-        metric: "damage_eff",
-        startSec: worstCorrectionWindow.startSec,
-        endSec: worstCorrectionWindow.endSec,
-      });
-    }
-  }
-
-  if (peakSpmPoint?.scorePerMinute != null) {
-    moments.push({
-      id: "moment-peak-spm",
-      level: "good",
-      title: "Peak Tempo Window",
-      detail:
-        peakSpmPoint.accuracyPct != null
-          ? `Best pace reached ${Math.round(peakSpmPoint.scorePerMinute)} SPM at ${Math.round(peakSpmPoint.tSec)}s with ${peakSpmPoint.accuracyPct.toFixed(1)}% accuracy.`
-          : `Best pace reached ${Math.round(peakSpmPoint.scorePerMinute)} SPM at ${Math.round(peakSpmPoint.tSec)}s.`,
-      metric: "spm",
-      startSec: Math.max(0, peakSpmPoint.tSec - 4),
-      endSec: Math.min(totalSecs, peakSpmPoint.tSec + 4),
-    });
-  }
-
-  if (minAccPoint?.accuracyPct != null && minAccPoint.accuracyPct < 78) {
-    moments.push({
-      id: "moment-low-accuracy",
-      level: "tip",
-      title: "Low Accuracy Pocket",
-      detail: `Lowest point reached ${minAccPoint.accuracyPct.toFixed(1)}% accuracy around ${Math.round(minAccPoint.tSec)}s.`,
-      metric: "accuracy",
-      startSec: Math.max(0, minAccPoint.tSec - 4),
-      endSec: Math.min(totalSecs, minAccPoint.tSec + 4),
-    });
-  }
-
-  const levelRank: Record<RunMomentInsight["level"], number> = {
-    warning: 0,
-    tip: 1,
-    good: 2,
-  };
-
-  return moments
-    .sort((a, b) => levelRank[a.level] - levelRank[b.level])
-    .slice(0, 3);
-}
-
-function buildRunTips(
-  snapshot: Omit<ScenarioRunSnapshot, "tips">,
-  keyMoments: RunMomentInsight[],
-): RunCoachingTip[] {
-  const tips: RunCoachingTip[] = [];
-  const pushUnique = (tip: RunCoachingTip) => {
-    if (tips.some((existing) => existing.id === tip.id)) return;
-    tips.push(tip);
-  };
-
-  for (const moment of keyMoments.slice(0, 2)) {
-    pushUnique({
-      id: `moment-${moment.id}`,
-      level: moment.level,
-      title: moment.title,
-      detail: moment.detail,
-      windowStartSec: moment.startSec,
-      windowEndSec: moment.endSec,
-    });
-  }
-
-  if (snapshot.shotsFired != null && snapshot.shotsFired >= 20 && snapshot.shotsHit != null) {
-    const shotsPerHit = snapshot.shotsHit > 0
-      ? snapshot.shotsFired / snapshot.shotsHit
-      : snapshot.shotsFired;
-
-    if (shotsPerHit >= 1.7) {
-      pushUnique({
-        id: "shot-correction-high",
-        level: "warning",
-        title: "High Correction Load",
-        detail: `Run averaged ${shotsPerHit.toFixed(2)} shots per hit. Use 5–8 minute blocks at ~90% speed and prioritize first-shot placement before speeding up.`,
-      });
-    } else if (shotsPerHit <= 1.2) {
-      pushUnique({
-        id: "shot-correction-good",
-        level: "good",
-        title: "Clean Shot Conversion",
-        detail: `Run averaged ${shotsPerHit.toFixed(2)} shots per hit. Keep this conversion and increase pace in small steps (about 3–5% per block).`,
-      });
-    }
-  }
-
-  if (snapshot.accuracyPct != null) {
-    if (snapshot.accuracyPct < 75) {
-      pushUnique({
-        id: "acc-low",
-        level: "warning",
-        title: "Accuracy Below Baseline",
-        detail: "Accuracy is below 75%. Reduce speed slightly and lock in clean first-shot confirms before pushing tempo.",
-      });
-    } else if (snapshot.accuracyPct >= 92) {
-      pushUnique({
-        id: "acc-strong",
-        level: "good",
-        title: "Strong Accuracy",
-        detail: "Accuracy is stable. Increase pace in small increments while keeping shot conversion steady.",
-      });
-    }
-  }
-
-  if (snapshot.damageEfficiency != null && snapshot.damageEfficiency < 85) {
-    pushUnique({
-      id: "dmg-eff",
-      level: "tip",
-      title: "Damage Conversion",
-      detail: "Damage efficiency is below 85%. Focus on cleaner target confirmation before firing to reduce low-value hits and misses.",
-    });
-  }
-
-  if (snapshot.killsPerSecond != null && snapshot.accuracyPct != null) {
-    if (snapshot.killsPerSecond < 0.75 && snapshot.accuracyPct >= 88) {
-      pushUnique({
-        id: "speed-gap",
-        level: "tip",
-        title: "Speed Ceiling",
-        detail: "Precision is strong but kill pace is limited. Add short target-switch blocks and pre-plan your next target during confirms.",
-      });
-    }
-  }
-
-  if (snapshot.scorePerMinute != null && snapshot.peakScorePerMinute != null) {
-    const drop = snapshot.peakScorePerMinute - snapshot.scorePerMinute;
-    if (snapshot.peakScorePerMinute > 0 && drop / snapshot.peakScorePerMinute > 0.12) {
-      pushUnique({
-        id: "pace-fade",
-        level: "tip",
-        title: "Late-Run Pace Fade",
-        detail: "SPM faded more than 12% from peak. Add a brief reset cue every 10–15s to stabilize tempo.",
-      });
-    }
-  }
-
-  if (tips.length < 3 && keyMoments.length > 2) {
-    const remainingMoment = keyMoments[2];
-    pushUnique({
-      id: `moment-${remainingMoment.id}`,
-      level: remainingMoment.level,
-      title: remainingMoment.title,
-      detail: remainingMoment.detail,
-      windowStartSec: remainingMoment.startSec,
-      windowEndSec: remainingMoment.endSec,
-    });
-  }
-
-  if (tips.length === 0) {
-    pushUnique({
-      id: "baseline",
-      level: "good",
-      title: "Stable Run",
-      detail: "No major weak signal detected. Keep training deliberate: one focus metric per block, then increase difficulty gradually.",
-    });
-  }
-
-  return tips.slice(0, 3);
-}
-
 function buildRunSnapshot(
   session: SessionResult,
   metricsRef: MutableRefObject<MutableRunMetrics>,
@@ -532,12 +156,13 @@ function buildRunSnapshot(
     keyMoments: buildRunMomentInsights(
       timeline,
       toPositiveOrNull(m.durationSecs) ?? session.duration_secs ?? null,
+      3,
     ),
   };
 
   return {
     ...snapshotBase,
-    tips: buildRunTips(snapshotBase, snapshotBase.keyMoments),
+    tips: buildRunCoachingTips(snapshotBase, snapshotBase.keyMoments, 3),
   };
 }
 
@@ -545,18 +170,7 @@ function buildRunSnapshotFromBridge(
   session: SessionResult,
   snapshot: BridgeRunSnapshot,
 ): ScenarioRunSnapshot {
-  const timeline: RunTimelinePoint[] = (snapshot.timeline ?? []).map((point) => ({
-    tSec: point.t_sec,
-    scorePerMinute: point.score_per_minute,
-    killsPerSecond: point.kills_per_second,
-    accuracyPct: point.accuracy_pct,
-    damageEfficiency: point.damage_efficiency,
-    scoreTotal: point.score_total,
-    scoreTotalDerived: point.score_total_derived,
-    kills: point.kills,
-    shotsFired: point.shots_fired,
-    shotsHit: point.shots_hit,
-  }));
+  const timeline: RunTimelinePoint[] = normalizeBridgeRunTimeline(snapshot.timeline ?? []);
 
   const snapshotBase: Omit<ScenarioRunSnapshot, "tips"> = {
     durationSecs: toPositiveOrNull(snapshot.duration_secs) ?? session.duration_secs ?? null,
@@ -587,12 +201,13 @@ function buildRunSnapshotFromBridge(
     keyMoments: buildRunMomentInsights(
       timeline,
       toPositiveOrNull(snapshot.duration_secs) ?? session.duration_secs ?? null,
+      3,
     ),
   };
 
   return {
     ...snapshotBase,
-    tips: buildRunTips(snapshotBase, snapshotBase.keyMoments),
+    tips: buildRunCoachingTips(snapshotBase, snapshotBase.keyMoments, 3),
   };
 }
 

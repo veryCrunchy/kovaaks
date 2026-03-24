@@ -380,6 +380,7 @@ fn start_ue4ss_reinject_monitor(_app: AppHandle, _stats_dir: String) {}
 mod app_version;
 mod benchmark_overlay;
 mod bridge;
+mod coaching;
 mod discord_rpc;
 mod file_watcher;
 mod hub_api;
@@ -399,6 +400,7 @@ mod settings;
 mod stats_db;
 mod steam_api;
 mod steam_integration;
+mod target_response;
 mod window_tracker;
 
 use std::sync::{Arc, Mutex, OnceLock};
@@ -647,6 +649,13 @@ fn save_settings(
         settings::normalize_replay_capture_framing(&new_settings.replay_capture_framing);
     new_settings.replay_capture_quality =
         settings::normalize_replay_capture_quality(&new_settings.replay_capture_quality);
+    new_settings.coaching_focus_area =
+        settings::normalize_coaching_focus_area(&new_settings.coaching_focus_area);
+    new_settings.coaching_challenge_preference = settings::normalize_coaching_challenge_preference(
+        &new_settings.coaching_challenge_preference,
+    );
+    new_settings.coaching_time_preference =
+        settings::normalize_coaching_time_preference(&new_settings.coaching_time_preference);
     settings::normalize_overlay_settings(&mut new_settings);
 
     let mut persisted_settings = new_settings.clone();
@@ -1798,6 +1807,53 @@ fn get_session_replay_context_windows(
 }
 
 #[tauri::command]
+fn get_session_target_response_analysis(
+    app: AppHandle,
+    session_id: String,
+) -> Option<target_response::TargetResponseAnalysis> {
+    match stats_db::get_target_response_analysis(&app, &session_id) {
+        Ok(Some(analysis)) => Some(analysis),
+        Ok(None) => {
+            let replay = replay_store::load_replay(&app, &session_id);
+            match stats_db::get_target_response_analysis(&app, &session_id) {
+                Ok(Some(analysis)) => Some(analysis),
+                Ok(None) => {
+                    let analysis = replay
+                        .as_ref()
+                        .and_then(target_response::analyze_target_responses);
+                    if let Some(analysis) = analysis.as_ref() {
+                        let _ =
+                            stats_db::upsert_target_response_analysis(&app, &session_id, analysis);
+                    }
+                    analysis
+                }
+                Err(error) => {
+                    log::warn!(
+                        "could not backfill target response analysis for {}: {error}",
+                        session_id
+                    );
+                    replay
+                        .as_ref()
+                        .and_then(target_response::analyze_target_responses)
+                }
+            }
+        }
+        Err(error) => {
+            log::warn!(
+                "could not load target response analysis for {}: {error}",
+                session_id
+            );
+            replay_store::load_replay(&app, &session_id)
+                .as_ref()
+                .and_then(target_response::analyze_target_responses)
+                .inspect(|analysis| {
+                    let _ = stats_db::upsert_target_response_analysis(&app, &session_id, analysis);
+                })
+        }
+    }
+}
+
+#[tauri::command]
 fn get_session_sql_audit(app: AppHandle, session_id: String) -> Option<stats_db::SessionSqlAudit> {
     match stats_db::audit_session_sql(&app, &session_id) {
         Ok(audit) => {
@@ -1949,6 +2005,87 @@ fn get_session_history_page(
     let offset = offset.unwrap_or(0);
     let limit = limit.unwrap_or(500).clamp(1, 2_000);
     session_store::get_session_page(&app, offset, limit)
+}
+
+#[tauri::command]
+fn get_global_coaching_overview(
+    app: AppHandle,
+    date_range: Option<String>,
+) -> Result<coaching::GlobalCoachingOverview, String> {
+    coaching::get_global_overview(&app, date_range.as_deref()).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_scenario_coaching_overview(
+    app: AppHandle,
+    scenario_name: String,
+    date_range: Option<String>,
+) -> Result<coaching::ScenarioCoachingOverview, String> {
+    coaching::get_scenario_overview(&app, &scenario_name, date_range.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_session_run_coaching_analysis(
+    app: AppHandle,
+    session_id: String,
+) -> Result<coaching::SessionRunCoachingAnalysis, String> {
+    coaching::get_session_run_coaching_analysis(&app, &session_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_coaching_state_snapshot(
+    app: AppHandle,
+    snapshot: stats_db::CoachingStateSnapshot,
+) -> Result<(), String> {
+    stats_db::upsert_coaching_state_snapshot(&app, &snapshot).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_coaching_state_snapshot(
+    app: AppHandle,
+    snapshot_kind: String,
+) -> Result<Option<stats_db::CoachingStateSnapshot>, String> {
+    stats_db::get_coaching_state_snapshot(&app, &snapshot_kind).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_coaching_recommendation_evaluations(
+    app: AppHandle,
+    evaluations: Vec<stats_db::CoachingRecommendationEvaluation>,
+) -> Result<usize, String> {
+    stats_db::upsert_coaching_recommendation_evaluations(&app, &evaluations)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_coaching_recommendation_evaluations(
+    app: AppHandle,
+    snapshot_kind: Option<String>,
+    status: Option<String>,
+) -> Result<Vec<stats_db::CoachingRecommendationEvaluation>, String> {
+    stats_db::get_coaching_recommendation_evaluations(
+        &app,
+        snapshot_kind.as_deref(),
+        status.as_deref(),
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn save_coaching_user_feedback(
+    app: AppHandle,
+    feedback: stats_db::CoachingUserFeedbackRecord,
+) -> Result<(), String> {
+    stats_db::upsert_coaching_user_feedback(&app, &feedback).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_coaching_user_feedback(
+    app: AppHandle,
+    snapshot_kind: Option<String>,
+) -> Result<Vec<stats_db::CoachingUserFeedbackRecord>, String> {
+    stats_db::get_coaching_user_feedback(&app, snapshot_kind.as_deref()).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2132,6 +2269,15 @@ pub fn run() {
             open_logs_window,
             open_stats_window,
             get_session_history_page,
+            get_global_coaching_overview,
+            get_scenario_coaching_overview,
+            get_session_run_coaching_analysis,
+            save_coaching_state_snapshot,
+            get_coaching_state_snapshot,
+            save_coaching_recommendation_evaluations,
+            get_coaching_recommendation_evaluations,
+            save_coaching_user_feedback,
+            get_coaching_user_feedback,
             get_recent_session_scenarios,
             get_personal_best_for_scenario,
             clear_session_history,
@@ -2188,6 +2334,7 @@ pub fn run() {
             get_session_run_timeline,
             get_session_shot_telemetry,
             get_session_replay_context_windows,
+            get_session_target_response_analysis,
             get_session_sql_audit,
             get_repo_sql_audit_summary,
             replay_play_in_game,

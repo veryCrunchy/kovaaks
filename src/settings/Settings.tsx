@@ -1874,6 +1874,124 @@ function GeneralSettings({
           </GlassCard>
         </FieldGroup>
         )}
+
+        {activeSection === "hud" && (
+        <FieldGroup
+          label="Coaching Preferences"
+          description="Tell AimMod what kind of coaching is most useful for you so it can rank and tailor advice better."
+        >
+          <GlassCard style={{ padding: "12px 14px" }}>
+            <div className="flex flex-col gap-5">
+              <div className="flex flex-col gap-2">
+                <span className="text-sm" style={{ color: C.textSub }}>Primary coaching focus</span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {[
+                    ["balanced", "Balanced"],
+                    ["precision", "Precision"],
+                    ["speed", "Speed"],
+                    ["control", "Control"],
+                    ["consistency", "Consistency"],
+                    ["endurance", "Endurance"],
+                    ["transfer", "Transfer"],
+                  ].map(([value, label]) => {
+                    const active = settings.coaching_focus_area === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => update("coaching_focus_area", value as AppSettings["coaching_focus_area"])}
+                        className="am-btn"
+                        style={{
+                          padding: "4px 10px",
+                          minHeight: 0,
+                          borderRadius: 7,
+                          fontSize: 11,
+                          background: active ? C.accentDim : C.surface,
+                          border: `1px solid ${active ? C.accentBorder : C.border}`,
+                          color: active ? C.accent : C.textMuted,
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <span className="text-sm" style={{ color: C.textSub }}>How hard should coaching push?</span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {[
+                    ["steady", "Steady"],
+                    ["balanced", "Balanced"],
+                    ["aggressive", "Aggressive"],
+                  ].map(([value, label]) => {
+                    const active = settings.coaching_challenge_preference === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => update("coaching_challenge_preference", value as AppSettings["coaching_challenge_preference"])}
+                        className="am-btn"
+                        style={{
+                          padding: "4px 10px",
+                          minHeight: 0,
+                          borderRadius: 7,
+                          fontSize: 11,
+                          background: active ? C.accentDim : C.surface,
+                          border: `1px solid ${active ? C.accentBorder : C.border}`,
+                          color: active ? C.accent : C.textMuted,
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="flex flex-col gap-2">
+                <span className="text-sm" style={{ color: C.textSub }}>Planning horizon</span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  {[
+                    ["next_session", "Next Session"],
+                    ["this_week", "This Week"],
+                    ["long_term", "Long Term"],
+                  ].map(([value, label]) => {
+                    const active = settings.coaching_time_preference === value;
+                    return (
+                      <button
+                        key={value}
+                        type="button"
+                        onClick={() => update("coaching_time_preference", value as AppSettings["coaching_time_preference"])}
+                        className="am-btn"
+                        style={{
+                          padding: "4px 10px",
+                          minHeight: 0,
+                          borderRadius: 7,
+                          fontSize: 11,
+                          background: active ? C.accentDim : C.surface,
+                          border: `1px solid ${active ? C.accentBorder : C.border}`,
+                          color: active ? C.accent : C.textMuted,
+                          fontFamily: "inherit",
+                        }}
+                      >
+                        {label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+                You can also rate specific coaching cards in Session Stats. AimMod will use both your preferences and your card feedback to stop repeating advice that does not fit you.
+              </p>
+            </div>
+          </GlassCard>
+        </FieldGroup>
+        )}
       </div>
 
       {/* ── Footer actions ───────────────────────────────────────────── */}

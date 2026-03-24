@@ -184,6 +184,42 @@ fn repair_run_capture_if_needed(app: &AppHandle, session_id: &str, replay: &Repl
     }
 }
 
+fn repair_tick_stream_if_needed(app: &AppHandle, session_id: &str, replay: &mut ReplayData) {
+    let missing_tick_stream = replay
+        .run_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.tick_stream_v1.as_ref())
+        .is_none();
+    if !missing_tick_stream {
+        return;
+    }
+
+    let legacy = crate::stats_db::get_legacy_replay_blob(app, session_id)
+        .ok()
+        .flatten()
+        .or_else(|| import_legacy_replay_with_video_requirement(app, session_id, false));
+    let Some(legacy) = legacy else {
+        return;
+    };
+    let Some(mut legacy_snapshot) = legacy.run_snapshot else {
+        return;
+    };
+    let Some(legacy_tick_stream) = legacy_snapshot.tick_stream_v1.take() else {
+        return;
+    };
+
+    if let Some(snapshot) = replay.run_snapshot.as_mut() {
+        snapshot.tick_stream_v1 = Some(legacy_tick_stream);
+    } else {
+        replay.run_snapshot = Some(crate::bridge::BridgeRunSnapshot {
+            tick_stream_v1: Some(legacy_tick_stream),
+            ..legacy_snapshot
+        });
+    }
+
+    let _ = backfill_sqlite_replay(app, session_id, replay);
+}
+
 fn repair_replay_timing_if_needed(app: &AppHandle, session_id: &str, replay: &mut ReplayData) {
     if replay.frames.len() < 2 || replay.positions.len() < 2 {
         return;
@@ -918,6 +954,7 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
             }
             let mut replay = replay;
             repair_replay_timing_if_needed(app, session_id, &mut replay);
+            repair_tick_stream_if_needed(app, session_id, &mut replay);
             repair_run_capture_if_needed(app, session_id, &replay);
             Some(replay)
         }
@@ -935,6 +972,7 @@ pub fn load_replay(app: &AppHandle, session_id: &str) -> Option<ReplayData> {
                 }
                 let mut replay = replay;
                 repair_replay_timing_if_needed(app, session_id, &mut replay);
+                repair_tick_stream_if_needed(app, session_id, &mut replay);
                 let _ = backfill_sqlite_replay(app, session_id, &replay);
                 let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
                 repair_run_capture_if_needed(app, session_id, &replay);
@@ -963,12 +1001,14 @@ fn load_replay_allowing_missing_video(app: &AppHandle, session_id: &str) -> Opti
     match crate::stats_db::get_replay_data(app, session_id) {
         Ok(Some(mut replay)) => {
             repair_replay_timing_if_needed(app, session_id, &mut replay);
+            repair_tick_stream_if_needed(app, session_id, &mut replay);
             repair_run_capture_if_needed(app, session_id, &replay);
             Some(replay)
         }
         Ok(None) => match crate::stats_db::get_legacy_replay_blob(app, session_id) {
             Ok(Some(mut replay)) => {
                 repair_replay_timing_if_needed(app, session_id, &mut replay);
+                repair_tick_stream_if_needed(app, session_id, &mut replay);
                 let _ = backfill_sqlite_replay(app, session_id, &replay);
                 let _ = crate::stats_db::delete_legacy_replay_blob(app, session_id);
                 repair_run_capture_if_needed(app, session_id, &replay);

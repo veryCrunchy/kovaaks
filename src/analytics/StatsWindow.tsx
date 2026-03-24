@@ -41,6 +41,16 @@ import { C, scenarioColor, SCENARIO_LABELS, accentAlpha } from "../design/tokens
 import { ShortcutHelpModal } from "../components/ShortcutHelpModal";
 import { useUpdater } from "../hooks/useUpdater";
 import type { AppSettings } from "../types/settings";
+import {
+  type CoachingUserFeedbackRecord,
+  formatRunWindow as formatUnifiedRunWindow,
+  normalizeAccuracyPct,
+  normalizeBridgeRunTimeline,
+  runMomentAction as buildUnifiedRunMomentAction,
+  type PlayerLearningProfile,
+  type TargetResponseAnalysis,
+  type TargetResponseEpisode,
+} from "../coaching/engine";
 
 const SettingsTab = lazy(() =>
   import("../settings/Settings").then((m) => ({ default: m.Settings })),
@@ -128,6 +138,54 @@ interface AnalyticsSessionRecord extends SessionRecord {
   qualityIssues: string[];
 }
 
+interface CoachingPersistenceStatus {
+  snapshotUpdatedAtMs: number | null;
+  pendingCount: number;
+  improvedCount: number;
+  flatCount: number;
+  regressedCount: number;
+}
+
+type CoachingCardFeedback = CoachingUserFeedbackRecord["feedback"];
+
+interface GlobalCoachingLearningState {
+  sampleCount: number;
+  settledSampleCount: number;
+  warmupSampleCount: number;
+  normalizedVariancePct: number | null;
+  warmupTaxPct: number | null;
+  avgBlockFadePct: number | null;
+  switchPenaltyPct: number | null;
+  momentumDeltaPct: number | null;
+  retentionAfterGapPct: number | null;
+  dominantFamily: string | null;
+  dominantFamilySharePct: number | null;
+  familyDiversity: number;
+}
+
+interface BehaviorPatternFeatures {
+  sampleCount: number;
+  settledSampleCount: number;
+  warmupConsistencyPct: number | null;
+  readinessPct: number | null;
+  adaptationPct: number | null;
+  endurancePct: number | null;
+  transferPct: number | null;
+  precisionPct: number | null;
+  controlPct: number | null;
+  consistencyPct: number | null;
+  learningEfficiencyPct: number | null;
+  tempoPct: number | null;
+  switchResiliencePct: number | null;
+  retainedFormPct: number | null;
+  fatiguePressurePct: number | null;
+  correctionLoadPct: number | null;
+  hesitationLoadPct: number | null;
+  volatilityPct: number | null;
+  momentumPct: number | null;
+  precisionTempoBiasPct: number | null;
+}
+
 interface PracticeProfile {
   sessionCount: number;
   activeDays: number;
@@ -144,6 +202,37 @@ interface PracticeProfile {
   avgScenarioSwitchesPerBlock: number;
   switchRate: number;
   topScenarios: { scenario: string; share: number; count: number }[];
+}
+
+interface GlobalCoachingOverview {
+  practiceProfile: PracticeProfile | null;
+  warmupIds: string[];
+  learningState: GlobalCoachingLearningState | null;
+  behaviorFeatures: BehaviorPatternFeatures | null;
+  playerLearningProfile: PlayerLearningProfile | null;
+  globalCards: CoachingCardData[];
+  coachingPersistenceStatus: CoachingPersistenceStatus | null;
+}
+
+interface ScenarioWarmupStats {
+  dropPct: number;
+  avgWarmupSessions: number;
+  blockCount: number;
+  settleInLabel: string;
+  action: string;
+}
+
+interface ScenarioCoachingOverview {
+  scenarioType: string;
+  scoreCvPct: number | null;
+  slopePtsPerRun: number | null;
+  avgScore: number | null;
+  isPlateau: boolean;
+  p10Score: number | null;
+  p50Score: number | null;
+  p90Score: number | null;
+  warmupStats: ScenarioWarmupStats | null;
+  coachingCards: CoachingCardData[];
 }
 
 function estimateReplayBridgeBaseTs(
@@ -238,8 +327,64 @@ interface AimAxisProfile {
   volatility: number;
 }
 
-type Tab = "summary" | "mechanics" | "coaching" | "replay" | "leaderboard";
+type Tab = "summary" | "mechanics" | "coaching" | "replay" | "leaderboard" | "benchmarks";
 type DateRangePreset = "all" | "30d" | "90d" | "365d";
+
+interface HubBenchmarkRankVisual {
+  rankIndex: number;
+  rankName: string;
+  iconUrl: string;
+  color: string;
+}
+
+interface HubScenarioBenchmarkRank {
+  benchmarkId: number;
+  benchmarkName: string;
+  benchmarkIconUrl: string;
+  categoryName: string;
+  scenarioScore: number;
+  leaderboardRank: number;
+  leaderboardId: number;
+  scenarioRank: HubBenchmarkRankVisual | null;
+}
+
+interface HubBenchmarkThreshold {
+  rankIndex: number;
+  rankName: string;
+  score: number;
+  iconUrl: string;
+  color: string;
+}
+
+interface HubBenchmarkScenarioEntry {
+  scenarioName: string;
+  scenarioSlug: string;
+  score: number;
+  leaderboardRank: number;
+  scenarioRank: HubBenchmarkRankVisual | null;
+  thresholds: HubBenchmarkThreshold[];
+}
+
+interface HubBenchmarkCategoryPage {
+  categoryName: string;
+  scenarios: HubBenchmarkScenarioEntry[];
+}
+
+interface HubBenchmarkPageResponse {
+  userHandle: string;
+  benchmarkId: number;
+  benchmarkName: string;
+  benchmarkIconUrl: string;
+  overallRank: HubBenchmarkRankVisual | null;
+  categories: HubBenchmarkCategoryPage[];
+}
+
+interface BenchmarkThresholdLine {
+  score: number;
+  rankName: string;
+  color: string;
+  benchmarkName: string;
+}
 
 // ─── Constants ─────────────────────────────────────────────────────────────────
 
@@ -288,6 +433,7 @@ const STATS_WINDOW_STORAGE_KEYS = {
   compareScenario: "stats-window:compare-scenario",
   hubNoticeDismissed: "stats-window:hub-notice-dismissed",
   updateNoticeDismissedVersion: "stats-window:update-notice-dismissed-version",
+  favoriteBenchmarks: "stats-window:favorite-benchmarks",
 } as const;
 
 function readStoredValue(key: string): string | null {
@@ -308,6 +454,25 @@ function writeStoredValue(key: string, value: string | null) {
   } catch {
     // Ignore storage failures in restricted environments.
   }
+}
+
+function readStoredNumberArray(key: string): number[] {
+  const raw = readStoredValue(key);
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((value) => Number(value))
+      .filter((value) => Number.isFinite(value) && value > 0);
+  } catch {
+    return [];
+  }
+}
+
+function writeStoredNumberArray(key: string, values: number[]) {
+  const unique = [...new Set(values.filter((value) => Number.isFinite(value) && value > 0))];
+  writeStoredValue(key, unique.length > 0 ? JSON.stringify(unique) : null);
 }
 
 interface DrillRecommendation {
@@ -378,6 +543,72 @@ function normalizeScenario(name: string): string {
   if (!m || m.index === undefined) return name;
   const sep = name.lastIndexOf(" - ", m.index);
   return sep >= 0 ? name.slice(0, sep) : name;
+}
+
+function slugifyScenarioName(value: string): string {
+  const normalized = value.toLowerCase().trim();
+  let out = "";
+  let lastDash = false;
+  for (const ch of normalized) {
+    const isAlphaNum = (ch >= "a" && ch <= "z") || (ch >= "0" && ch <= "9");
+    if (isAlphaNum) {
+      out += ch;
+      lastDash = false;
+      continue;
+    }
+    if ((ch === " " || ch === "-" || ch === "_" || ch === "'" || ch === ".") && !lastDash && out.length > 0) {
+      out += "-";
+      lastDash = true;
+    }
+  }
+  return out.replace(/-+$/g, "");
+}
+
+const BENCHMARK_RANK_NAME_COLORS: Record<string, string> = {
+  iron: "#6b8c8c",
+  bronze: "#b07840",
+  silver: "#9098a0",
+  gold: "#c0a030",
+  platinum: "#6eaec0",
+  diamond: "#38c8c0",
+  jade: "#38c868",
+  master: "#a840c8",
+  grandmaster: "#e04040",
+  nova: "#ff8820",
+};
+
+const BENCHMARK_RANK_PALETTE = [
+  "#c8956c",
+  "#b0b8b0",
+  "#e8c84a",
+  "#7ec8e3",
+  "#c084fc",
+  "#60e0a0",
+  "#f87171",
+];
+
+function benchmarkPaletteIndex(rankIndex: number | null | undefined): number {
+  return Math.max(0, (rankIndex ?? 1) - 1);
+}
+
+function resolveBenchmarkColor(
+  apiColor: string | null | undefined,
+  rankName?: string | null,
+  paletteIdx = 0,
+): string {
+  const normalizedRankName = rankName?.trim().toLowerCase();
+  if (normalizedRankName) {
+    const known = BENCHMARK_RANK_NAME_COLORS[normalizedRankName];
+    if (known) return known;
+  }
+
+  const trimmedColor = apiColor?.trim();
+  const normalizedColor = trimmedColor?.toLowerCase();
+  if (trimmedColor && normalizedColor && normalizedColor !== "#ffffff" && normalizedColor !== "#fff" && normalizedColor !== "white") {
+    return trimmedColor;
+  }
+
+  return BENCHMARK_RANK_PALETTE[Math.abs(paletteIdx) % BENCHMARK_RANK_PALETTE.length];
 }
 
 function parseTimestamp(ts: string): Date | null {
@@ -458,58 +689,6 @@ function summarizeScenario(records: SessionRecord[]): ScenarioSummary | null {
   };
 }
 
-function drillRecommendationsForCard(title: string, scenarioType: string): DrillRecommendation[] {
-  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
-  const lower = title.toLowerCase();
-
-  if (lower.includes("warm-up") || lower.includes("warmup")) {
-    return [
-      { label: "Smoothbot", query: "Smoothbot" },
-      { label: "Wide Wall", query: "Wide Wall" },
-      { label: "Centering", query: "Centering" },
-    ];
-  }
-  if (lower.includes("shot recovery") || lower.includes("recover")) {
-    return [
-      { label: "Pasu", query: "Pasu" },
-      { label: "1w4ts", query: "1w4ts" },
-      { label: "Microshot", query: "Microshot" },
-    ];
-  }
-  if (lower.includes("click timing") || lower.includes("rhythm")) {
-    return [
-      { label: "Microshot", query: "Microshot" },
-      { label: "Tile Frenzy", query: "Tile Frenzy" },
-      { label: "1wall 6targets", query: "1wall 6targets" },
-    ];
-  }
-  if (lower.includes("overshooting") || lower.includes("speed-accuracy")) {
-    return isTracking
-      ? [
-          { label: "Smoothbot", query: "Smoothbot" },
-          { label: "Air", query: "Air" },
-          { label: "Centering", query: "Centering" },
-        ]
-      : [
-          { label: "Pasu", query: "Pasu" },
-          { label: "1w4ts", query: "1w4ts" },
-          { label: "Floating Heads", query: "Floating Heads" },
-        ];
-  }
-  if (lower.includes("tracking") || isTracking) {
-    return [
-      { label: "Smoothbot", query: "Smoothbot" },
-      { label: "Air Angelic", query: "Air Angelic" },
-      { label: "Centering", query: "Centering" },
-    ];
-  }
-  return [
-    { label: "Pasu", query: "Pasu" },
-    { label: "1w4ts", query: "1w4ts" },
-    { label: "Microshot", query: "Microshot" },
-  ];
-}
-
 function formatTelemetryOffset(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   return `${(ms / 1000).toFixed(ms >= 10_000 ? 0 : 1)}s`;
@@ -555,7 +734,13 @@ function sliceRowsToRange<T extends { timestamp_ms: number }>(rows: T[], startMs
 }
 
 function fmtScore(n: number) {
-  return Math.round(n).toLocaleString();
+  if (!Number.isFinite(n)) return "--";
+  const rounded = Math.round(n);
+  if (Math.abs(n - rounded) < 0.0001) return rounded.toLocaleString();
+  return n.toLocaleString(undefined, {
+    minimumFractionDigits: 1,
+    maximumFractionDigits: 2,
+  });
 }
 
 function fmtDuration(secs: number) {
@@ -563,11 +748,20 @@ function fmtDuration(secs: number) {
   return `${Math.floor(secs / 60)}m ${Math.round(secs % 60)}s`;
 }
 
+function fmtLatencyMs(value: number | null | undefined) {
+  if (value == null || !Number.isFinite(value)) return "—";
+  return `${value.toFixed(0)}ms`;
+}
+
 function mean(arr: number[]) {
   return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
 
 type ShotTelemetryDisplayMode = "context" | "samples";
+
+function formatTargetResponseKind(kind: TargetResponseEpisode["kind"]): string {
+  return kind === "path_change" ? "Path break" : "Target switch";
+}
 
 function formatShotTelemetryEntitySuffix(entityId: string): string {
   const compact = entityId.replace(/[^a-zA-Z0-9]/g, "");
@@ -717,103 +911,6 @@ function buildAnalyticsRecords(records: SessionRecord[]): AnalyticsSessionRecord
       qualityIssues,
     };
   });
-}
-
-function startOfLocalDayMs(timestampMs: number): number {
-  const d = new Date(timestampMs);
-  d.setHours(0, 0, 0, 0);
-  return d.getTime();
-}
-
-const PRACTICE_PROFILE_WINDOW_DAYS = 14;
-const PRACTICE_PROFILE_MIN_RECENT_SESSIONS = 12;
-const PRACTICE_PROFILE_FALLBACK_RUNS = 60;
-
-function buildPracticeProfile(sorted: AnalyticsSessionRecord[]): PracticeProfile | null {
-  const reliable = sorted.filter((record) => record.isReliableForAnalysis);
-  if (reliable.length < 5) return null;
-
-  const latestTimestampMs = reliable[reliable.length - 1]?.timestampMs ?? 0;
-  const recentWindowStartMs = latestTimestampMs - PRACTICE_PROFILE_WINDOW_DAYS * 24 * 60 * 60 * 1000;
-  const recentWindow = reliable.filter((record) => record.timestampMs >= recentWindowStartMs);
-  const recent = recentWindow.length >= PRACTICE_PROFILE_MIN_RECENT_SESSIONS
-    ? recentWindow
-    : reliable.slice(-Math.min(reliable.length, PRACTICE_PROFILE_FALLBACK_RUNS));
-  const activeDays = new Set(recent.map((record) => startOfLocalDayMs(record.timestampMs))).size;
-  const firstDayMs = startOfLocalDayMs(recent[0].timestampMs);
-  const lastDayMs = startOfLocalDayMs(recent[recent.length - 1].timestampMs);
-  const spanDays = Math.max(1, Math.round((lastDayMs - firstDayMs) / (24 * 60 * 60 * 1000)) + 1);
-  const daysPerWeek = (activeDays / spanDays) * 7;
-  const sessionsPerActiveDay = recent.length / Math.max(activeDays, 1);
-
-  const blocks = groupIntoPlayBlocks(recent);
-  const blockMinutes = blocks.map((block) =>
-    block.sessions.reduce((sum, session) => sum + Math.max(0, session.duration_secs), 0) / 60,
-  );
-  const avgBlockRuns = mean(blocks.map((block) => block.sessions.length));
-  const avgBlockMinutes = mean(blockMinutes);
-  const maxBlockMinutes = blockMinutes.length > 0 ? Math.max(...blockMinutes) : 0;
-
-  const scenarioCounts = new Map<string, number>();
-  for (const session of recent) {
-    scenarioCounts.set(
-      session.normalizedScenario,
-      (scenarioCounts.get(session.normalizedScenario) ?? 0) + 1,
-    );
-  }
-
-  let dominantScenario = "Unknown";
-  let dominantCount = 0;
-  for (const [scenario, count] of scenarioCounts.entries()) {
-    if (count > dominantCount) {
-      dominantScenario = scenario;
-      dominantCount = count;
-    }
-  }
-  const topScenarios = [...scenarioCounts.entries()]
-    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
-    .slice(0, 3)
-    .map(([scenario, count]) => ({
-      scenario,
-      count,
-      share: count / recent.length,
-    }));
-
-  const blockUniqueScenarioCounts = blocks.map(
-    (block) => new Set(block.sessions.map((session) => session.normalizedScenario)).size,
-  );
-  const blockSwitchCounts = blocks.map((block) => {
-    let switches = 0;
-    for (let i = 1; i < block.sessions.length; i++) {
-      if (block.sessions[i].normalizedScenario !== block.sessions[i - 1].normalizedScenario) {
-        switches += 1;
-      }
-    }
-    return switches;
-  });
-  const totalAdjacentPairs = blocks.reduce(
-    (sum, block) => sum + Math.max(0, block.sessions.length - 1),
-    0,
-  );
-  const totalSwitches = blockSwitchCounts.reduce((sum, count) => sum + count, 0);
-
-  return {
-    sessionCount: recent.length,
-    activeDays,
-    spanDays,
-    daysPerWeek,
-    sessionsPerActiveDay,
-    avgBlockRuns,
-    avgBlockMinutes,
-    maxBlockMinutes,
-    scenarioDiversity: scenarioCounts.size,
-    dominantScenario,
-    dominantScenarioShare: dominantCount / recent.length,
-    avgUniqueScenariosPerBlock: mean(blockUniqueScenarioCounts),
-    avgScenarioSwitchesPerBlock: mean(blockSwitchCounts),
-    switchRate: totalAdjacentPairs > 0 ? totalSwitches / totalAdjacentPairs : 0,
-    topScenarios,
-  };
 }
 
 function linearRegression(xs: number[], ys: number[]): { slope: number; intercept: number } {
@@ -996,6 +1093,10 @@ interface RunMomentInsight {
   endSec: number;
 }
 
+interface SessionRunCoachingAnalysis {
+  keyMoments: RunMomentInsight[];
+}
+
 function runAvg(values: number[]): number | null {
   if (values.length === 0) return null;
   return values.reduce((sum, val) => sum + val, 0) / values.length;
@@ -1052,7 +1153,7 @@ function runShotStatsInRange(
   };
 }
 
-function buildRunMomentInsights(
+export function buildRunMomentInsights(
   points: BridgeRunTimelinePoint[],
   durationSecs: number | null | undefined,
 ): RunMomentInsight[] {
@@ -1199,13 +1300,13 @@ function buildRunMomentInsights(
     .slice(0, 4);
 }
 
-function formatRunWindow(startSec: number, endSec: number): string {
+export function formatRunWindow(startSec: number, endSec: number): string {
   const start = Math.max(0, Math.round(startSec));
   const end = Math.max(start, Math.round(endSec));
   return `${start}s–${end}s`;
 }
 
-function runMomentAction(moment: RunMomentInsight): string {
+export function runMomentAction(moment: RunMomentInsight): string {
   switch (moment.id) {
     case "moment-late-spm-fade":
       return moment.level === "warning"
@@ -1254,23 +1355,6 @@ function groupIntoPlayBlocks<T extends SessionRecord>(sorted: T[]): PlayBlock<T>
   }
   blocks.push({ sessions: current, gapBeforeMs: blockGap });
   return blocks;
-}
-
-function describeWarmupSettleIn(avgWarmupSessions: number): string {
-  if (avgWarmupSessions <= 0.75) return "the first run";
-  if (avgWarmupSessions <= 1.5) return "about the first run";
-  if (avgWarmupSessions <= 2.5) return "about the first 2 runs";
-  return `about the first ${Math.ceil(avgWarmupSessions)} runs`;
-}
-
-function describeWarmupAction(avgWarmupSessions: number): string {
-  if (avgWarmupSessions <= 1) {
-    return "A short 2-3 minute primer on an easy tracking or large-target clicking scenario should be enough before serious attempts.";
-  }
-  if (avgWarmupSessions <= 2) {
-    return "Use a brief ramp before your main scenario: easy tracking, then medium flicks, then your main task once the cursor feels settled.";
-  }
-  return "Your warm-up window is longer than ideal. Start each block with a deliberate 2-3 scenario ramp that climbs toward your main task instead of opening cold on score attempts.";
 }
 
 /**
@@ -1877,12 +1961,16 @@ function OverviewTab({
   best,
   warmupIds,
   onJumpToReplay,
+  benchmarkRanks = [],
+  thresholdLines = [],
 }: {
   records: SessionRecord[];
   sorted: SessionRecord[];
   best: number;
   warmupIds: Set<string>;
   onJumpToReplay: (sessionId: string) => void;
+  benchmarkRanks?: HubScenarioBenchmarkRank[];
+  thresholdLines?: BenchmarkThresholdLine[];
 }) {
   const avgScore = mean(records.map((r) => r.score));
   const accRecords = records.filter((r) => r.accuracy > 0);
@@ -1906,9 +1994,9 @@ function OverviewTab({
 
   const chartData = sorted.map((r, i) => ({
     i: i + 1,
-    score: Math.round(r.score),
+    score: r.score,
     rolling: trendRolling[i],
-    trendLine: Math.round(trendIntercept + trendSlope * (i + 1)),
+    trendLine: trendIntercept + trendSlope * (i + 1),
     composite: r.smoothness?.composite != null ? +r.smoothness.composite.toFixed(1) : null,
     acc: r.stats_panel?.accuracy_pct != null ? +r.stats_panel.accuracy_pct.toFixed(1) : null,
     ttk: r.stats_panel?.avg_ttk_ms != null ? +r.stats_panel.avg_ttk_ms.toFixed(0) : null,
@@ -1946,7 +2034,7 @@ function OverviewTab({
         {avgAcc !== null && (
           <StatCard
             label="Avg Accuracy"
-            value={(avgAcc * 100).toFixed(1) + "%"}
+            value={avgAcc.toFixed(1) + "%"}
             accent="#a78bfa"
           />
         )}
@@ -1966,6 +2054,46 @@ function OverviewTab({
           />
         )}
       </div>
+
+      {/* Benchmark rank chips */}
+      {benchmarkRanks.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          {benchmarkRanks.map((rank) => {
+            const rankColor = resolveBenchmarkColor(
+              rank.scenarioRank?.color,
+              rank.scenarioRank?.rankName,
+              benchmarkPaletteIndex(rank.scenarioRank?.rankIndex),
+            );
+            return (
+              <div
+                key={rank.benchmarkId}
+                title={`${rank.benchmarkName} · ${rank.categoryName} · Score: ${Math.round(rank.scenarioScore)}`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  background: `linear-gradient(180deg, ${rankColor}12, rgba(255,255,255,0.03))`,
+                  border: `1px solid ${rankColor}55`,
+                  borderRadius: 8,
+                  padding: "5px 12px",
+                }}
+              >
+                <span style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                  {rank.benchmarkName}
+                </span>
+                <span style={{ fontSize: 12, fontWeight: 700, color: rankColor }}>
+                  {rank.scenarioRank?.rankName ?? "Unranked"}
+                </span>
+                {rank.leaderboardRank > 0 && (
+                  <span style={{ fontSize: 10, color: C.textFaint }}>
+                    #{rank.leaderboardRank}
+                  </span>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
 
       {/* Progress delta cards: later sessions vs earlier sessions */}
       {deltaCards.length > 1 && sorted.length >= 4 && (
@@ -2105,6 +2233,16 @@ function OverviewTab({
                 fill="rgba(255,255,255,0.04)"
               />
             )}
+            {thresholdLines.map((tl) => (
+              <ReferenceLine
+                key={`${tl.benchmarkName}-${tl.rankName}`}
+                y={tl.score}
+                stroke={tl.color || "#888888"}
+                strokeDasharray="4 3"
+                strokeOpacity={0.55}
+                label={{ value: tl.rankName, fill: tl.color || "#888888", fontSize: 9, position: "insideTopRight" }}
+              />
+            ))}
           </LineChart>
         </ResponsiveContainer>
       </div>
@@ -2182,7 +2320,7 @@ function OverviewTab({
                     )}
                   </td>
                   <td style={{ padding: "8px 4px", color: "rgba(255,255,255,0.6)" }}>
-                    {r.accuracy > 0 ? (r.accuracy * 100).toFixed(1) + "%" : "—"}
+                    {r.accuracy > 0 ? r.accuracy.toFixed(1) + "%" : "—"}
                   </td>
                   <td style={{ padding: "8px 4px", color: "rgba(255,255,255,0.55)" }}>
                     {r.kills > 0 ? r.kills : "—"}
@@ -2246,8 +2384,8 @@ function ScenarioComparisonCard({
     },
     {
       label: "Accuracy",
-      leftValue: left.avgAccuracy != null ? `${(left.avgAccuracy * 100).toFixed(1)}%` : "—",
-      rightValue: right.avgAccuracy != null ? `${(right.avgAccuracy * 100).toFixed(1)}%` : "—",
+      leftValue: left.avgAccuracy != null ? `${left.avgAccuracy.toFixed(1)}%` : "—",
+      rightValue: right.avgAccuracy != null ? `${right.avgAccuracy.toFixed(1)}%` : "—",
       leftRaw: left.avgAccuracy ?? -1,
       rightRaw: right.avgAccuracy ?? -1,
     },
@@ -3001,6 +3139,8 @@ function ReplayTab({
   const [replayPayload, setReplayPayload] = useState<ReplayPayloadData | null>(null);
   const [runSummary, setRunSummary] = useState<BridgeRunSnapshot | null>(null);
   const [runTimeline, setRunTimeline] = useState<BridgeRunTimelinePoint[]>([]);
+  const [runCoachingAnalysis, setRunCoachingAnalysis] = useState<SessionRunCoachingAnalysis | null>(null);
+  const [targetResponseAnalysis, setTargetResponseAnalysis] = useState<TargetResponseAnalysis | null>(null);
   const [shotTelemetry, setShotTelemetry] = useState<BridgeShotTelemetryEvent[]>([]);
   const [replayContextWindows, setReplayContextWindows] = useState<BridgeReplayContextWindow[]>([]);
   const [selectedContextKey, setSelectedContextKey] = useState<string | null>(null);
@@ -3017,6 +3157,8 @@ function ReplayTab({
       setReplayPayload(null);
       setRunSummary(null);
       setRunTimeline([]);
+      setRunCoachingAnalysis(null);
+      setTargetResponseAnalysis(null);
       setShotTelemetry([]);
       setReplayContextWindows([]);
       return () => {
@@ -3029,13 +3171,17 @@ function ReplayTab({
       invoke<ReplayPayloadData | null>("get_session_replay_payload", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeRunSnapshot | null>("get_session_run_summary", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeRunTimelinePoint[]>("get_session_run_timeline", { sessionId: selectedId }).catch(() => []),
+      invoke<SessionRunCoachingAnalysis | null>("get_session_run_coaching_analysis", { sessionId: selectedId }).catch(() => null),
+      invoke<TargetResponseAnalysis | null>("get_session_target_response_analysis", { sessionId: selectedId }).catch(() => null),
       invoke<BridgeShotTelemetryEvent[]>("get_session_shot_telemetry", { sessionId: selectedId }).catch(() => []),
       invoke<BridgeReplayContextWindow[]>("get_session_replay_context_windows", { sessionId: selectedId }).catch(() => []),
-    ]).then(([payload, summary, timeline, telemetry, contextWindows]) => {
+    ]).then(([payload, summary, timeline, coachingAnalysis, responseAnalysis, telemetry, contextWindows]) => {
       if (!active) return;
       setReplayPayload(payload);
       setRunSummary(summary);
       setRunTimeline(timeline);
+      setRunCoachingAnalysis(coachingAnalysis);
+      setTargetResponseAnalysis(responseAnalysis);
       setShotTelemetry(telemetry);
       setReplayContextWindows(contextWindows);
       setLoading(false);
@@ -3140,43 +3286,40 @@ function ReplayTab({
     () => (runSummary ? { ...runSummary, timeline: runTimeline } : null),
     [runSummary, runTimeline],
   );
+  const normalizedRunTimeline = useMemo(
+    () => normalizeBridgeRunTimeline(runTimeline),
+    [runTimeline],
+  );
   const selectedShotTiming = selectedRecord?.shot_timing ?? null;
   // const hasInGameTickStream =
   //   (runSnapshot?.tick_stream_v1?.keyframes?.length ?? 0) > 0
   //   || (runSnapshot?.tick_stream_v1?.deltas?.length ?? 0) > 0;
   const hasRunTimelineSignal = useMemo(
-    () => runTimeline.some((point) =>
-      point.score_per_minute != null
-      || point.kills_per_second != null
-      || point.accuracy_pct != null
-      || point.damage_efficiency != null,
+    () => normalizedRunTimeline.some((point) =>
+      point.scorePerMinute != null
+      || point.killsPerSecond != null
+      || point.accuracyPct != null
+      || point.damageEfficiency != null,
     ),
-    [runTimeline],
+    [normalizedRunTimeline],
   );
-  const runMoments = useMemo(
-    () => buildRunMomentInsights(runTimeline, runSnapshot?.duration_secs),
-    [runTimeline, runSnapshot?.duration_secs],
-  );
+  const runMoments = runCoachingAnalysis?.keyMoments ?? [];
   const runChartData = useMemo(
-    () => runTimeline.map((point) => ({
-      tSec: point.t_sec,
-      spm: point.score_per_minute,
-      kps: point.kills_per_second,
-      acc: point.accuracy_pct,
-      dmgEff: point.damage_efficiency,
+    () => normalizedRunTimeline.map((point) => ({
+      tSec: point.tSec,
+      spm: point.scorePerMinute,
+      kps: point.killsPerSecond,
+      acc: point.accuracyPct,
+      dmgEff: point.damageEfficiency,
     })),
-    [runTimeline],
+    [normalizedRunTimeline],
   );
-  const runAccuracy =
-    runSnapshot?.accuracy_pct
-    ?? (
-      runSnapshot?.shots_fired != null
-      && runSnapshot.shots_fired > 0
-      && runSnapshot.shots_hit != null
-      ? (runSnapshot.shots_hit / runSnapshot.shots_fired) * 100
-      : null
-    )
-    ?? (selectedRecord && selectedRecord.accuracy > 0 ? selectedRecord.accuracy * 100 : null);
+  const runAccuracy = normalizeAccuracyPct(
+    runSnapshot?.accuracy_pct,
+    runSnapshot?.shots_hit,
+    runSnapshot?.shots_fired,
+  )
+    ?? (selectedRecord && selectedRecord.accuracy > 0 ? selectedRecord.accuracy : null);
   const runDurationSecs = runSnapshot?.duration_secs ?? selectedRecord?.duration_secs ?? null;
   const runShotsToHit = runSnapshot?.avg_shots_to_hit ?? selectedShotTiming?.avg_shots_to_hit ?? null;
   const runCorrectiveRatio = runSnapshot?.corrective_shot_ratio ?? selectedShotTiming?.corrective_shot_ratio ?? null;
@@ -3630,19 +3773,25 @@ function ReplayTab({
     }
     return estimateReplayBridgeBaseTs(shotTelemetry, runTimeline);
   }, [runSnapshot?.started_at_bridge_ts_ms, runTimeline, shotTelemetry]);
-  const replaySelectionRange = useMemo(() => {
+  const selectedContextRunWindow = useMemo(() => {
     if (!selectedContextRow) return null;
     // Context row times are shot-relative (offset from shotTelemetryBaseTs = first shot's ts_ms).
-    // Position timestamps are run-relative (offset from replayBaseTs = started_at_bridge_ts_ms).
-    // Add the first-shot offset to convert shot-relative → run-relative before slicing positions.
+    // Target-response episode times and replay position timestamps are run-relative
+    // (offset from replayBaseTs = started_at_bridge_ts_ms).
+    // Add the first-shot offset to convert shot-relative → run-relative.
     const firstShotOffsetMs = Math.max(0, shotTelemetryBaseTs - replayBaseTs);
-    const startMs = selectedContextRow.startMs + firstShotOffsetMs;
-    const endMs = selectedContextRow.endMs + firstShotOffsetMs;
     return {
-      startMs: Math.max(0, startMs - 750),
-      endMs: endMs + 750,
+      startMs: selectedContextRow.startMs + firstShotOffsetMs,
+      endMs: selectedContextRow.endMs + firstShotOffsetMs,
     };
   }, [selectedContextRow, shotTelemetryBaseTs, replayBaseTs]);
+  const replaySelectionRange = useMemo(() => {
+    if (!selectedContextRunWindow) return null;
+    return {
+      startMs: Math.max(0, selectedContextRunWindow.startMs - 750),
+      endMs: selectedContextRunWindow.endMs + 750,
+    };
+  }, [selectedContextRunWindow]);
   const replayPayloadView = useMemo(() => {
     if (!replayPayload || !replaySelectionRange) return replayPayload;
     const positions = sliceRowsToRange(replayPayload.positions, replaySelectionRange.startMs, replaySelectionRange.endMs);
@@ -3690,6 +3839,70 @@ function ReplayTab({
     })),
     [visibleReplayContextCoaching],
   );
+  const visibleTargetResponseEpisodes = useMemo(() => {
+    const episodes = targetResponseAnalysis?.episodes ?? [];
+    if (!selectedContextRunWindow) return episodes;
+    return episodes.filter((episode) =>
+      rangesOverlap(episode.startMs, episode.endMs, selectedContextRunWindow.startMs, selectedContextRunWindow.endMs),
+    );
+  }, [selectedContextRunWindow, targetResponseAnalysis?.episodes]);
+  const targetResponseSummaryCards = useMemo(() => {
+    const summary = targetResponseAnalysis?.summary;
+    if (!summary) return [] as Array<{ label: string; value: string; sub?: string; accent: string }>;
+
+    const cards: Array<{ label: string; value: string; sub?: string; accent: string }> = [
+      {
+        label: "Episodes",
+        value: summary.episode_count.toLocaleString(),
+        sub: `${summary.path_change_count} path breaks · ${summary.target_switch_count} switches`,
+        accent: "#00b4ff",
+      },
+    ];
+
+    if (summary.avg_reaction_time_ms != null) {
+      cards.push({
+        label: "Reaction",
+        value: fmtLatencyMs(summary.avg_reaction_time_ms),
+        sub:
+          summary.avg_path_change_reaction_ms != null || summary.avg_target_switch_reaction_ms != null
+            ? `path ${fmtLatencyMs(summary.avg_path_change_reaction_ms)} · switch ${fmtLatencyMs(summary.avg_target_switch_reaction_ms)}`
+            : undefined,
+        accent: "#00f5a0",
+      });
+    }
+    if (summary.avg_pre_slowdown_reaction_ms != null) {
+      cards.push({
+        label: "Pre-slowdown",
+        value: fmtLatencyMs(summary.avg_pre_slowdown_reaction_ms),
+        accent: "#ffd166",
+      });
+    }
+    if (summary.avg_recovery_time_ms != null) {
+      cards.push({
+        label: "Recovery",
+        value: fmtLatencyMs(summary.avg_recovery_time_ms),
+        sub: summary.p90_recovery_time_ms != null ? `p90 ${fmtLatencyMs(summary.p90_recovery_time_ms)}` : undefined,
+        accent: "#ff9f43",
+      });
+    }
+    if (summary.stable_response_ratio != null) {
+      cards.push({
+        label: "Stable responses",
+        value: `${(summary.stable_response_ratio * 100).toFixed(0)}%`,
+        accent: "#a78bfa",
+      });
+    }
+    if (summary.avg_trigger_magnitude_deg != null) {
+      cards.push({
+        label: "Trigger size",
+        value: `${summary.avg_trigger_magnitude_deg.toFixed(1)}°`,
+        sub: summary.avg_peak_yaw_error_deg != null ? `peak err ${summary.avg_peak_yaw_error_deg.toFixed(1)}°` : undefined,
+        accent: "#00b4ff",
+      });
+    }
+
+    return cards;
+  }, [targetResponseAnalysis?.summary]);
 
   // In-game replay logic disabled for development. Logic is preserved but not executed.
   // const handlePlayInGameReplay = async () => {
@@ -3867,7 +4080,7 @@ function ReplayTab({
                       {fmtDuration(r.duration_secs)}
                     </td>
                     <td style={{ padding: "7px 4px", color: "rgba(255,255,255,0.5)" }}>
-                      {r.accuracy > 0 ? (r.accuracy * 100).toFixed(1) + "%" : "—"}
+                      {r.accuracy > 0 ? r.accuracy.toFixed(1) + "%" : "—"}
                     </td>
                     <td style={{ padding: "7px 4px", color: r.smoothness ? "#00b4ff" : "rgba(255,255,255,0.2)" }}>
                       {r.smoothness ? r.smoothness.composite.toFixed(1) : "—"}
@@ -4206,6 +4419,109 @@ function ReplayTab({
               </div>
 
               <div style={CHART_STYLE}>
+                <SectionTitle
+                  info={
+                    selectedContextRow
+                      ? `Showing extracted response episodes that overlap ${formatTelemetryWindowLabel(selectedContextRow.startMs, selectedContextRow.endMs)}.`
+                      : "Response episodes are extracted from replay tick data and mouse-path motion in Rust."
+                  }
+                >
+                  {selectedContextRow ? "Target response in this moment" : "Target response across the run"}
+                </SectionTitle>
+                {targetResponseAnalysis ? (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+                    {targetResponseSummaryCards.length > 0 && (
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                        {targetResponseSummaryCards.map((card) => (
+                          <StatCard
+                            key={card.label}
+                            label={card.label}
+                            value={card.value}
+                            sub={card.sub}
+                            accent={card.accent}
+                          />
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ fontSize: 11, color: "rgba(255,255,255,0.46)", lineHeight: 1.55 }}>
+                      Extracted {targetResponseAnalysis.episodeCount.toLocaleString()} response episodes with{" "}
+                      {targetResponseAnalysis.responseCoveragePct != null
+                        ? `${targetResponseAnalysis.responseCoveragePct.toFixed(0)}%`
+                        : "unknown"}{" "}
+                      coverage.
+                      {selectedContextRow
+                        ? ` ${visibleTargetResponseEpisodes.length.toLocaleString()} overlap the selected moment.`
+                        : ""}
+                    </div>
+                    {visibleTargetResponseEpisodes.length > 0 ? (
+                      <div style={{ overflowX: "auto" }}>
+                        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                          <thead>
+                            <tr style={{ color: "rgba(255,255,255,0.35)" }}>
+                              {["T", "Type", "Target", "Trigger", "Reaction", "Pre-slow", "Recovery", "Peak yaw", "Stable"].map((heading) => (
+                                <th
+                                  key={heading}
+                                  style={{
+                                    padding: "0 0 6px",
+                                    textAlign: "left",
+                                    fontWeight: 500,
+                                    borderBottom: "1px solid rgba(255,255,255,0.07)",
+                                  }}
+                                >
+                                  {heading}
+                                </th>
+                              ))}
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {visibleTargetResponseEpisodes.map((episode) => (
+                              <tr key={episode.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.52)" }}>
+                                  {formatTelemetryOffset(episode.startMs)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: episode.kind === "path_change" ? "#ff9f43" : "#00b4ff" }}>
+                                  {formatTargetResponseKind(episode.kind)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.72)" }}>
+                                  {episode.targetLabel}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.6)" }}>
+                                  {episode.triggerMagnitudeDeg != null ? `${episode.triggerMagnitudeDeg.toFixed(1)}°` : "—"}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "#00f5a0" }}>
+                                  {fmtLatencyMs(episode.reactionTimeMs)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "#ffd166" }}>
+                                  {fmtLatencyMs(episode.preSlowdownReactionMs)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "#ff9f43" }}>
+                                  {fmtLatencyMs(episode.recoveryTimeMs)}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: "rgba(255,255,255,0.6)" }}>
+                                  {episode.peakYawErrorDeg != null ? `${episode.peakYawErrorDeg.toFixed(1)}°` : "—"}
+                                </td>
+                                <td style={{ padding: "7px 8px 7px 0", color: episode.stableResponse ? "#00f5a0" : "#ff6b6b" }}>
+                                  {episode.stableResponse ? "Stable" : "Unsettled"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    ) : (
+                      <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
+                        No extracted target-response episodes overlap this moment.
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <div style={{ color: "rgba(255,255,255,0.45)", fontSize: 12, lineHeight: 1.6 }}>
+                    This replay does not have enough saved bot/tick telemetry to extract reaction and recovery episodes yet.
+                  </div>
+                )}
+              </div>
+
+              <div style={CHART_STYLE}>
                 <SectionTitle>{selectedContextRow ? "Shot detail in this moment" : "Shot detail across the run"}</SectionTitle>
                 {shotTelemetrySummary ? (
                   <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -4370,7 +4686,7 @@ function ReplayTab({
                             {moment.title}
                           </div>
                           <div style={{ fontSize: 11, color: "rgba(255,255,255,0.45)" }}>
-                            {formatRunWindow(moment.startSec, moment.endSec)}
+                            {formatUnifiedRunWindow(moment.startSec, moment.endSec)}
                           </div>
                         </div>
                         <div style={{ fontSize: 12, color: "rgba(255,255,255,0.62)", lineHeight: 1.55 }}>
@@ -4378,7 +4694,7 @@ function ReplayTab({
                         </div>
                         <div style={{ fontSize: 12, color: "rgba(255,255,255,0.78)", lineHeight: 1.55 }}>
                           <span style={{ color: "rgba(255,255,255,0.42)" }}>Action: </span>
-                          {runMomentAction(moment)}
+                          {buildUnifiedRunMomentAction(moment)}
                         </div>
                       </div>
                     ))}
@@ -4736,84 +5052,207 @@ function classifyAimStyle(fp: AimFingerprint, scenarioType: string): AimStyle {
 // ─── Coaching Cards ────────────────────────────────────────────────────────────
 
 interface CoachingCardData {
+  id?: string;
+  source?: "global" | "scenario";
   title: string;
   badge: string;
   badgeColor: string;
   body: string;
   tip: string;
   drills?: DrillRecommendation[];
+  confidence?: number;
+  signals?: string[];
 }
 
-function generateCoachingCards(
-  records: SessionRecord[],
-  sorted: SessionRecord[],
-  fingerprint: AimFingerprint | null,
-  scoreCV: number,
-  slope: number,
-  avgScoreVal: number,
-  isPlateau: boolean,
+function coachingCardFeedbackId(card: Pick<CoachingCardData, "id" | "title" | "badge">): string {
+  const explicitId = card.id?.trim();
+  if (explicitId) return explicitId;
+  return `legacy:${slugifyScenarioName(card.badge)}:${slugifyScenarioName(card.title)}`;
+}
+
+function coachingCardSignalKeys(
+  card: Pick<CoachingCardData, "signals" | "badge" | "title">,
+): string[] {
+  const explicitSignals = (card.signals ?? [])
+    .map((signal) => signal.trim())
+    .filter((signal) => signal.length > 0);
+  if (explicitSignals.length > 0) return explicitSignals;
+
+  const fallback = slugifyScenarioName(card.badge || card.title);
+  return fallback ? [fallback] : [];
+}
+
+interface ScenarioScoreBaseline {
+  medianScore: number;
+  sessionCount: number;
+  scenarioType: string;
+}
+
+interface NormalizedSessionSignal {
+  record: AnalyticsSessionRecord;
+  normalizedScore: number;
+  baseline: ScenarioScoreBaseline;
+}
+
+interface FamilyContrastPlan {
+  label: string;
+  drills: DrillRecommendation[];
+}
+
+function buildScenarioScoreBaselines(
+  records: AnalyticsSessionRecord[],
+): Map<string, ScenarioScoreBaseline> {
+  const grouped = new Map<string, {
+    scores: number[];
+    scenarioTypeCounts: Map<string, number>;
+  }>();
+
+  for (const record of records) {
+    if (!record.isReliableForAnalysis || !Number.isFinite(record.score) || record.score <= 0) continue;
+    const entry = grouped.get(record.normalizedScenario) ?? {
+      scores: [],
+      scenarioTypeCounts: new Map<string, number>(),
+    };
+    entry.scores.push(record.score);
+    const scenarioType = record.stats_panel?.scenario_type?.trim();
+    if (scenarioType && scenarioType !== "Unknown") {
+      entry.scenarioTypeCounts.set(
+        scenarioType,
+        (entry.scenarioTypeCounts.get(scenarioType) ?? 0) + 1,
+      );
+    }
+    grouped.set(record.normalizedScenario, entry);
+  }
+
+  const baselines = new Map<string, ScenarioScoreBaseline>();
+  for (const [scenario, entry] of grouped.entries()) {
+    if (entry.scores.length < 3) continue;
+    const sortedScores = [...entry.scores].sort((a, b) => a - b);
+    const scenarioType =
+      [...entry.scenarioTypeCounts.entries()]
+        .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0]
+      ?? "Unknown";
+    baselines.set(scenario, {
+      medianScore: percentileOf(sortedScores, 50),
+      sessionCount: entry.scores.length,
+      scenarioType,
+    });
+  }
+
+  return baselines;
+}
+
+function buildNormalizedSessionSignals(records: AnalyticsSessionRecord[]): NormalizedSessionSignal[] {
+  const baselines = buildScenarioScoreBaselines(records);
+  return records
+    .filter((record) => record.isReliableForAnalysis)
+    .map((record) => {
+      const baseline = baselines.get(record.normalizedScenario);
+      if (!baseline || baseline.medianScore <= 0) return null;
+      const normalizedScore = record.score / baseline.medianScore;
+      if (!Number.isFinite(normalizedScore) || normalizedScore <= 0) return null;
+      return {
+        record,
+        normalizedScore: clampNumber(normalizedScore, 0.2, 3),
+        baseline,
+      };
+    })
+    .filter((entry): entry is NormalizedSessionSignal => entry != null);
+}
+
+function contrastPlanForScenarioFamily(scenarioType: string): FamilyContrastPlan {
+  if (isTrackingScenario(scenarioType)) {
+    return {
+      label: "dynamic clicking or target switching",
+      drills: [
+        { label: "Pasu", query: "Pasu" },
+        { label: "1w4ts", query: "1w4ts" },
+        { label: "Floating Heads", query: "Floating Heads" },
+      ],
+    };
+  }
+  if (
+    isStaticClickingScenario(scenarioType)
+    || isDynamicClickingScenario(scenarioType)
+    || isTargetSwitchingScenario(scenarioType)
+  ) {
+    return {
+      label: "smooth tracking",
+      drills: [
+        { label: "Smoothbot", query: "Smoothbot" },
+        { label: "Air", query: "Air" },
+        { label: "Centering", query: "Centering" },
+      ],
+    };
+  }
+  if (isAccuracyScenario(scenarioType)) {
+    return {
+      label: "reactive clicking",
+      drills: [
+        { label: "Microshot", query: "Microshot" },
+        { label: "Tile Frenzy", query: "Tile Frenzy" },
+        { label: "1wall 6targets", query: "1wall 6targets" },
+      ],
+    };
+  }
+  return {
+    label: "a contrast family",
+    drills: [
+      { label: "Smoothbot", query: "Smoothbot" },
+      { label: "Pasu", query: "Pasu" },
+      { label: "Microshot", query: "Microshot" },
+    ],
+  };
+}
+
+export function generateGlobalCoachingCards(
+  records: AnalyticsSessionRecord[],
   practiceProfile: PracticeProfile | null,
-  scenarioType: string,
+  warmupIds: Set<string>,
 ): CoachingCardData[] {
+  const reliableSorted = [...records]
+    .filter((record) => record.isReliableForAnalysis)
+    .sort((a, b) => a.timestampMs - b.timestampMs);
+  if (reliableSorted.length < 6) return [];
+
+  const pushUnique = (cards: CoachingCardData[], card: CoachingCardData) => {
+    if (cards.some((existing) => existing.title === card.title)) return;
+    cards.push(card);
+  };
+
   const cards: CoachingCardData[] = [];
-  const panelRecords = records.filter((r) => r.stats_panel != null);
-  const shotTimingRecords = records.filter((r) => r.shot_timing != null);
-  const n = sorted.length;
-  const isTracking = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
+  const normalizedSignals = buildNormalizedSessionSignals(reliableSorted);
+  const settledSignals = normalizedSignals.filter((entry) => !warmupIds.has(entry.record.id));
 
-  const shotToHitVals = shotTimingRecords
-    .map((r) => r.shot_timing?.avg_shots_to_hit)
-    .filter((v): v is number => v != null && Number.isFinite(v));
-  const correctiveVals = shotTimingRecords
-    .map((r) => r.shot_timing?.corrective_shot_ratio)
-    .filter((v): v is number => v != null && Number.isFinite(v));
-  const fireToHitVals = shotTimingRecords
-    .map((r) => r.shot_timing?.avg_fire_to_hit_ms)
-    .filter((v): v is number => v != null && Number.isFinite(v));
-  const shotAvgShotsToHit = shotToHitVals.length > 0 ? mean(shotToHitVals) : null;
-  const shotAvgCorrective = correctiveVals.length > 0 ? mean(correctiveVals) : null;
-  const shotAvgFireToHit = fireToHitVals.length > 0 ? mean(fireToHitVals) : null;
-  const hasShotRecoverySignal = !isTracking
-    && shotTimingRecords.length >= 3
-    && (shotAvgShotsToHit != null || shotAvgCorrective != null || shotAvgFireToHit != null);
-
-  if (isPlateau)
-    cards.push({
-      title: "Plateau Detected",
-      badge: "Motor Learning",
-      badgeColor: "#ff9f43",
-      body: `Your last 7 sessions show minimal score movement (slope: ${slope > 0 ? "+" : ""}${Math.round(slope)} pts/run, low recent variance). This is completely normal — your nervous system needs new stimuli to adapt further. Grinding the same scenario will not break a plateau.`,
-      tip: "Switch to a harder scenario variant or cross-train on a different aim type (e.g. tracking → clicking) for 5–10 sessions, then return. Novel difficulty forces neural adaptation and produces fresh gains when you come back.",
-    });
-
-  if (scoreCV > 12 && n >= 5)
-    cards.push({
-      title: "High Score Variance",
-      badge: "Consistency Science",
-      badgeColor: "#ffd700",
-      body: `Your scores vary by ${scoreCV.toFixed(1)}% around your average (ideal: <8%). High variance typically signals inconsistent warm-up, mental state differences between sessions, or changing grip/posture.`,
-      tip: "Add 2–3 'warm-up only' runs before each real attempt. Research on motor skill shows consistent pre-performance routines reduce run-to-run variability by up to 30% by priming the correct movement patterns.",
-    });
-
-  const trendRecs = panelRecords.filter((r) => r.stats_panel?.accuracy_trend != null);
-  if (trendRecs.length >= 3) {
-    const avgTrend = mean(trendRecs.map((r) => r.stats_panel!.accuracy_trend!));
-    if (avgTrend < -5)
-      cards.push({
-        title: "Cognitive Fatigue Pattern",
-        badge: "Exercise Science",
-        badgeColor: "#ff6b6b",
-        body: `Your accuracy drops an average of ${Math.abs(avgTrend).toFixed(1)}% from the first half to the second half of sessions. Aim skill is among the first to degrade under cognitive load — your fine motor control deteriorates before you notice it consciously.`,
-        tip: "Cap continuous play at 45–60 minutes. Taking a 5-minute break every 20–25 minutes sustains performance significantly longer than marathon sessions. The break also accelerates within-session motor consolidation.",
-      });
-    else if (avgTrend > 5)
-      cards.push({
-        title: "Extended Warm-up Pattern",
-        badge: "Motor Activation",
-        badgeColor: "#00f5a0",
-        body: `Your accuracy improves ${avgTrend.toFixed(1)}% from session start to finish — your motor system takes time to fully activate. This means your early-session scores underrepresent your true skill level.`,
-        tip: "Add a dedicated warm-up before your main scenario: 2–3 minutes of easy tracking or large relaxed flicks. This pre-activates the motor cortex pathways used in aim and helps you peak sooner.",
-      });
+  if (normalizedSignals.length >= 8 && warmupIds.size >= 2) {
+    const warmupNorm = normalizedSignals
+      .filter((entry) => warmupIds.has(entry.record.id))
+      .map((entry) => entry.normalizedScore);
+    const settledNorm = normalizedSignals
+      .filter((entry) => !warmupIds.has(entry.record.id))
+      .map((entry) => entry.normalizedScore);
+    if (warmupNorm.length >= 3 && settledNorm.length >= 5) {
+      const warmupAvg = mean(warmupNorm);
+      const settledAvg = mean(settledNorm);
+      const dropPct = settledAvg > 0 ? ((settledAvg - warmupAvg) / settledAvg) * 100 : 0;
+      if (dropPct >= 6) {
+        pushUnique(cards, {
+          title: "Warm-up Tax Across Scenarios",
+          badge: "Readiness",
+          badgeColor: "#ffb400",
+          body: `Across recent scenarios, your opening runs land about ${dropPct.toFixed(0)}% below your own settled-in level once each run is normalized against that scenario's usual score band. The issue is not one bad scenario; it is global readiness.`,
+          tip: "Protect score attempts with a short 2-3 run ramp: easy tracking or wide targets, then medium-speed confirms, then serious attempts once the cursor feels settled.",
+        });
+      } else if (dropPct <= 1.5) {
+        pushUnique(cards, {
+          title: "You Ramp Quickly",
+          badge: "Readiness",
+          badgeColor: "#00f5a0",
+          body: "Your opening runs are already close to your own settled standard across different scenarios. That is a strong sign that your setup and pre-run routine are doing their job.",
+          tip: "Keep the routine stable. If you want more progress, spend the saved warm-up time on one focused mechanic block instead of adding random extra attempts.",
+        });
+      }
+    }
   }
 
   if (practiceProfile && practiceProfile.sessionCount >= 5) {
@@ -4823,214 +5262,193 @@ function generateCoachingCards(
     const distributedPattern = daysPerWeek >= 3.5 && avgBlockMinutes >= 12 && avgBlockMinutes <= 35;
 
     if (massedPattern) {
-      cards.push({
-        title: "Massed Practice Pattern",
-        badge: "Spacing Science",
+      pushUnique(cards, {
+        title: "Practice Density Is Hiding Progress",
+        badge: "Spacing",
         badgeColor: "#00b4ff",
-        body: `Your last ${practiceProfile.sessionCount} reliable runs are clustered into ${avgBlockMinutes.toFixed(0)}-minute play blocks across roughly ${daysPerWeek.toFixed(1)} active day${daysPerWeek >= 1.5 ? "s" : ""}/week. Long grind blocks can feel productive in the moment, but they also stack warm-up gains and fatigue together, which makes true progress harder to read.`,
-        tip: "Keep the volume, split the block. Converting one long grind into two 20–35 minute blocks on separate parts of the day or on adjacent days usually preserves effort while improving what actually sticks.",
+        body: `Recent work is concentrated into ${avgBlockMinutes.toFixed(0)}-minute blocks across about ${daysPerWeek.toFixed(1)} active day${daysPerWeek >= 1.5 ? "s" : ""}/week. That mixes warm-up gains and fatigue into the same block, which makes true improvement harder to read.`,
+        tip: "Keep the volume, split the block. Two shorter 20-35 minute sessions usually preserve effort better than one long grind and make your next-day quality easier to judge.",
       });
     } else if (distributedPattern) {
-      cards.push({
-        title: "Well-Spaced Practice",
-        badge: "Spacing Science",
+      pushUnique(cards, {
+        title: "Your Practice Cadence Is Healthy",
+        badge: "Spacing",
         badgeColor: "#00f5a0",
-        body: `Recent practice is spread across about ${daysPerWeek.toFixed(1)} active days/week with blocks averaging ${avgBlockMinutes.toFixed(0)} minutes. That is close to the range where the learning benefit of spacing shows up without paying too much warm-up or fatigue tax.`,
-        tip: "This is a good base. Keep block length stable and judge progress with next-day quality and consistency, not only with whether the final run of a long session sets a PB.",
-      });
-    } else {
-      cards.push({
-        title: "Practice Distribution Matters",
-        badge: "Spacing Science",
-        badgeColor: "#00b4ff",
-        body: `Your recent schedule is mixed: about ${daysPerWeek.toFixed(1)} active days/week and ${avgBlockMinutes.toFixed(0)} minutes per play block. There is probably some easy progress left on the table just from making your schedule a little more repeatable.`,
-        tip: "Nudge toward consistency before adding more volume. Aim for repeatable 20–35 minute blocks on 3–5 days/week, then compare your median score and variance after a week instead of chasing one-day highs.",
+        body: `You are practicing across about ${daysPerWeek.toFixed(1)} active days/week with blocks averaging ${avgBlockMinutes.toFixed(0)} minutes. That is a strong range for retaining skill without paying too much fatigue tax.`,
+        tip: "Use this structure as your base and adjust one variable at a time: either slightly more difficulty, slightly more contrast work, or slightly more deliberate warm-up, not all three at once.",
       });
     }
   }
 
-  if (hasShotRecoverySignal) {
-    const severe = (shotAvgShotsToHit != null && shotAvgShotsToHit > 1.75)
-      || (shotAvgCorrective != null && shotAvgCorrective > 0.48)
-      || (shotAvgFireToHit != null && shotAvgFireToHit > 320);
-    const mild = (shotAvgShotsToHit != null && shotAvgShotsToHit > 1.35)
-      || (shotAvgCorrective != null && shotAvgCorrective > 0.28)
-      || (shotAvgFireToHit != null && shotAvgFireToHit > 220);
-
-    if (severe) {
-      cards.push({
-        title: "Shot Recovery Bottleneck",
-        badge: "Shot Timing",
-        badgeColor: "#00b4ff",
-        body: `Your fired→hit data shows heavy recovery burden (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits, ${shotAvgFireToHit?.toFixed(0) ?? "—"}ms fired→hit). This is consistent with overflick + micro-correction before final confirmation.`,
-        tip: "Shift 10–15% focus from max flick speed to first-shot landing quality: brake earlier and fire once your crosshair settles. Track this card over sessions until shots/hit moves toward 1.2 or lower.",
-      });
-    } else if (mild) {
-      cards.push({
-        title: "Recoveries Still Costing Time",
-        badge: "Shot Timing",
-        badgeColor: "#00b4ff",
-        body: `Shot recovery is moderate (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits). Small overshoots are forcing extra correction before secure hits.`,
-        tip: "Use deceleration reps: finish flicks under control and prioritize first-shot confirmation, then add speed back gradually.",
-      });
-    } else {
-      cards.push({
-        title: "Strong First-Shot Conversion",
-        badge: "Shot Timing",
-        badgeColor: "#00f5a0",
-        body: `You convert efficiently after firing (${shotAvgShotsToHit?.toFixed(2) ?? "—"} shots/hit, ${shotAvgCorrective != null ? `${(shotAvgCorrective * 100).toFixed(0)}%` : "—"} corrective hits, ${shotAvgFireToHit?.toFixed(0) ?? "—"}ms fired→hit).`,
-        tip: "Keep this while increasing pace. Maintain control on shot entry so first-shot quality stays stable at higher speed.",
-      });
+  if (normalizedSignals.length >= 10) {
+    const recentSignals = normalizedSignals
+      .slice(-Math.min(normalizedSignals.length, 30))
+      .filter((entry) => entry.baseline.scenarioType !== "Unknown");
+    const familyCounts = new Map<string, number>();
+    for (const entry of recentSignals) {
+      familyCounts.set(
+        entry.baseline.scenarioType,
+        (familyCounts.get(entry.baseline.scenarioType) ?? 0) + 1,
+      );
+    }
+    const familyEntries = [...familyCounts.entries()].sort(
+      (a, b) => b[1] - a[1] || a[0].localeCompare(b[0]),
+    );
+    const totalFamilyRuns = familyEntries.reduce((sum, [, count]) => sum + count, 0);
+    const dominantFamily = familyEntries[0];
+    if (dominantFamily && totalFamilyRuns >= 10) {
+      const dominantShare = dominantFamily[1] / totalFamilyRuns;
+      if (dominantShare >= 0.58) {
+        const contrast = contrastPlanForScenarioFamily(dominantFamily[0]);
+        pushUnique(cards, {
+          title: "Practice Mix Is Too Narrow",
+          badge: "Transfer",
+          badgeColor: "#a78bfa",
+          body: `${Math.round(dominantShare * 100)}% of your recent reliable runs sit in ${SCENARIO_LABELS[dominantFamily[0]] ?? dominantFamily[0]}. That is enough to sharpen scenario familiarity, but it usually undertrains broader transfer.`,
+          tip: `Keep your main family, but insert one ${contrast.label} set after every 2-3 serious runs. The goal is not comfort inside the block; it is better retention and carryover when you come back.`,
+          drills: contrast.drills,
+        });
+      } else if (familyEntries.length >= 4 && dominantShare <= 0.4) {
+        pushUnique(cards, {
+          title: "Family Coverage Looks Balanced",
+          badge: "Transfer",
+          badgeColor: "#00f5a0",
+          body: `Recent practice is spread across ${familyEntries.length} scenario families without one family swallowing the block. That gives you useful interference without turning the session into noise.`,
+          tip: "Keep one primary focus for the day, but preserve this level of contrast work. Variety is helping your overall carryover, not just your score on one favorite scenario.",
+        });
+      }
     }
   }
 
-  if (!hasShotRecoverySignal && fingerprint && fingerprint.control < 45 && n >= 5) {
-    if (isTracking)
-      cards.push({
-        title: "Overshooting Your Targets",
-        badge: "Tracking Control",
-        badgeColor: "#00b4ff",
-        body: `Your control score is ${fingerprint.control}/100, indicating you frequently swing past or overshoot the target. In tracking, overshooting breaks continuous contact and forces a recovery — those recovery gaps are where you bleed score.`,
-        tip: "Try 'micro-pressure' drills: maintain the lightest possible grip and focus on matching the target's speed exactly rather than chasing it. Think of it as escorting the target, not hunting it. After a few sessions your brain starts predicting target movement instead of reacting to it.",
-      });
-    else
-      cards.push({
-        title: "Speed-Accuracy Tradeoff",
-        badge: "Biomechanics",
-        badgeColor: "#00b4ff",
-        body: `Your control score is ${fingerprint.control}/100, indicating frequent overshoot. Fitts' Law states that as movement amplitude and speed increase, endpoint accuracy decreases. You are currently on the speed-dominant side of this tradeoff.`,
-        tip: "Practice 'deceleration drills': flick toward a target but consciously brake 20–30% before the target. The cursor should arrive on the target, not blow past it. After ~3 sessions, this decelerative movement ingrains as muscle memory and your speed-accuracy balance improves.",
-      });
-  }
+  if (settledSignals.length >= 10) {
+    type NormalizedBlockRecord = AnalyticsSessionRecord & { normalizedScore: number };
+    const normalizedBlockRecords: NormalizedBlockRecord[] = settledSignals.map((entry) => ({
+      ...entry.record,
+      normalizedScore: entry.normalizedScore,
+    }));
+    const blocks = groupIntoPlayBlocks(normalizedBlockRecords);
 
-  if (fingerprint && fingerprint.rhythm < 40) {
-    if (isTracking)
-      cards.push({
-        title: "Choppy Tracking Speed",
-        badge: "Flow Training",
-        badgeColor: "#a78bfa",
-        body: `Your flow score is ${fingerprint.rhythm}/100 — your cursor speed is uneven across the target's movement. Choppy speed means you're constantly accelerating and braking, which leads to brief off-target moments and reduces your score window.`,
-        tip: "Run a slow, large-target tracking scenario with no time pressure. Focus only on keeping your cursor speed constant — imagine you're tracing a line at a fixed pace. This trains smooth speed regulation that then carries over to faster, more reactive scenarios.",
-      });
-    else
-      cards.push({
-        title: "Inconsistent Click Timing",
-        badge: "Rhythm Training",
-        badgeColor: "#a78bfa",
-        body: `Your rhythm score is ${fingerprint.rhythm}/100 — click timing varies significantly between shots. Studies on elite FPS players show consistent click timing correlates strongly with kill efficiency. Timing variation often means hesitating before each shot, which adds 50–150ms of latency.`,
-        tip: "Use click timing scenarios (KovaaK's has several) for 10 minutes per session. Build a consistent pre-shot commitment rhythm: acquire target → commit → click, without a hesitation gap between commit and click.",
-      });
-  }
+    const blockFadePcts: number[] = [];
+    const switchedScores: number[] = [];
+    const repeatedScores: number[] = [];
 
-  const controlAxis = fingerprint?.axes.find((axis) => axis.key === "control") ?? null;
-  const rhythmAxis = fingerprint?.axes.find((axis) => axis.key === "rhythm") ?? null;
-  const consistencyAxis = fingerprint?.axes.find((axis) => axis.key === "consistency") ?? null;
+    for (const block of blocks) {
+      const sessions = block.sessions;
+      const blockMinutes = sessions.reduce((sum, session) => sum + Math.max(0, session.duration_secs), 0) / 60;
+      if (sessions.length >= 4 && blockMinutes >= 12) {
+        const earlyAvg = mean(sessions.slice(0, Math.min(2, sessions.length)).map((session) => session.normalizedScore));
+        const lateAvg = mean(sessions.slice(-Math.min(2, sessions.length)).map((session) => session.normalizedScore));
+        if (earlyAvg > 0) {
+          blockFadePcts.push(((earlyAvg - lateAvg) / earlyAvg) * 100);
+        }
+      }
 
-  if (!isTracking && controlAxis && controlAxis.volatility >= 42) {
-    cards.push({
-      title: "Overshoot Bursts, Not Constant Drift",
-      badge: "Volatility",
-      badgeColor: "#ff9f43",
-      body: `Your overall control score is one thing, but the bigger issue is volatility: control swings ${controlAxis.volatility}/100 across recent sessions. That usually means some runs are clean while others contain short overshoot bursts that erase otherwise good pacing.`,
-      tip: "Use one repeatable entry cue for every serious run: same grip pressure, same pre-shot deceleration, same first target commitment. The goal is to make clean control reproducible, not just occasionally present.",
-    });
-  }
+      for (let index = 1; index < sessions.length; index += 1) {
+        const current = sessions[index];
+        const previous = sessions[index - 1];
+        if (current.normalizedScenario !== previous.normalizedScenario) {
+          switchedScores.push(current.normalizedScore);
+        } else {
+          repeatedScores.push(current.normalizedScore);
+        }
+      }
+    }
 
-  if (!isTracking && rhythmAxis && rhythmAxis.volatility >= 44) {
-    cards.push({
-      title: "Hesitation Spikes Between Shots",
-      badge: "Commitment",
-      badgeColor: "#ffd700",
-      body: `Your click rhythm is swingy from run to run (${rhythmAxis.volatility}/100 volatility). That pattern usually means you are not slow all the time; instead, you hesitate in pockets where target confirmation becomes uncertain.`,
-      tip: "Practice a fixed commit rule for one block: once the crosshair enters the acceptable target zone, fire immediately. Review whether this reduces the number of runs that feel sticky rather than simply slower.",
-    });
-  }
+    if (blockFadePcts.length >= 2) {
+      const avgFadePct = mean(blockFadePcts);
+      if (avgFadePct >= 5) {
+        pushUnique(cards, {
+          title: "Long Blocks Fade Late",
+          badge: "Endurance",
+          badgeColor: "#ff9f43",
+          body: `Across your longer practice blocks, settled runs finish about ${avgFadePct.toFixed(0)}% below the level you hit near the start of the block. That points to endurance or attention decay, not a lack of raw skill.`,
+          tip: "Treat the middle of the block as the scoring window. Once quality fades, swap into a lower-stakes drill or stop the block instead of grinding more serious attempts.",
+        });
+      } else if (avgFadePct <= 1.5 && practiceProfile?.avgBlockMinutes && practiceProfile.avgBlockMinutes >= 15) {
+        pushUnique(cards, {
+          title: "You Hold Quality Deep Into Blocks",
+          badge: "Endurance",
+          badgeColor: "#00f5a0",
+          body: "Your later settled runs stay close to your early-block standard even in longer sessions. That is a real endurance strength and gives you more freedom to train with volume.",
+          tip: "Use that endurance advantage on deliberate quality reps, not on mindless extra volume. Staying stable is most valuable when the later reps still have a purpose.",
+        });
+      }
+    }
 
-  if (isTracking && consistencyAxis && consistencyAxis.volatility >= 40) {
-    cards.push({
-      title: "Tracking Stability Swings",
-      badge: "Endurance",
-      badgeColor: "#a78bfa",
-      body: `Your tracking consistency changes sharply across recent sessions (${consistencyAxis.volatility}/100 volatility). This usually means your contact quality is good when fresh but degrades once reactivity or fatigue ramps up.`,
-      tip: "Add one endurance rep at the end of each block where the goal is not score, but keeping cursor speed smooth for the full run. Stable tracking under fatigue is the skill gap here.",
-    });
-  }
-
-  // Tracking-specific: target prediction card
-  if (isTracking && n >= 5 && fingerprint && fingerprint.decisiveness < 50)
-    cards.push({
-      title: "Reacting Instead of Predicting",
-      badge: "Tracking Skill",
-      badgeColor: "#ff9f43",
-      body: `Your decisiveness score (${fingerprint.decisiveness}/100) suggests you're chasing targets reactively — your cursor follows behind rather than leading. Elite trackers spend 60–70% of their time slightly ahead of the target, predicting movement rather than reacting to it.`,
-      tip: "In your next session, consciously try to 'lead' the target by a tiny amount. It will feel wrong at first, but it trains predictive tracking which is far more stable under fast or erratic movement. Start with scenarios using consistent target paths before applying it to erratic ones.",
-    });
-
-  if (fingerprint && fingerprint.precision < 50 && n >= 3)
-    cards.push({
-      title: "Wrist Stability & Path Efficiency",
-      badge: "Biomechanics",
-      badgeColor: "#ff9f43",
-      body: `Your precision score is ${fingerprint.precision}/100, suggesting curved or erratic cursor paths. This typically indicates forearm/wrist tension, a too-tight grip, or a sensitivity that's high relative to your mousepad size.`,
-      tip: "Try the 'loose grip' drill: hold your mouse with barely enough pressure to lift it. Play a tracking scenario for 5 minutes. This forces arm-driven movement instead of wrist micro-corrections, which dramatically reduces micro-tremor and improves path straightness.",
-    });
-
-  if (slope > avgScoreVal * 0.005 && n >= 10) {
-    const sessionsToNext = Math.round(avgScoreVal * 0.1 / slope);
-    if (sessionsToNext > 0 && sessionsToNext < 150)
-      cards.push({
-        title: "Active Improvement Phase",
-        badge: "Motor Learning",
-        badgeColor: "#00f5a0",
-        body: `You're gaining about ${Math.round(slope)} points per session. Improvement usually slows as skill rises, but right now you're still in a strong growth phase.`,
-        tip: `At this rate you'd reach +10% of your current average in ~${sessionsToNext} more sessions. To sustain the pace, incrementally increase scenario difficulty rather than grinding at the same challenge level. Comfortable practice produces diminishing returns.`,
-      });
-  }
-
-  if (practiceProfile && practiceProfile.sessionCount >= 8 && !isPlateau) {
-    const dominantPct = practiceProfile.dominantScenarioShare * 100;
-    const blockedPattern = practiceProfile.dominantScenarioShare >= 0.72
-      && practiceProfile.avgUniqueScenariosPerBlock < 2;
-    const interleavedPattern = practiceProfile.avgUniqueScenariosPerBlock >= 2.5
-      && practiceProfile.switchRate >= 0.3;
-
-    if (blockedPattern) {
-      cards.push({
-        title: "Blocked Practice Bias",
-        badge: "Skill Transfer",
-        badgeColor: "#a78bfa",
-        body: `${dominantPct.toFixed(0)}% of your last ${practiceProfile.sessionCount} reliable runs were ${practiceProfile.dominantScenario}, and most practice blocks stay on about ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenario. That usually feels smooth in the moment, but mixing in a contrast scenario tends to build stronger carryover.`,
-        tip: isTracking
-          ? "Keep your main tracking scenario, but after every 2–3 serious runs insert one contrasting clicking or precision scenario. Expect same-day scores to feel worse at first; the point is stronger retention when you come back."
-          : "Keep your main click scenario, but after every 2–3 serious runs insert one smooth tracking scenario. That extra retrieval cost is the part that improves transfer, even if the session feels less comfortable.",
-      });
-    } else if (interleavedPattern) {
-      cards.push({
-        title: "Interleaving Is Working",
-        badge: "Skill Transfer",
-        badgeColor: "#00f5a0",
-        body: `Your recent blocks average ${practiceProfile.avgUniqueScenariosPerBlock.toFixed(1)} scenarios, and you switch on about ${Math.round(practiceProfile.switchRate * 100)}% of runs inside a block. That is enough variety to challenge you without turning practice into chaos.`,
-        tip: "Judge this by next-day quality and in-game carryover, not only by whether every switch gives you an instant PB. A little variety often feels harder in the moment, but pays off later.",
-      });
-    } else {
-      cards.push({
-        title: "Add One Contrast Scenario",
-        badge: "Skill Transfer",
-        badgeColor: "#a78bfa",
-        body: `You have some variety (${practiceProfile.scenarioDiversity} scenarios across recent practice), but most blocks still revolve around one main task. That is a better base than pure grinding, yet probably not enough interference to maximize transfer.`,
-        tip: isTracking
-          ? "Upgrade one block each session into a simple triangle: tracking main set → clicking contrast set → tracking return set. That pattern gives you interleaving without blowing up your whole routine."
-          : "Upgrade one block each session into flicking main set → tracking contrast set → flicking return set. The return set is important because it tests whether the contrast work actually stabilized your mechanics.",
-      });
+    if (switchedScores.length >= 6 && repeatedScores.length >= 6) {
+      const switchedAvg = mean(switchedScores);
+      const repeatedAvg = mean(repeatedScores);
+      const switchPenaltyPct = repeatedAvg > 0 ? ((repeatedAvg - switchedAvg) / repeatedAvg) * 100 : 0;
+      if (switchPenaltyPct >= 5) {
+        pushUnique(cards, {
+          title: "Scenario Switches Still Cost You",
+          badge: "Context",
+          badgeColor: "#ffd700",
+          body: `Runs that follow a scenario change land about ${switchPenaltyPct.toFixed(0)}% below runs that stay on the same task, even after normalizing for each scenario's own score range. Right now the switch itself is expensive.`,
+          tip: "Use mini-blocks instead of single-run hopping: 2-3 reps on one task, then switch. That keeps some interleaving benefit without paying a reset cost every run.",
+        });
+      } else if (switchPenaltyPct <= 1.5 && (practiceProfile?.avgUniqueScenariosPerBlock ?? 0) >= 2) {
+        pushUnique(cards, {
+          title: "You Re-center Quickly After Switches",
+          badge: "Context",
+          badgeColor: "#00b4ff",
+          body: "Your run quality stays stable even when the block changes task. That is a strong sign that your fundamentals transfer cleanly instead of depending on scenario-specific rhythm.",
+          tip: "You can afford more contrast work than most players. Keep using controlled interleaving and judge it by next-day quality, not only by instant same-block peaks.",
+        });
+      }
     }
   }
 
-  return cards
-    .map((card) => ({
-      ...card,
-      drills: drillRecommendationsForCard(card.title, scenarioType),
-    }))
-    .slice(0, 7);
+  if (settledSignals.length >= 12) {
+    const settledNorm = settledSignals.map((entry) => entry.normalizedScore);
+    const normMean = mean(settledNorm);
+    const normCv = normMean > 0 ? (stddev(settledNorm) / normMean) * 100 : 0;
+    const window = Math.min(8, Math.max(4, Math.floor(settledSignals.length / 3)));
+    const recent = settledSignals.slice(-window).map((entry) => entry.normalizedScore);
+    const older = settledSignals.slice(-window * 2, -window).map((entry) => entry.normalizedScore);
+    if (older.length === window && recent.length === window) {
+      const olderAvg = mean(older);
+      const recentAvg = mean(recent);
+      const recentDeltaPct = olderAvg > 0 ? ((recentAvg - olderAvg) / olderAvg) * 100 : 0;
+      if (recentDeltaPct >= 4) {
+        pushUnique(cards, {
+          title: "Cross-Scenario Form Is Rising",
+          badge: "Momentum",
+          badgeColor: "#00f5a0",
+          body: `Your last ${window} settled runs are about ${recentDeltaPct.toFixed(0)}% stronger than the ${window} before them after normalizing for each scenario. That means the improvement is carrying across tasks, not staying trapped inside one score line.`,
+          tip: "This is the moment to raise difficulty slightly or tighten one technical focus. The carryover is real, so you can challenge it without losing the trend.",
+        });
+      } else if (recentDeltaPct <= -4) {
+        pushUnique(cards, {
+          title: "Global Form Has Cooled Off",
+          badge: "Momentum",
+          badgeColor: "#ff6b6b",
+          body: `Your last ${window} settled runs are about ${Math.abs(recentDeltaPct).toFixed(0)}% weaker than the ${window} before them across mixed scenarios. That usually points to fatigue, inconsistency, or too much change at once.`,
+          tip: "Run a reset week: keep volume steady, simplify the scenario rotation, and lock in one mechanic focus. The goal is to get your normal level back before adding more difficulty.",
+        });
+      } else if (normCv >= 12) {
+        pushUnique(cards, {
+          title: "Execution Is Swingy Across Scenarios",
+          badge: "Consistency",
+          badgeColor: "#ff9f43",
+          body: `Even after normalizing per scenario, your settled runs still swing by about ${normCv.toFixed(0)}%. That means the inconsistency is coming from your overall execution, not just from which scenario you queued.`,
+          tip: "Tighten the repeatables first: same warm-up, same seating and grip, same first-block structure, and one focus cue for the whole session.",
+        });
+      }
+    }
+  }
+
+  if (cards.length === 0) {
+    cards.push({
+      title: "Global Practice Looks Stable",
+      badge: "Baseline",
+      badgeColor: "#00f5a0",
+      body: "Recent practice does not show a single major cross-scenario leak. Your training structure, readiness, and carryover look reasonably healthy from the data we have.",
+      tip: "Keep the routine steady and push one lever at a time: slightly harder scenarios, slightly cleaner execution, or slightly better spacing between blocks.",
+    });
+  }
+
+  return cards.slice(0, 5);
 }
 
 function PracticeProfilePanel({ practiceProfile }: { practiceProfile: PracticeProfile }) {
@@ -5149,11 +5567,23 @@ function PracticeProfilePanel({ practiceProfile }: { practiceProfile: PracticePr
 function CoachingCard({
   card,
   onExploreDrill,
+  feedback,
+  onFeedback,
+  snapshotKind,
 }: {
   card: CoachingCardData;
   onExploreDrill: (query: string) => void;
+  feedback?: CoachingCardFeedback | null;
+  onFeedback?: ((snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void) | null;
+  snapshotKind?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const feedbackOptions: Array<{ value: CoachingCardFeedback; label: string; color: string }> = [
+    { value: "helpful", label: "Helpful", color: "#00f5a0" },
+    { value: "trying", label: "Trying It", color: "#00b4ff" },
+    { value: "not_now", label: "Not Now", color: "#ffd700" },
+    { value: "not_for_me", label: "Not For Me", color: "#ff9f43" },
+  ];
   return (
     <div
       style={{
@@ -5280,6 +5710,40 @@ function CoachingCard({
               </div>
             </div>
           )}
+          {onFeedback && snapshotKind && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+                Tailor this coaching
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                {feedbackOptions.map((option) => {
+                  const active = feedback === option.value;
+                  return (
+                    <button
+                      key={`${coachingCardFeedbackId(card)}:${option.value}`}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onFeedback(snapshotKind, card, option.value);
+                      }}
+                      style={{
+                        background: active ? `${option.color}18` : "rgba(255,255,255,0.05)",
+                        border: `1px solid ${active ? `${option.color}66` : C.border}`,
+                        borderRadius: 999,
+                        color: active ? option.color : C.textSub,
+                        cursor: "pointer",
+                        fontSize: 11,
+                        padding: "6px 10px",
+                        fontFamily: "inherit",
+                      }}
+                    >
+                      {option.label}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -5388,18 +5852,50 @@ function ScoreDistributionChart({
 function CoachingTab({
   records,
   sorted,
-  practiceProfile,
   warmupIds,
+  scenarioName,
+  dateRange,
   sessionFilter,
   onExploreDrill,
+  feedbackRows,
+  onFeedback,
 }: {
   records: AnalyticsSessionRecord[];
   sorted: AnalyticsSessionRecord[];
-  practiceProfile: PracticeProfile | null;
   warmupIds: Set<string>;
+  scenarioName: string;
+  dateRange: DateRangePreset;
   sessionFilter: SessionFilter;
   onExploreDrill: (query: string) => void;
+  feedbackRows: CoachingUserFeedbackRecord[];
+  onFeedback: (snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void;
 }) {
+  const [scenarioCoachingOverview, setScenarioCoachingOverview] = useState<ScenarioCoachingOverview | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void invoke<ScenarioCoachingOverview>("get_scenario_coaching_overview", {
+      scenarioName,
+      dateRange: dateRange === "all" ? null : dateRange,
+    })
+      .then((overview) => {
+        if (!cancelled) {
+          setScenarioCoachingOverview(overview);
+        }
+      })
+      .catch((error) => {
+        console.warn("Could not load Rust scenario coaching overview", error);
+        if (!cancelled) {
+          setScenarioCoachingOverview(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dateRange, scenarioName]);
+
   // CoachingTab always works on the full dataset and handles splits internally.
   const warmupSorted  = sorted.filter((r) => warmupIds.has(r.id));
   const peakSorted    = sorted.filter((r) => !warmupIds.has(r.id));
@@ -5426,17 +5922,12 @@ function CoachingTab({
   }
 
   // ── Peak performance stats ────────────────────────────────────────────────
-  const avgScoreVal  = scores.length > 0 ? mean(scores) : 0;
-  const scoreStdDev  = stddev(scores);
-  const scoreCV      = avgScoreVal > 0 ? (scoreStdDev / avgScoreVal) * 100 : 0;
-  const xs           = scores.map((_, i) => i + 1);
-  const { slope }    = linearRegression(xs, scores);
-  const slopeNormPct = avgScoreVal > 0 ? (slope / avgScoreVal) * 100 : 0;
-  const recent7      = scores.slice(-7);
-  const recentCV     = mean(recent7) > 0 ? (stddev(recent7) / mean(recent7)) * 100 : 0;
-  const isPlateau    = scores.length >= 8 && Math.abs(slopeNormPct) < 0.5 && recentCV < 8;
-
-  const scenarioType = dominantScenarioType(coachRecords);
+  const avgScoreVal = scenarioCoachingOverview?.avgScore ?? (scores.length > 0 ? mean(scores) : 0);
+  const localScoreStdDev = stddev(scores);
+  const localScoreCV = avgScoreVal > 0 ? (localScoreStdDev / avgScoreVal) * 100 : 0;
+  const xs = scores.map((_, i) => i + 1);
+  const { slope: localSlope } = linearRegression(xs, scores);
+  const scenarioType = scenarioCoachingOverview?.scenarioType ?? dominantScenarioType(coachRecords);
   const isTracking   = scenarioType === "PureTracking" || scenarioType.includes("Tracking");
 
   const fingerprint  = smoothRecords.length > 0 ? buildAimFingerprint(smoothRecords, scenarioType) : null;
@@ -5461,53 +5952,16 @@ function CoachingTab({
       ]
     : [];
 
-  const coachingCards = scores.length >= 3 ? generateCoachingCards(
-    coachRecords,
-    coachSorted,
-    fingerprint,
-    scoreCV,
-    slope,
-    avgScoreVal,
-    isPlateau,
-    practiceProfile,
-    scenarioType,
-  ) : [];
+  const scoreCV = scenarioCoachingOverview?.scoreCvPct ?? localScoreCV;
+  const slope = scenarioCoachingOverview?.slopePtsPerRun ?? localSlope;
+  const isPlateau = scenarioCoachingOverview?.isPlateau ?? false;
+  const coachingCards = scenarioCoachingOverview?.coachingCards ?? [];
 
   const sortedScores = [...scores].sort((a, b) => a - b);
-  const p10 = percentileOf(sortedScores, 10);
-  const p50 = percentileOf(sortedScores, 50);
-  const p90 = percentileOf(sortedScores, 90);
-
-  // ── Warmup stats ──────────────────────────────────────────────────────────
-  const warmupStats = (() => {
-    if (!hasWarmupData) return null;
-    const warmupScores = warmupSorted.map((r) => r.score);
-    const peakScores   = peakSorted.map((r) => r.score);
-    const warmupAvg    = mean(warmupScores);
-    const peakAvg      = peakScores.length > 0 ? mean(peakScores) : 0;
-    const dropPct      = peakAvg > 0 ? Math.max(0, ((peakAvg - warmupAvg) / peakAvg) * 100) : 0;
-
-    // Count average warmup sessions across any block where a warmup effect was detected.
-    const blocks = groupIntoPlayBlocks(sorted);
-    const warmupBlocks = blocks.filter(
-      (b) => b.sessions.some((s) => warmupIds.has(s.id)),
-    );
-    const avgWarmupSessions = warmupBlocks.length > 0
-      ? warmupBlocks.reduce(
-          (sum, b) => sum + b.sessions.filter((s) => warmupIds.has(s.id)).length, 0,
-        ) / warmupBlocks.length
-      : 0;
-
-    return {
-      warmupAvg,
-      peakAvg,
-      dropPct,
-      avgWarmupSessions,
-      blockCount: warmupBlocks.length,
-      settleInLabel: describeWarmupSettleIn(avgWarmupSessions),
-      action: describeWarmupAction(avgWarmupSessions),
-    };
-  })();
+  const p10 = scenarioCoachingOverview?.p10Score ?? (sortedScores.length > 0 ? percentileOf(sortedScores, 10) : 0);
+  const p50 = scenarioCoachingOverview?.p50Score ?? (sortedScores.length > 0 ? percentileOf(sortedScores, 50) : 0);
+  const p90 = scenarioCoachingOverview?.p90Score ?? (sortedScores.length > 0 ? percentileOf(sortedScores, 90) : 0);
+  const warmupStats = scenarioCoachingOverview?.warmupStats ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -5681,7 +6135,16 @@ function CoachingTab({
         <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
           <SectionTitle>Coaching Insights — click any card to expand</SectionTitle>
           {coachingCards.map((card, i) => (
-            <CoachingCard key={i} card={card} onExploreDrill={onExploreDrill} />
+            <CoachingCard
+              key={i}
+              card={card}
+              onExploreDrill={onExploreDrill}
+              feedback={
+                feedbackRows.find((row) => row.snapshotKind === "scenario_coaching" && row.recommendationId === coachingCardFeedbackId(card))?.feedback ?? null
+              }
+              onFeedback={onFeedback}
+              snapshotKind="scenario_coaching"
+            />
           ))}
         </div>
       )}
@@ -5759,11 +6222,18 @@ function SessionsOverviewPanel({
   records,
   scenarioGroups,
   practiceProfile,
+  globalLearningState,
+  globalCoachingCards,
   compareScenario,
   selectedScenario,
   compareSummary,
   selectedSummary,
   onCompareScenarioChange,
+  onExploreDrill,
+  playerLearningProfile,
+  coachingPersistenceStatus,
+  feedbackRows,
+  onFeedback,
 }: {
   records: AnalyticsSessionRecord[];
   scenarioGroups: Array<{
@@ -5778,11 +6248,18 @@ function SessionsOverviewPanel({
     scenarioType: string;
   }>;
   practiceProfile: PracticeProfile | null;
+  globalLearningState: GlobalCoachingLearningState | null;
+  globalCoachingCards: CoachingCardData[];
   compareScenario: string | null;
   selectedScenario: string | null;
   compareSummary: ScenarioSummary | null;
   selectedSummary: ScenarioSummary | null;
   onCompareScenarioChange: (value: string | null) => void;
+  onExploreDrill: (query: string) => void;
+  playerLearningProfile?: PlayerLearningProfile | null;
+  coachingPersistenceStatus?: CoachingPersistenceStatus | null;
+  feedbackRows: CoachingUserFeedbackRecord[];
+  onFeedback: (snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void;
 }) {
   const reliable = useMemo(
     () => records.filter((record) => record.isReliableForAnalysis),
@@ -5871,7 +6348,188 @@ function SessionsOverviewPanel({
           </div>
         )}
       </div>
+      {globalCoachingCards.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <SectionTitle>Global Coaching</SectionTitle>
+          {globalLearningState && (
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {[
+                globalLearningState.warmupTaxPct != null
+                  ? {
+                      label: "Warm-up Tax",
+                      value: `${globalLearningState.warmupTaxPct >= 0 ? "" : "+"}${globalLearningState.warmupTaxPct.toFixed(0)}%`,
+                      accent: globalLearningState.warmupTaxPct >= 6 ? "#ffb400" : "#00f5a0",
+                    }
+                  : null,
+                globalLearningState.switchPenaltyPct != null
+                  ? {
+                      label: "Switch Cost",
+                      value: `${globalLearningState.switchPenaltyPct.toFixed(0)}%`,
+                      accent: globalLearningState.switchPenaltyPct >= 5 ? "#ffd700" : "#00b4ff",
+                    }
+                  : null,
+                globalLearningState.avgBlockFadePct != null
+                  ? {
+                      label: "Late Block Fade",
+                      value: `${globalLearningState.avgBlockFadePct.toFixed(0)}%`,
+                      accent: globalLearningState.avgBlockFadePct >= 5 ? "#ff9f43" : "#00f5a0",
+                    }
+                  : null,
+                globalLearningState.retentionAfterGapPct != null
+                  ? {
+                      label: "Retention After Breaks",
+                      value: `${globalLearningState.retentionAfterGapPct.toFixed(0)}%`,
+                      accent: globalLearningState.retentionAfterGapPct >= 98 ? "#00f5a0" : globalLearningState.retentionAfterGapPct < 92 ? "#ff6b6b" : "#00b4ff",
+                    }
+                  : null,
+                globalLearningState.momentumDeltaPct != null
+                  ? {
+                      label: "Momentum",
+                      value: `${globalLearningState.momentumDeltaPct >= 0 ? "+" : ""}${globalLearningState.momentumDeltaPct.toFixed(0)}%`,
+                      accent: globalLearningState.momentumDeltaPct >= 4 ? "#00f5a0" : globalLearningState.momentumDeltaPct <= -4 ? "#ff6b6b" : "#ffd700",
+                    }
+                  : null,
+              ]
+                .filter((entry): entry is { label: string; value: string; accent: string } => entry != null)
+                .map((entry) => (
+                  <StatCard
+                    key={entry.label}
+                    label={entry.label}
+                    value={entry.value}
+                    accent={entry.accent}
+                  />
+                ))}
+            </div>
+          )}
+          {globalCoachingCards.map((card, index) => (
+            <CoachingCard
+              key={`global-${index}`}
+              card={card}
+              onExploreDrill={onExploreDrill}
+                feedback={
+                  feedbackRows.find((row) => row.snapshotKind === "player_learning_profile" && row.recommendationId === coachingCardFeedbackId(card))?.feedback ?? null
+                }
+              onFeedback={onFeedback}
+              snapshotKind="player_learning_profile"
+            />
+          ))}
+        </div>
+      )}
+      {playerLearningProfile && <PlayerLearningProfilePanel profile={playerLearningProfile} />}
+      {coachingPersistenceStatus && <CoachingEvaluationLoopPanel status={coachingPersistenceStatus} />}
       {practiceProfile && <PracticeProfilePanel practiceProfile={practiceProfile} />}
+    </div>
+  );
+}
+
+function PlayerLearningProfilePanel({ profile }: { profile: PlayerLearningProfile }) {
+  return (
+    <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 14 }}>
+      <SectionTitle>Unified Learning Model</SectionTitle>
+      <div style={{ fontSize: 13, color: C.textSub, lineHeight: 1.7 }}>
+        {profile.summary}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {profile.strengths.map((signal) => (
+          <div
+            key={`strength-${signal.key}`}
+            style={{
+              padding: "8px 10px",
+              borderRadius: 12,
+              border: "1px solid rgba(0,245,160,0.22)",
+              background: "rgba(0,245,160,0.08)",
+              minWidth: 180,
+              flex: "1 1 180px",
+            }}
+          >
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.8 }}>
+              Strength
+            </div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 700, color: C.text }}>
+              {signal.label}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              {signal.detail}
+            </div>
+          </div>
+        ))}
+        {profile.constraints.map((signal) => (
+          <div
+            key={`constraint-${signal.key}`}
+            style={{
+              padding: "8px 10px",
+              borderRadius: 12,
+              border: "1px solid rgba(255,159,67,0.22)",
+              background: "rgba(255,159,67,0.08)",
+              minWidth: 180,
+              flex: "1 1 180px",
+            }}
+          >
+            <div style={{ fontSize: 10, color: "rgba(255,255,255,0.5)", textTransform: "uppercase", letterSpacing: 0.8 }}>
+              Bottleneck
+            </div>
+            <div style={{ marginTop: 4, fontSize: 13, fontWeight: 700, color: C.text }}>
+              {signal.label}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              {signal.detail}
+            </div>
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10 }}>
+        {profile.axes.map((axis) => (
+          <div
+            key={axis.key}
+            style={{
+              padding: "10px 12px",
+              borderRadius: 12,
+              border: `1px solid ${C.border}`,
+              background: "rgba(255,255,255,0.02)",
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: C.text }}>{axis.label}</span>
+              <span style={{ fontSize: 12, color: C.textSub }}>{Math.round(axis.valuePct)}%</span>
+            </div>
+            <div style={{ marginTop: 8, height: 6, borderRadius: 999, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
+              <div
+                style={{
+                  width: `${axis.valuePct}%`,
+                  height: "100%",
+                  borderRadius: 999,
+                  background: axis.valuePct >= 60 ? "#00f5a0" : axis.valuePct <= 45 ? "#ff9f43" : "#00b4ff",
+                }}
+              />
+            </div>
+            <div style={{ marginTop: 8, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+              {axis.detail}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CoachingEvaluationLoopPanel({ status }: { status: CoachingPersistenceStatus }) {
+  return (
+    <div style={{ ...CHART_STYLE, display: "flex", flexDirection: "column", gap: 12 }}>
+      <SectionTitle>Coaching Evaluation Loop</SectionTitle>
+      <div style={{ fontSize: 13, color: C.textSub, lineHeight: 1.7 }}>
+        AimMod is now persisting the player-learning snapshot and tracking whether recommendation-linked metrics later improve, stall, or regress.
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <StatCard label="Pending Follow-up" value={status.pendingCount.toString()} accent="#ffd700" />
+        <StatCard label="Improved" value={status.improvedCount.toString()} accent="#00f5a0" />
+        <StatCard label="Flat" value={status.flatCount.toString()} accent="#00b4ff" />
+        <StatCard label="Regressed" value={status.regressedCount.toString()} accent="#ff6b6b" />
+      </div>
+      {status.snapshotUpdatedAtMs != null && (
+        <div style={{ fontSize: 11, color: C.textFaint }}>
+          Last learning snapshot: {new Date(status.snapshotUpdatedAtMs).toLocaleString()}
+        </div>
+      )}
     </div>
   );
 }
@@ -6048,20 +6706,437 @@ function HubOverviewPanel({
   );
 }
 
+// ─── Benchmarks tab ───────────────────────────────────────────────────────────
+
+function BenchmarksTab({
+  scenarioName,
+  sorted,
+  best,
+  benchmarkRanks,
+  benchmarkPages,
+  loading,
+  hubHandle,
+}: {
+  scenarioName: string;
+  sorted: SessionRecord[];
+  best: number;
+  benchmarkRanks: HubScenarioBenchmarkRank[];
+  benchmarkPages: HubBenchmarkPageResponse[];
+  loading: boolean;
+  hubHandle: string | null;
+}) {
+  const [favoriteBenchmarkIds, setFavoriteBenchmarkIds] = useState<number[]>(
+    () => readStoredNumberArray(STATS_WINDOW_STORAGE_KEYS.favoriteBenchmarks),
+  );
+
+  useEffect(() => {
+    writeStoredNumberArray(STATS_WINDOW_STORAGE_KEYS.favoriteBenchmarks, favoriteBenchmarkIds);
+  }, [favoriteBenchmarkIds]);
+
+  const benchmarkScenarioEntries = useMemo(() => {
+    const map = new Map<number, HubBenchmarkScenarioEntry>();
+    for (const page of benchmarkPages) {
+      for (const cat of page.categories) {
+        const entry = cat.scenarios.find(
+          (s) => s.scenarioName.toLowerCase() === scenarioName.toLowerCase(),
+        );
+        if (entry) {
+          map.set(page.benchmarkId, entry);
+          break;
+        }
+      }
+    }
+    return map;
+  }, [benchmarkPages, scenarioName]);
+
+  const favoriteSet = useMemo(() => new Set(favoriteBenchmarkIds), [favoriteBenchmarkIds]);
+
+  const orderedBenchmarkRanks = useMemo(() => {
+    return [...benchmarkRanks].sort((a, b) => {
+      const aFavorite = favoriteSet.has(a.benchmarkId) ? 1 : 0;
+      const bFavorite = favoriteSet.has(b.benchmarkId) ? 1 : 0;
+      if (aFavorite !== bFavorite) return bFavorite - aFavorite;
+      const aRankIndex = a.scenarioRank?.rankIndex ?? -1;
+      const bRankIndex = b.scenarioRank?.rankIndex ?? -1;
+      if (aRankIndex !== bRankIndex) return bRankIndex - aRankIndex;
+      return a.benchmarkName.localeCompare(b.benchmarkName);
+    });
+  }, [benchmarkRanks, favoriteSet]);
+
+  function getRankForScore(score: number, thresholds: HubBenchmarkThreshold[]): HubBenchmarkThreshold | null {
+    const desc = [...thresholds].sort((a, b) => b.score - a.score);
+    return desc.find((t) => score >= t.score) ?? null;
+  }
+
+  function imageUrl(value?: string | null): string {
+    return value?.trim() ? value : "";
+  }
+
+  function toggleFavorite(benchmarkId: number) {
+    setFavoriteBenchmarkIds((current) =>
+      current.includes(benchmarkId)
+        ? current.filter((id) => id !== benchmarkId)
+        : [...current, benchmarkId],
+    );
+  }
+
+  if (!hubHandle) {
+    return (
+      <div style={{ ...CHART_STYLE, color: C.textFaint, fontSize: 12, textAlign: "center", padding: "32px 20px" }}>
+        Link your AimMod Hub account in Settings to see benchmark ranks for this scenario.
+      </div>
+    );
+  }
+
+  if (loading) {
+    return (
+      <div style={{ ...CHART_STYLE, color: C.textFaint, fontSize: 12, textAlign: "center", padding: "32px 20px" }}>
+        Loading benchmark data…
+      </div>
+    );
+  }
+
+  if (orderedBenchmarkRanks.length === 0) {
+    return (
+      <div style={{ ...CHART_STYLE, color: C.textFaint, fontSize: 12, textAlign: "center", padding: "32px 20px" }}>
+        This scenario is part of a benchmark, but no benchmark ranks are showing yet. Play it and sync to AimMod Hub to load your benchmark progress.
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+      {orderedBenchmarkRanks.map((rank) => {
+        const entry = benchmarkScenarioEntries.get(rank.benchmarkId);
+        const thresholds = entry?.thresholds ?? [];
+        const sortedThresholds = [...thresholds].sort((a, b) => a.score - b.score);
+        const bestThreshold = getRankForScore(best, thresholds);
+        const favorited = favoriteSet.has(rank.benchmarkId);
+        const thresholdColors = new Map(
+          sortedThresholds.map((threshold, index) => [
+            threshold.rankIndex,
+            resolveBenchmarkColor(threshold.color, threshold.rankName, index),
+          ]),
+        );
+        const rankThreshold = rank.scenarioRank
+          ? sortedThresholds.find((threshold) => threshold.rankIndex === rank.scenarioRank?.rankIndex) ?? null
+          : null;
+        const rankColor = resolveBenchmarkColor(
+          rank.scenarioRank?.color ?? rankThreshold?.color ?? bestThreshold?.color,
+          rank.scenarioRank?.rankName ?? rankThreshold?.rankName ?? bestThreshold?.rankName,
+          rankThreshold
+            ? sortedThresholds.findIndex((threshold) => threshold.rankIndex === rankThreshold.rankIndex)
+            : benchmarkPaletteIndex(rank.scenarioRank?.rankIndex),
+        );
+        const bestThresholdColor = bestThreshold
+          ? thresholdColors.get(bestThreshold.rankIndex)
+            ?? resolveBenchmarkColor(bestThreshold.color, bestThreshold.rankName, benchmarkPaletteIndex(bestThreshold.rankIndex))
+          : null;
+
+        return (
+          <div
+            key={rank.benchmarkId}
+            style={{
+              ...CHART_STYLE,
+              display: "flex",
+              flexDirection: "column",
+              gap: 14,
+              border: `1px solid ${favorited ? `${rankColor}55` : C.border}`,
+              boxShadow: favorited ? `0 0 0 1px ${rankColor}22 inset` : undefined,
+              background: favorited
+                ? `linear-gradient(180deg, ${rankColor}14, rgba(255,255,255,0.02))`
+                : CHART_STYLE.background,
+            }}
+          >
+            <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 12 }}>
+              <div style={{ minWidth: 0, display: "flex", alignItems: "flex-start", gap: 12 }}>
+                {imageUrl(rank.benchmarkIconUrl) ? (
+                  <img
+                    src={rank.benchmarkIconUrl}
+                    alt=""
+                    style={{
+                      width: 42,
+                      height: 42,
+                      borderRadius: 12,
+                      objectFit: "cover",
+                      border: `1px solid ${C.borderSub}`,
+                      background: "rgba(0,0,0,0.22)",
+                      flexShrink: 0,
+                    }}
+                  />
+                ) : null}
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 3 }}>
+                    <div style={{ fontSize: 11, color: rankColor, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+                      {rank.categoryName}
+                    </div>
+                    {favorited ? (
+                      <div style={{ fontSize: 10, color: "#ffd76a", fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                        Favorite
+                      </div>
+                    ) : null}
+                  </div>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: C.text, lineHeight: 1.25 }}>{rank.benchmarkName}</div>
+                  {rank.leaderboardRank > 0 ? (
+                    <div style={{ marginTop: 5, fontSize: 11, color: C.textFaint }}>
+                      Leaderboard rank <strong style={{ color: C.text }}>#{rank.leaderboardRank.toLocaleString()}</strong>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+                <button
+                  type="button"
+                  onClick={() => toggleFavorite(rank.benchmarkId)}
+                  title={favorited ? "Remove favorite" : "Favorite benchmark"}
+                  style={{
+                    border: `1px solid ${favorited ? "#ffd76a80" : C.border}`,
+                    background: favorited ? "rgba(255,215,106,0.14)" : "rgba(255,255,255,0.03)",
+                    color: favorited ? "#ffd76a" : C.textFaint,
+                    borderRadius: 10,
+                    width: 34,
+                    height: 34,
+                    cursor: "pointer",
+                    fontSize: 16,
+                    fontWeight: 700,
+                    lineHeight: 1,
+                  }}
+                >
+                  ★
+                </button>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 10,
+                    padding: imageUrl(rank.scenarioRank?.iconUrl) ? "7px 12px 7px 8px" : "7px 12px",
+                    borderRadius: 12,
+                    background: `${rankColor}1a`,
+                    border: `1px solid ${rankColor}66`,
+                    minWidth: 0,
+                  }}
+                >
+                  {imageUrl(rank.scenarioRank?.iconUrl) ? (
+                    <img
+                      src={rank.scenarioRank?.iconUrl}
+                      alt={rank.scenarioRank?.rankName ?? ""}
+                      style={{
+                        width: 30,
+                        height: 30,
+                        borderRadius: 9,
+                        objectFit: "cover",
+                        border: `1px solid ${rankColor}44`,
+                        background: "rgba(0,0,0,0.18)",
+                        flexShrink: 0,
+                      }}
+                    />
+                  ) : null}
+                  <div style={{ minWidth: 0 }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: rankColor, whiteSpace: "nowrap" }}>
+                      {rank.scenarioRank?.rankName ?? "Unranked"}
+                    </div>
+                    <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em" }}>
+                      Current rank
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 10 }}>
+              <div style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${C.borderSub}`, background: "rgba(0,0,0,0.14)" }}>
+                <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>
+                  Benchmark PB
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: rankColor }}>
+                  {Math.round(rank.scenarioScore).toLocaleString()}
+                </div>
+                <div style={{ marginTop: 4, fontSize: 10, color: C.textFaint }}>
+                  Synced to AimMod Hub
+                </div>
+              </div>
+              <div style={{ padding: "10px 12px", borderRadius: 12, border: `1px solid ${C.borderSub}`, background: "rgba(0,0,0,0.14)" }}>
+                <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", marginBottom: 4 }}>
+                  Local Best
+                </div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: bestThresholdColor || C.text }}>
+                  {Math.round(best).toLocaleString()}
+                </div>
+                <div style={{ marginTop: 4, fontSize: 10, color: C.textFaint }}>
+                  From runs in this view
+                </div>
+              </div>
+            </div>
+
+            {sortedThresholds.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600 }}>
+                  Rank thresholds
+                </div>
+                {[...sortedThresholds].reverse().map((threshold) => {
+                  const thresholdColor = thresholdColors.get(threshold.rankIndex)
+                    ?? resolveBenchmarkColor(threshold.color, threshold.rankName, benchmarkPaletteIndex(threshold.rankIndex));
+                  const progress = threshold.score > 0
+                    ? Math.max(0, Math.min(100, (best / threshold.score) * 100))
+                    : 0;
+                  const achieved = best >= threshold.score;
+                  return (
+                    <div
+                      key={threshold.rankIndex}
+                      style={{ display: "grid", gridTemplateColumns: "156px minmax(0,1fr) 80px", gap: 10, alignItems: "center" }}
+                    >
+                      <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                        {imageUrl(threshold.iconUrl) ? (
+                          <img
+                            src={threshold.iconUrl}
+                            alt={threshold.rankName}
+                            style={{
+                              width: 22,
+                              height: 22,
+                              borderRadius: 7,
+                              objectFit: "cover",
+                              border: `1px solid ${thresholdColor}44`,
+                              background: "rgba(0,0,0,0.18)",
+                              flexShrink: 0,
+                            }}
+                          />
+                        ) : null}
+                        <div style={{ fontSize: 11, color: achieved ? thresholdColor : C.textFaint, fontWeight: achieved ? 700 : 400, minWidth: 0 }}>
+                          {threshold.rankName}
+                        </div>
+                      </div>
+                      <div style={{ height: 7, borderRadius: 999, background: "rgba(255,255,255,0.08)", overflow: "hidden" }}>
+                        <div
+                          style={{
+                            width: `${progress}%`,
+                            height: "100%",
+                            borderRadius: 999,
+                            background: achieved ? thresholdColor : `${thresholdColor}70`,
+                            transition: "width 0.4s ease",
+                          }}
+                        />
+                      </div>
+                      <div style={{ fontSize: 10, color: C.textFaint, textAlign: "right" }}>
+                        {threshold.score.toLocaleString()}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {sorted.length > 0 && sortedThresholds.length > 0 && (
+              <div>
+                <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 600, marginBottom: 8 }}>
+                  Score history — {rank.benchmarkName}
+                </div>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ color: C.textFaint }}>
+                      <th style={{ textAlign: "left", paddingBottom: 6, fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Date</th>
+                      <th style={{ textAlign: "right", paddingBottom: 6, fontWeight: 500, borderBottom: `1px solid ${C.border}` }}>Score</th>
+                      <th style={{ textAlign: "right", paddingBottom: 6, fontWeight: 500, paddingLeft: 12, borderBottom: `1px solid ${C.border}` }}>Rank</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {[...sorted].reverse().slice(0, 20).map((r) => {
+                      const rankHit = getRankForScore(r.score, thresholds);
+                      const rankHitColor = rankHit
+                        ? thresholdColors.get(rankHit.rankIndex)
+                          ?? resolveBenchmarkColor(rankHit.color, rankHit.rankName, benchmarkPaletteIndex(rankHit.rankIndex))
+                        : null;
+                      const isBest = r.score === best;
+                      return (
+                        <tr key={r.id}>
+                          <td style={{ padding: "5px 0", color: C.textSub, borderBottom: `1px solid ${C.border}20` }}>
+                            {formatDateTime(r.timestamp)}
+                          </td>
+                          <td style={{ padding: "5px 0", textAlign: "right", fontWeight: isBest ? 700 : 400, color: isBest ? "#00f5a0" : C.text, borderBottom: `1px solid ${C.border}20` }}>
+                            {fmtScore(r.score)}
+                          </td>
+                          <td style={{ padding: "5px 0", textAlign: "right", paddingLeft: 12, borderBottom: `1px solid ${C.border}20` }}>
+                            {rankHit ? (
+                              <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: rankHitColor || C.text, fontWeight: 700 }}>
+                                {imageUrl(rankHit.iconUrl) ? (
+                                  <img
+                                    src={rankHit.iconUrl}
+                                    alt={rankHit.rankName}
+                                    style={{
+                                      width: 18,
+                                      height: 18,
+                                      borderRadius: 6,
+                                      objectFit: "cover",
+                                      border: `1px solid ${(rankHitColor || C.text)}44`,
+                                      background: "rgba(0,0,0,0.18)",
+                                    }}
+                                  />
+                                ) : null}
+                                <span>{rankHit.rankName}</span>
+                              </span>
+                            ) : (
+                              <span style={{ color: C.textFaint }}>—</span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            {bestThreshold === null && sortedThresholds.length > 0 && (
+              <div style={{ fontSize: 11, color: C.textFaint }}>
+                Need{" "}
+                <strong style={{ color: C.text }}>{sortedThresholds[0].score.toLocaleString()}</strong>{" "}
+                to reach{" "}
+                <strong style={{ color: thresholdColors.get(sortedThresholds[0].rankIndex) || rankColor }}>{sortedThresholds[0].rankName}</strong>
+                {" "}
+                ({(sortedThresholds[0].score - best).toLocaleString()} more points)
+              </div>
+            )}
+            {bestThreshold !== null && (() => {
+              const nextIdx = sortedThresholds.findIndex((t) => t.rankIndex === bestThreshold.rankIndex) + 1;
+              const next = sortedThresholds[nextIdx];
+              if (!next) return null;
+              const nextColor = thresholdColors.get(next.rankIndex)
+                ?? resolveBenchmarkColor(next.color, next.rankName, benchmarkPaletteIndex(next.rankIndex));
+              return (
+                <div style={{ fontSize: 11, color: C.textFaint }}>
+                  Next rank:{" "}
+                  <strong style={{ color: nextColor }}>{next.rankName}</strong> at{" "}
+                  <strong style={{ color: C.text }}>{next.score.toLocaleString()}</strong>
+                  {" "}— {(next.score - best).toLocaleString()} more points needed
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 // ─── Scenario details (tabbed) ────────────────────────────────────────────────
 
 function ScenarioDetails({
   records,
-  practiceProfile,
   scenarioName,
+  dateRange,
   onExploreDrill,
   onReplayMetadataChanged,
+  hubHandle,
+  feedbackRows,
+  onFeedback,
 }: {
   records: AnalyticsSessionRecord[];
-  practiceProfile: PracticeProfile | null;
   scenarioName: string;
+  dateRange: DateRangePreset;
   onExploreDrill: (query: string) => void;
   onReplayMetadataChanged?: () => void;
+  hubHandle: string | null;
+  feedbackRows: CoachingUserFeedbackRecord[];
+  onFeedback: (snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
@@ -6069,6 +7144,7 @@ function ScenarioDetails({
       || stored === "coaching"
       || stored === "replay"
       || stored === "leaderboard"
+      || stored === "benchmarks"
       ? stored
       : "summary";
   });
@@ -6077,6 +7153,53 @@ function ScenarioDetails({
     return stored === "warmup" || stored === "warmedup" ? stored : "all";
   });
   const [replayJumpId, setReplayJumpId] = useState<string | null>(null);
+  const [hubBenchmarkRanks, setHubBenchmarkRanks] = useState<HubScenarioBenchmarkRank[]>([]);
+  const [hubBenchmarkPages, setHubBenchmarkPages] = useState<HubBenchmarkPageResponse[]>([]);
+  const [hubBenchmarkLoading, setHubBenchmarkLoading] = useState(false);
+  const scenarioSlug = useMemo(() => slugifyScenarioName(scenarioName), [scenarioName]);
+
+  useEffect(() => {
+    if (!hubHandle || !scenarioSlug) {
+      setHubBenchmarkRanks([]);
+      setHubBenchmarkPages([]);
+      return;
+    }
+    let cancelled = false;
+    setHubBenchmarkLoading(true);
+    void (async () => {
+      try {
+        type ScenarioHistoryResp = { benchmarkRanks: HubScenarioBenchmarkRank[] };
+        const history = await invoke<ScenarioHistoryResp>("hub_get_player_scenario_history", {
+          handle: hubHandle,
+          scenarioSlug,
+        });
+        if (cancelled) return;
+        const ranks = history.benchmarkRanks ?? [];
+        setHubBenchmarkRanks(ranks);
+        if (ranks.length > 0) {
+          const pages = await Promise.all(
+            ranks.map((rank) =>
+              invoke<HubBenchmarkPageResponse>("hub_get_benchmark_page", {
+                handle: hubHandle,
+                benchmarkId: rank.benchmarkId,
+              }).catch(() => null),
+            ),
+          );
+          if (!cancelled) {
+            setHubBenchmarkPages(pages.filter((p): p is HubBenchmarkPageResponse => p !== null));
+          }
+        }
+      } catch {
+        if (!cancelled) {
+          setHubBenchmarkRanks([]);
+          setHubBenchmarkPages([]);
+        }
+      } finally {
+        if (!cancelled) setHubBenchmarkLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [hubHandle, scenarioSlug]);
   const analysisRecords = useMemo(
     () => records.filter((record) => record.isReliableForAnalysis),
     [records],
@@ -6131,12 +7254,39 @@ function ScenarioDetails({
 
   const best = Math.max(...filteredRecords.map((r) => r.score), 0);
 
+  const benchmarkThresholdLines = useMemo<BenchmarkThresholdLine[]>(() => {
+    const lines: BenchmarkThresholdLine[] = [];
+    const seen = new Set<number>();
+    for (const page of hubBenchmarkPages) {
+      for (const cat of page.categories) {
+        const entry = cat.scenarios.find(
+          (s) => s.scenarioName.toLowerCase() === scenarioName.toLowerCase(),
+        );
+        if (entry) {
+          for (const [index, t] of entry.thresholds.entries()) {
+            if (!seen.has(t.score)) {
+              seen.add(t.score);
+              lines.push({
+                score: t.score,
+                rankName: t.rankName,
+                color: resolveBenchmarkColor(t.color, t.rankName, index),
+                benchmarkName: page.benchmarkName,
+              });
+            }
+          }
+        }
+      }
+    }
+    return lines.sort((a, b) => a.score - b.score);
+  }, [hubBenchmarkPages, scenarioName]);
+
   const tabs: { id: Tab; label: string; hidden?: boolean }[] = [
     { id: "summary", label: "Summary" },
     { id: "mechanics", label: "Mechanics" },
     { id: "coaching", label: "Coaching" },
     { id: "replay", label: "Replay" },
     { id: "leaderboard", label: "Leaderboard" },
+    { id: "benchmarks", label: "Benchmarks", hidden: !hubHandle },
   ];
 
   useEffect(() => {
@@ -6253,6 +7403,8 @@ function ScenarioDetails({
           sorted={filteredSorted}
           best={best}
           warmupIds={warmupIds}
+          benchmarkRanks={hubBenchmarkRanks}
+          thresholdLines={benchmarkThresholdLines}
           onJumpToReplay={(sessionId) => {
             setReplayJumpId(sessionId);
             setActiveTab("replay");
@@ -6266,10 +7418,13 @@ function ScenarioDetails({
         <CoachingTab
           records={records}
           sorted={sorted}
-          practiceProfile={practiceProfile}
           warmupIds={warmupIds}
+          scenarioName={scenarioName}
+          dateRange={dateRange}
           sessionFilter={sessionFilter}
           onExploreDrill={onExploreDrill}
+          feedbackRows={feedbackRows}
+          onFeedback={onFeedback}
         />
       )}
       {activeTab === "replay" && (
@@ -6283,6 +7438,17 @@ function ScenarioDetails({
         />
       )}
       {activeTab === "leaderboard" && <ScenarioLeaderboardPanel scenarioName={scenarioName} />}
+      {activeTab === "benchmarks" && (
+        <BenchmarksTab
+          scenarioName={scenarioName}
+          sorted={filteredSorted}
+          best={best}
+          benchmarkRanks={hubBenchmarkRanks}
+          benchmarkPages={hubBenchmarkPages}
+          loading={hubBenchmarkLoading}
+          hubHandle={hubHandle}
+        />
+      )}
         </>
       )}
     </div>
@@ -6337,6 +7503,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
   const [liveBridgeEventCounts, setLiveBridgeEventCounts] = useState<Record<string, number>>({});
   const [hubSyncOverview, setHubSyncOverview] = useState<StatsHubSyncOverview | null>(null);
   const [appSettings, setAppSettings] = useState<AppSettings | null>(null);
+  const [globalCoachingOverview, setGlobalCoachingOverview] = useState<GlobalCoachingOverview | null>(null);
+  const [coachingUserFeedback, setCoachingUserFeedback] = useState<CoachingUserFeedbackRecord[]>([]);
+  const [coachingOverviewVersion, setCoachingOverviewVersion] = useState(0);
   const [hubNoticeDismissed, setHubNoticeDismissed] = useState<boolean>(
     () => readStoredValue(STATS_WINDOW_STORAGE_KEYS.hubNoticeDismissed) === "1",
   );
@@ -6509,6 +7678,9 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     invoke<boolean>("get_is_debug_build")
       .then(setIsDebugBuild)
       .catch(() => setIsDebugBuild(false));
+    invoke<CoachingUserFeedbackRecord[]>("get_coaching_user_feedback", {})
+      .then(setCoachingUserFeedback)
+      .catch(() => setCoachingUserFeedback([]));
     const refreshAppSettings = () => {
       invoke<AppSettings>("get_settings")
         .then(setAppSettings)
@@ -6708,6 +7880,57 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     }
   }
 
+  async function handleCoachingFeedback(
+    snapshotKind: string,
+    card: CoachingCardData,
+    feedback: CoachingCardFeedback,
+  ) {
+    const now = Date.now();
+    const recommendationId = coachingCardFeedbackId(card);
+    const signalKeys = coachingCardSignalKeys(card);
+    const existing = coachingUserFeedback.find(
+      (row) => row.snapshotKind === snapshotKind && row.recommendationId === recommendationId,
+    );
+    const nextRow: CoachingUserFeedbackRecord = {
+      snapshotKind,
+      recommendationId,
+      signalKey: signalKeys[0] ?? null,
+      feedback,
+      notes: existing?.notes ?? null,
+      createdAtUnixMs: existing?.createdAtUnixMs ?? now,
+      updatedAtUnixMs: now,
+      contextJson: {
+        title: card.title,
+        badge: card.badge,
+        signals: signalKeys,
+      },
+    };
+
+    setCoachingUserFeedback((prev) => {
+      const remaining = prev.filter(
+        (row) => !(row.snapshotKind === snapshotKind && row.recommendationId === recommendationId),
+      );
+      return [nextRow, ...remaining].sort((a, b) => b.updatedAtUnixMs - a.updatedAtUnixMs);
+    });
+
+    try {
+      await invoke("save_coaching_user_feedback", { feedback: nextRow });
+      setCoachingOverviewVersion((value) => value + 1);
+    } catch (error) {
+      console.warn("Could not save coaching feedback", error);
+      setCoachingUserFeedback((prev) => {
+        const restored = existing
+          ? [existing, ...prev.filter(
+            (row) => !(row.snapshotKind === snapshotKind && row.recommendationId === recommendationId),
+          )]
+          : prev.filter(
+            (row) => !(row.snapshotKind === snapshotKind && row.recommendationId === recommendationId),
+          );
+        return restored.sort((a, b) => b.updatedAtUnixMs - a.updatedAtUnixMs);
+      });
+    }
+  }
+
   useEffect(() => () => {
     if (clearTimerRef.current != null) {
       window.clearTimeout(clearTimerRef.current);
@@ -6832,12 +8055,34 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
     () => summarizeScenario(selectedRecords),
     [selectedRecords],
   );
-  const globalPracticeProfile = useMemo(
-    () => buildPracticeProfile(
-      [...analyticsRecords].sort((a, b) => a.timestampMs - b.timestampMs),
-    ),
-    [analyticsRecords],
-  );
+  useEffect(() => {
+    let cancelled = false;
+
+    void invoke<GlobalCoachingOverview>("get_global_coaching_overview", {
+      dateRange: dateRange === "all" ? null : dateRange,
+    })
+      .then((overview) => {
+        if (!cancelled) {
+          setGlobalCoachingOverview(overview);
+        }
+      })
+      .catch((error) => {
+        console.warn("Could not load Rust coaching overview", error);
+        if (!cancelled) {
+          setGlobalCoachingOverview(null);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [dateRange, records, appSettings, coachingOverviewVersion]);
+
+  const globalPracticeProfile = globalCoachingOverview?.practiceProfile ?? null;
+  const globalLearningState = globalCoachingOverview?.learningState ?? null;
+  const globalCoachingCards = globalCoachingOverview?.globalCards ?? [];
+  const playerLearningProfile = globalCoachingOverview?.playerLearningProfile ?? null;
+  const coachingPersistenceStatus = globalCoachingOverview?.coachingPersistenceStatus ?? null;
 
   useEffect(() => {
     if (selectedScenario && scenarioGroups.some((group) => group.name === selectedScenario)) return;
@@ -7407,11 +8652,21 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               records={analyticsRecords}
               scenarioGroups={scenarioGroups}
               practiceProfile={globalPracticeProfile}
+              globalLearningState={globalLearningState}
+              globalCoachingCards={globalCoachingCards}
               compareScenario={compareScenario}
               selectedScenario={selectedScenario}
               compareSummary={compareSummary}
               selectedSummary={selectedSummary}
               onCompareScenarioChange={setCompareScenario}
+              playerLearningProfile={playerLearningProfile}
+              coachingPersistenceStatus={coachingPersistenceStatus}
+              feedbackRows={coachingUserFeedback}
+              onFeedback={handleCoachingFeedback}
+              onExploreDrill={(query) => {
+                setLeaderboardSeedQuery(query);
+                setRootMode("leaderboards");
+              }}
             />
           ) : selectedScenario && selectedRecords.length > 0 ? (
             <>
@@ -7440,8 +8695,11 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
             </div>
             <ScenarioDetails
               records={selectedRecords}
-              practiceProfile={globalPracticeProfile}
               scenarioName={selectedScenario!}
+              dateRange={dateRange}
+              hubHandle={appSettings?.hub_account_label?.trim() || null}
+              feedbackRows={coachingUserFeedback}
+              onFeedback={handleCoachingFeedback}
               onReplayMetadataChanged={() => {
                 void loadHistory(true);
               }}

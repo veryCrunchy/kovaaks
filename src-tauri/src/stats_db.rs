@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager};
 
 pub const DB_FILE_NAME: &str = "stats.sqlite3";
-const SCHEMA_VERSION: i32 = 17;
+const SCHEMA_VERSION: i32 = 21;
 
 pub struct ReplayAssetRecord<'a> {
     pub session_id: &'a str,
@@ -51,6 +51,73 @@ pub struct SessionReplayContextWindow {
     pub avg_kills_per_second: Option<f64>,
     pub avg_timeline_accuracy_pct: Option<f64>,
     pub avg_damage_efficiency: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoachingStateSnapshot {
+    pub snapshot_kind: String,
+    pub updated_at_unix_ms: u64,
+    pub sample_count: u32,
+    pub settled_sample_count: u32,
+    pub coverage_start_unix_ms: Option<u64>,
+    pub coverage_end_unix_ms: Option<u64>,
+    pub summary_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoachingRecommendationEvaluation {
+    pub evaluation_id: String,
+    pub snapshot_kind: String,
+    pub recommendation_id: String,
+    pub recommendation_title: String,
+    pub signal_key: String,
+    pub status: String,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub anchor_sample_count: u32,
+    pub latest_sample_count: u32,
+    pub anchor_metric_value: Option<f64>,
+    pub latest_metric_value: Option<f64>,
+    pub outcome_delta: Option<f64>,
+    pub context_json: serde_json::Value,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CoachingUserFeedbackRecord {
+    pub snapshot_kind: String,
+    pub recommendation_id: String,
+    pub signal_key: Option<String>,
+    pub feedback: String,
+    pub notes: Option<String>,
+    pub created_at_unix_ms: u64,
+    pub updated_at_unix_ms: u64,
+    pub context_json: serde_json::Value,
+}
+
+fn normalize_accuracy_pct(
+    value: Option<f64>,
+    shots_hit: Option<f64>,
+    shots_fired: Option<f64>,
+) -> Option<f64> {
+    if let (Some(hits), Some(shots)) = (shots_hit, shots_fired) {
+        if hits.is_finite() && shots.is_finite() && hits >= 0.0 && shots > 0.0 {
+            if hits <= shots + 0.0001 {
+                return Some(((hits / shots) * 100.0).clamp(0.0, 100.0));
+            }
+        }
+    }
+
+    let direct = value.filter(|value| value.is_finite() && *value >= 0.0)?;
+    if direct <= 1.0 {
+        Some((direct * 100.0).clamp(0.0, 100.0))
+    } else if direct <= 100.0 {
+        Some(direct)
+    } else {
+        None
+    }
 }
 
 pub fn initialize(app: &AppHandle) -> Result<PathBuf> {
@@ -315,6 +382,7 @@ pub fn upsert_replay_payload(
     session_id: &str,
     replay: &crate::replay_store::ReplayData,
 ) -> Result<()> {
+    let target_response_analysis = crate::target_response::analyze_target_responses(replay);
     let mut conn = connect(app)?;
     let tx = conn.transaction()?;
 
@@ -328,6 +396,18 @@ pub fn upsert_replay_payload(
     )?;
     tx.execute(
         "DELETE FROM session_replay_frames WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_replay_tick_streams WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_target_response_episodes WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_target_response_summaries WHERE session_id = ?1",
         params![session_id],
     )?;
 
@@ -424,6 +504,36 @@ pub fn upsert_replay_payload(
         params![session_id],
     )?;
 
+    if let Some(tick_stream) = replay
+        .run_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.tick_stream_v1.as_ref())
+    {
+        tx.execute(
+            "
+            INSERT INTO session_replay_tick_streams (
+                session_id,
+                tick_stream_json,
+                updated_at_unix_ms
+            )
+            VALUES (?1, ?2, ?3)
+            ON CONFLICT(session_id) DO UPDATE SET
+                tick_stream_json = excluded.tick_stream_json,
+                updated_at_unix_ms = excluded.updated_at_unix_ms
+            ",
+            params![
+                session_id,
+                serde_json::to_string(tick_stream)
+                    .context("could not encode replay tick stream json")?,
+                current_unix_ms(),
+            ],
+        )?;
+    }
+
+    if let Some(analysis) = target_response_analysis.as_ref() {
+        upsert_target_response_analysis_with_tx(&tx, session_id, analysis)?;
+    }
+
     tx.commit()?;
 
     Ok(())
@@ -440,6 +550,18 @@ fn delete_replay_asset_with_conn(conn: &Connection, session_id: &str) -> Result<
     )?;
     conn.execute(
         "DELETE FROM session_replay_frames WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_replay_tick_streams WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_target_response_episodes WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    conn.execute(
+        "DELETE FROM session_target_response_summaries WHERE session_id = ?1",
         params![session_id],
     )?;
     conn.execute(
@@ -478,6 +600,7 @@ pub fn get_replay_data(
     let mut run_snapshot = get_run_summary(app, session_id)?;
     if let Some(snapshot) = run_snapshot.as_mut() {
         snapshot.shot_telemetry = query_shot_telemetry(&conn, session_id)?;
+        snapshot.tick_stream_v1 = query_replay_tick_stream(&conn, session_id)?;
     }
 
     if !has_replay_asset
@@ -1077,6 +1200,143 @@ fn migrate_schema(conn: &mut Connection) -> Result<()> {
         })?;
     }
 
+    if user_version < 18 {
+        run_schema_migration(conn, 18, |tx| {
+            tx.execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS coaching_state_snapshots (
+                snapshot_kind TEXT PRIMARY KEY,
+                updated_at_unix_ms INTEGER NOT NULL,
+                sample_count INTEGER NOT NULL,
+                settled_sample_count INTEGER NOT NULL,
+                coverage_start_unix_ms INTEGER,
+                coverage_end_unix_ms INTEGER,
+                summary_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_coaching_state_updated_at
+                ON coaching_state_snapshots(updated_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS coaching_recommendation_evaluations (
+                evaluation_id TEXT PRIMARY KEY,
+                snapshot_kind TEXT NOT NULL,
+                recommendation_id TEXT NOT NULL,
+                recommendation_title TEXT NOT NULL,
+                signal_key TEXT NOT NULL,
+                status TEXT NOT NULL,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                anchor_sample_count INTEGER NOT NULL,
+                latest_sample_count INTEGER NOT NULL,
+                anchor_metric_value REAL,
+                latest_metric_value REAL,
+                outcome_delta REAL,
+                context_json TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_coaching_eval_snapshot_status
+                ON coaching_recommendation_evaluations(snapshot_kind, status, updated_at_unix_ms DESC);
+            ",
+            )?;
+            Ok(())
+        })?;
+    }
+
+    if user_version < 19 {
+        run_schema_migration(conn, 19, |tx| {
+            tx.execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS coaching_user_feedback (
+                snapshot_kind TEXT NOT NULL,
+                recommendation_id TEXT NOT NULL,
+                signal_key TEXT,
+                feedback TEXT NOT NULL,
+                notes TEXT,
+                created_at_unix_ms INTEGER NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                context_json TEXT NOT NULL,
+                PRIMARY KEY(snapshot_kind, recommendation_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_coaching_feedback_updated_at
+                ON coaching_user_feedback(updated_at_unix_ms DESC);
+            CREATE INDEX IF NOT EXISTS idx_coaching_feedback_signal
+                ON coaching_user_feedback(signal_key, updated_at_unix_ms DESC);
+            ",
+            )?;
+            Ok(())
+        })?;
+    }
+
+    if user_version < 20 {
+        run_schema_migration(conn, 20, |tx| {
+            tx.execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS session_target_response_summaries (
+                session_id TEXT PRIMARY KEY,
+                episode_count INTEGER NOT NULL DEFAULT 0,
+                path_change_count INTEGER NOT NULL DEFAULT 0,
+                target_switch_count INTEGER NOT NULL DEFAULT 0,
+                response_coverage_pct REAL,
+                avg_reaction_time_ms REAL,
+                p90_reaction_time_ms REAL,
+                avg_pre_slowdown_reaction_ms REAL,
+                avg_recovery_time_ms REAL,
+                p90_recovery_time_ms REAL,
+                avg_path_change_reaction_ms REAL,
+                avg_target_switch_reaction_ms REAL,
+                avg_trigger_magnitude_deg REAL,
+                avg_peak_yaw_error_deg REAL,
+                stable_response_ratio REAL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_target_response_summary_updated
+                ON session_target_response_summaries(updated_at_unix_ms DESC);
+
+            CREATE TABLE IF NOT EXISTS session_target_response_episodes (
+                session_id TEXT NOT NULL,
+                episode_idx INTEGER NOT NULL,
+                episode_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                start_ms INTEGER NOT NULL,
+                end_ms INTEGER NOT NULL,
+                target_id TEXT NOT NULL,
+                target_label TEXT NOT NULL,
+                trigger_magnitude_deg REAL,
+                peak_yaw_error_deg REAL,
+                reaction_time_ms REAL,
+                pre_slowdown_reaction_ms REAL,
+                recovery_time_ms REAL,
+                stable_response INTEGER NOT NULL DEFAULT 0 CHECK (stable_response IN (0, 1)),
+                PRIMARY KEY(session_id, episode_idx),
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_target_response_episode_time
+                ON session_target_response_episodes(session_id, start_ms, end_ms);
+            CREATE INDEX IF NOT EXISTS idx_target_response_episode_kind
+                ON session_target_response_episodes(session_id, kind, start_ms);
+            ",
+            )?;
+            Ok(())
+        })?;
+    }
+
+    if user_version < 21 {
+        run_schema_migration(conn, 21, |tx| {
+            tx.execute_batch(
+                "
+            CREATE TABLE IF NOT EXISTS session_replay_tick_streams (
+                session_id TEXT PRIMARY KEY,
+                tick_stream_json TEXT NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_replay_tick_streams_updated
+                ON session_replay_tick_streams(updated_at_unix_ms DESC);
+            ",
+            )?;
+            Ok(())
+        })?;
+    }
+
     Ok(())
 }
 
@@ -1180,6 +1440,31 @@ fn query_replay_frames(
         frames.push(row?);
     }
     Ok(frames)
+}
+
+fn query_replay_tick_stream(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<crate::bridge::BridgeTickStreamV1>> {
+    let tick_stream_json = conn
+        .query_row(
+            "
+            SELECT tick_stream_json
+            FROM session_replay_tick_streams
+            WHERE session_id = ?1
+            ",
+            params![session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .context("could not load replay tick stream")?;
+
+    tick_stream_json
+        .map(|json| {
+            serde_json::from_str::<crate::bridge::BridgeTickStreamV1>(&json)
+                .context("could not parse replay tick stream")
+        })
+        .transpose()
 }
 
 fn query_shot_telemetry(
@@ -1601,11 +1886,11 @@ fn finalize_context_window(
         shot_event_count: accumulator.shot_event_count,
         fired_count: accumulator.fired_count,
         hit_count: accumulator.hit_count,
-        accuracy_pct: if accumulator.fired_count > 0 {
-            Some((accumulator.hit_count as f64 / accumulator.fired_count as f64) * 100.0)
-        } else {
-            None
-        },
+        accuracy_pct: normalize_accuracy_pct(
+            None,
+            Some(accumulator.hit_count as f64),
+            Some(accumulator.fired_count as f64),
+        ),
         avg_bot_count: weighted_average(
             accumulator.weighted_bot_count_sum,
             accumulator.weighted_event_count,
@@ -1634,9 +1919,13 @@ fn finalize_context_window(
             accumulator.weighted_kps_sum,
             accumulator.weighted_kps_count,
         ),
-        avg_timeline_accuracy_pct: weighted_average(
-            accumulator.weighted_timeline_accuracy_sum,
-            accumulator.weighted_timeline_accuracy_count,
+        avg_timeline_accuracy_pct: normalize_accuracy_pct(
+            weighted_average(
+                accumulator.weighted_timeline_accuracy_sum,
+                accumulator.weighted_timeline_accuracy_count,
+            ),
+            None,
+            None,
         ),
         avg_damage_efficiency: weighted_average(
             accumulator.weighted_damage_efficiency_sum,
@@ -1670,14 +1959,18 @@ fn build_replay_context_windows(
         }
     }
 
-    let timeline_by_sec: HashMap<u32, &crate::bridge::BridgeRunTimelinePoint> = snapshot
-        .timeline
+    let normalized_timeline = normalize_run_timeline(&snapshot.timeline);
+    let timeline_by_sec: HashMap<u32, &crate::bridge::BridgeRunTimelinePoint> = normalized_timeline
         .iter()
         .map(|point| (point.t_sec, point))
         .collect();
-    let avg_spm = average_optional(snapshot.timeline.iter().map(|point| point.score_per_minute));
+    let avg_spm = average_optional(
+        normalized_timeline
+            .iter()
+            .map(|point| point.score_per_minute),
+    );
     let avg_timeline_accuracy =
-        average_optional(snapshot.timeline.iter().map(|point| point.accuracy_pct));
+        average_optional(normalized_timeline.iter().map(|point| point.accuracy_pct));
 
     let first_ts_ms = snapshot
         .shot_telemetry
@@ -1909,7 +2202,11 @@ fn query_replay_context_windows(
             shot_event_count: row.get::<_, i64>(6)? as u32,
             fired_count: row.get::<_, i64>(7)? as u32,
             hit_count: row.get::<_, i64>(8)? as u32,
-            accuracy_pct: row.get(9)?,
+            accuracy_pct: normalize_accuracy_pct(
+                row.get(9)?,
+                Some(row.get::<_, i64>(8)? as f64),
+                Some(row.get::<_, i64>(7)? as f64),
+            ),
             avg_bot_count: row.get(10)?,
             primary_target_label: row.get(11)?,
             primary_target_profile: row.get(12)?,
@@ -1920,7 +2217,7 @@ fn query_replay_context_windows(
             avg_nearest_pitch_error_deg: row.get(17)?,
             avg_score_per_minute: row.get(18)?,
             avg_kills_per_second: row.get(19)?,
-            avg_timeline_accuracy_pct: row.get(20)?,
+            avg_timeline_accuracy_pct: normalize_accuracy_pct(row.get(20)?, None, None),
             avg_damage_efficiency: row.get(21)?,
         })
     })?;
@@ -1938,6 +2235,11 @@ pub fn upsert_run_capture(
     snapshot: &crate::bridge::BridgeRunSnapshot,
 ) -> Result<()> {
     let replay_context_windows = build_replay_context_windows(snapshot);
+    let normalized_summary_accuracy_pct = normalize_accuracy_pct(
+        snapshot.accuracy_pct,
+        snapshot.shots_hit,
+        snapshot.shots_fired,
+    );
     let normalized_timeline = normalize_run_timeline(&snapshot.timeline);
     let mut conn = connect(app)?;
     let tx = conn.transaction()?;
@@ -2023,7 +2325,7 @@ pub fn upsert_run_capture(
             snapshot.damage_done,
             snapshot.damage_possible,
             snapshot.damage_efficiency,
-            snapshot.accuracy_pct,
+            normalized_summary_accuracy_pct,
             snapshot.peak_score_per_minute,
             snapshot.peak_kills_per_second,
             snapshot.paired_shot_hits as i64,
@@ -2293,7 +2595,9 @@ fn normalize_run_timeline(
     sorted.sort_by_key(|point| point.t_sec);
 
     let mut merged: Vec<crate::bridge::BridgeRunTimelinePoint> = Vec::with_capacity(sorted.len());
-    for point in sorted {
+    for mut point in sorted {
+        point.accuracy_pct =
+            normalize_accuracy_pct(point.accuracy_pct, point.shots_hit, point.shots_fired);
         if let Some(current) = merged.last_mut() {
             if current.t_sec == point.t_sec {
                 merge_timeline_point(current, &point);
@@ -2363,19 +2667,22 @@ pub fn get_run_summary(
         ",
         params![session_id],
         |row| {
+            let shots_fired = row.get(4)?;
+            let shots_hit = row.get(5)?;
+            let accuracy_pct = normalize_accuracy_pct(row.get(11)?, shots_hit, shots_fired);
             Ok(crate::bridge::BridgeRunSnapshot {
                 duration_secs: row.get(0)?,
                 score_total: row.get(1)?,
                 score_total_derived: row.get(2)?,
                 score_per_minute: row.get(3)?,
-                shots_fired: row.get(4)?,
-                shots_hit: row.get(5)?,
+                shots_fired,
+                shots_hit,
                 kills: row.get(6)?,
                 kills_per_second: row.get(7)?,
                 damage_done: row.get(8)?,
                 damage_possible: row.get(9)?,
                 damage_efficiency: row.get(10)?,
-                accuracy_pct: row.get(11)?,
+                accuracy_pct,
                 peak_score_per_minute: row.get(12)?,
                 peak_kills_per_second: row.get(13)?,
                 paired_shot_hits: row.get::<_, i64>(14)? as u32,
@@ -2431,17 +2738,19 @@ pub fn get_run_timeline(
         ",
     )?;
     let rows = stmt.query_map(params![session_id], |row| {
+        let shots_fired = row.get(8)?;
+        let shots_hit = row.get(9)?;
         Ok(crate::bridge::BridgeRunTimelinePoint {
             t_sec: row.get::<_, i64>(0)? as u32,
             score_per_minute: row.get(1)?,
             kills_per_second: row.get(2)?,
-            accuracy_pct: row.get(3)?,
+            accuracy_pct: normalize_accuracy_pct(row.get(3)?, shots_hit, shots_fired),
             damage_efficiency: row.get(4)?,
             score_total: row.get(5)?,
             score_total_derived: row.get(6)?,
             kills: row.get(7)?,
-            shots_fired: row.get(8)?,
-            shots_hit: row.get(9)?,
+            shots_fired,
+            shots_hit,
         })
     })?;
 
@@ -2466,6 +2775,577 @@ pub fn get_replay_context_windows(
 ) -> Result<Vec<SessionReplayContextWindow>> {
     let conn = connect(app)?;
     query_replay_context_windows(&conn, session_id)
+}
+
+pub fn get_target_response_analysis(
+    app: &AppHandle,
+    session_id: &str,
+) -> Result<Option<crate::target_response::TargetResponseAnalysis>> {
+    let conn = connect(app)?;
+    query_target_response_analysis(&conn, session_id)
+}
+
+pub fn upsert_target_response_analysis(
+    app: &AppHandle,
+    session_id: &str,
+    analysis: &crate::target_response::TargetResponseAnalysis,
+) -> Result<()> {
+    let mut conn = connect(app)?;
+    let tx = conn.transaction()?;
+    tx.execute(
+        "DELETE FROM session_target_response_episodes WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    tx.execute(
+        "DELETE FROM session_target_response_summaries WHERE session_id = ?1",
+        params![session_id],
+    )?;
+    upsert_target_response_analysis_with_tx(&tx, session_id, analysis)?;
+    tx.commit()?;
+    Ok(())
+}
+
+pub fn get_all_target_response_summaries(
+    app: &AppHandle,
+) -> Result<HashMap<String, crate::target_response::TargetResponseSummaryRecord>> {
+    let conn = connect(app)?;
+    query_all_target_response_summaries(&conn)
+}
+
+pub fn upsert_coaching_state_snapshot(
+    app: &AppHandle,
+    snapshot: &CoachingStateSnapshot,
+) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        INSERT INTO coaching_state_snapshots (
+            snapshot_kind,
+            updated_at_unix_ms,
+            sample_count,
+            settled_sample_count,
+            coverage_start_unix_ms,
+            coverage_end_unix_ms,
+            summary_json
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+        ON CONFLICT(snapshot_kind) DO UPDATE SET
+            updated_at_unix_ms = excluded.updated_at_unix_ms,
+            sample_count = excluded.sample_count,
+            settled_sample_count = excluded.settled_sample_count,
+            coverage_start_unix_ms = excluded.coverage_start_unix_ms,
+            coverage_end_unix_ms = excluded.coverage_end_unix_ms,
+            summary_json = excluded.summary_json
+        ",
+        params![
+            &snapshot.snapshot_kind,
+            snapshot.updated_at_unix_ms as i64,
+            snapshot.sample_count as i64,
+            snapshot.settled_sample_count as i64,
+            snapshot.coverage_start_unix_ms.map(|value| value as i64),
+            snapshot.coverage_end_unix_ms.map(|value| value as i64),
+            serde_json::to_string(&snapshot.summary_json)
+                .context("could not encode coaching snapshot json")?,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_coaching_state_snapshot(
+    app: &AppHandle,
+    snapshot_kind: &str,
+) -> Result<Option<CoachingStateSnapshot>> {
+    let conn = connect(app)?;
+    conn.query_row(
+        "
+        SELECT
+            snapshot_kind,
+            updated_at_unix_ms,
+            sample_count,
+            settled_sample_count,
+            coverage_start_unix_ms,
+            coverage_end_unix_ms,
+            summary_json
+        FROM coaching_state_snapshots
+        WHERE snapshot_kind = ?1
+        ",
+        params![snapshot_kind],
+        |row| {
+            let summary_json = row.get::<_, String>(6)?;
+            Ok(CoachingStateSnapshot {
+                snapshot_kind: row.get(0)?,
+                updated_at_unix_ms: row.get::<_, i64>(1)? as u64,
+                sample_count: row.get::<_, i64>(2)? as u32,
+                settled_sample_count: row.get::<_, i64>(3)? as u32,
+                coverage_start_unix_ms: row.get::<_, Option<i64>>(4)?.map(|value| value as u64),
+                coverage_end_unix_ms: row.get::<_, Option<i64>>(5)?.map(|value| value as u64),
+                summary_json: serde_json::from_str(&summary_json)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+        },
+    )
+    .optional()
+    .context("could not load coaching state snapshot")
+}
+
+fn upsert_target_response_analysis_with_tx(
+    tx: &rusqlite::Transaction<'_>,
+    session_id: &str,
+    analysis: &crate::target_response::TargetResponseAnalysis,
+) -> Result<()> {
+    tx.execute(
+        "
+        INSERT INTO session_target_response_summaries (
+            session_id,
+            episode_count,
+            path_change_count,
+            target_switch_count,
+            response_coverage_pct,
+            avg_reaction_time_ms,
+            p90_reaction_time_ms,
+            avg_pre_slowdown_reaction_ms,
+            avg_recovery_time_ms,
+            p90_recovery_time_ms,
+            avg_path_change_reaction_ms,
+            avg_target_switch_reaction_ms,
+            avg_trigger_magnitude_deg,
+            avg_peak_yaw_error_deg,
+            stable_response_ratio,
+            updated_at_unix_ms
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)
+        ",
+        params![
+            session_id,
+            analysis.summary.episode_count as i64,
+            analysis.summary.path_change_count as i64,
+            analysis.summary.target_switch_count as i64,
+            analysis.response_coverage_pct,
+            analysis.summary.avg_reaction_time_ms,
+            analysis.summary.p90_reaction_time_ms,
+            analysis.summary.avg_pre_slowdown_reaction_ms,
+            analysis.summary.avg_recovery_time_ms,
+            analysis.summary.p90_recovery_time_ms,
+            analysis.summary.avg_path_change_reaction_ms,
+            analysis.summary.avg_target_switch_reaction_ms,
+            analysis.summary.avg_trigger_magnitude_deg,
+            analysis.summary.avg_peak_yaw_error_deg,
+            analysis.summary.stable_response_ratio,
+            current_unix_ms(),
+        ],
+    )?;
+
+    let mut stmt = tx.prepare(
+        "
+        INSERT INTO session_target_response_episodes (
+            session_id,
+            episode_idx,
+            episode_id,
+            kind,
+            start_ms,
+            end_ms,
+            target_id,
+            target_label,
+            trigger_magnitude_deg,
+            peak_yaw_error_deg,
+            reaction_time_ms,
+            pre_slowdown_reaction_ms,
+            recovery_time_ms,
+            stable_response
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ",
+    )?;
+
+    for (index, episode) in analysis.episodes.iter().enumerate() {
+        stmt.execute(params![
+            session_id,
+            index as i64,
+            &episode.id,
+            episode.kind.as_db_str(),
+            episode.start_ms as i64,
+            episode.end_ms as i64,
+            &episode.target_id,
+            &episode.target_label,
+            episode.trigger_magnitude_deg,
+            episode.peak_yaw_error_deg,
+            episode.reaction_time_ms,
+            episode.pre_slowdown_reaction_ms,
+            episode.recovery_time_ms,
+            if episode.stable_response { 1i64 } else { 0i64 },
+        ])?;
+    }
+    drop(stmt);
+
+    Ok(())
+}
+
+fn query_target_response_analysis(
+    conn: &Connection,
+    session_id: &str,
+) -> Result<Option<crate::target_response::TargetResponseAnalysis>> {
+    let summary = conn
+        .query_row(
+            "
+            SELECT
+                episode_count,
+                path_change_count,
+                target_switch_count,
+                response_coverage_pct,
+                avg_reaction_time_ms,
+                p90_reaction_time_ms,
+                avg_pre_slowdown_reaction_ms,
+                avg_recovery_time_ms,
+                p90_recovery_time_ms,
+                avg_path_change_reaction_ms,
+                avg_target_switch_reaction_ms,
+                avg_trigger_magnitude_deg,
+                avg_peak_yaw_error_deg,
+                stable_response_ratio
+            FROM session_target_response_summaries
+            WHERE session_id = ?1
+            ",
+            params![session_id],
+            |row| {
+                Ok((
+                    crate::target_response::SessionTargetResponseSnapshot {
+                        episode_count: row.get::<_, i64>(0)? as u32,
+                        path_change_count: row.get::<_, i64>(1)? as u32,
+                        target_switch_count: row.get::<_, i64>(2)? as u32,
+                        avg_reaction_time_ms: row.get(4)?,
+                        p90_reaction_time_ms: row.get(5)?,
+                        avg_pre_slowdown_reaction_ms: row.get(6)?,
+                        avg_recovery_time_ms: row.get(7)?,
+                        p90_recovery_time_ms: row.get(8)?,
+                        avg_path_change_reaction_ms: row.get(9)?,
+                        avg_target_switch_reaction_ms: row.get(10)?,
+                        avg_trigger_magnitude_deg: row.get(11)?,
+                        avg_peak_yaw_error_deg: row.get(12)?,
+                        stable_response_ratio: row.get(13)?,
+                    },
+                    row.get::<_, Option<f64>>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((summary, response_coverage_pct)) = summary else {
+        return Ok(None);
+    };
+
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            episode_id,
+            kind,
+            start_ms,
+            end_ms,
+            target_id,
+            target_label,
+            trigger_magnitude_deg,
+            peak_yaw_error_deg,
+            reaction_time_ms,
+            pre_slowdown_reaction_ms,
+            recovery_time_ms,
+            stable_response
+        FROM session_target_response_episodes
+        WHERE session_id = ?1
+        ORDER BY episode_idx ASC
+        ",
+    )?;
+    let rows = stmt.query_map(params![session_id], |row| {
+        let kind_text = row.get::<_, String>(1)?;
+        Ok(crate::target_response::TargetResponseEpisode {
+            id: row.get(0)?,
+            kind: crate::target_response::TargetResponseEpisodeKind::from_db_str(&kind_text)
+                .unwrap_or(crate::target_response::TargetResponseEpisodeKind::PathChange),
+            start_ms: row.get::<_, i64>(2)? as u64,
+            end_ms: row.get::<_, i64>(3)? as u64,
+            target_id: row.get(4)?,
+            target_label: row.get(5)?,
+            trigger_magnitude_deg: row.get(6)?,
+            peak_yaw_error_deg: row.get(7)?,
+            reaction_time_ms: row.get(8)?,
+            pre_slowdown_reaction_ms: row.get(9)?,
+            recovery_time_ms: row.get(10)?,
+            stable_response: row.get::<_, i64>(11)? != 0,
+        })
+    })?;
+
+    let mut episodes = Vec::new();
+    for row in rows {
+        episodes.push(row?);
+    }
+
+    Ok(Some(crate::target_response::TargetResponseAnalysis {
+        episode_count: summary.episode_count,
+        response_coverage_pct,
+        summary,
+        episodes,
+    }))
+}
+
+fn query_all_target_response_summaries(
+    conn: &Connection,
+) -> Result<HashMap<String, crate::target_response::TargetResponseSummaryRecord>> {
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            session_id,
+            episode_count,
+            path_change_count,
+            target_switch_count,
+            response_coverage_pct,
+            avg_reaction_time_ms,
+            p90_reaction_time_ms,
+            avg_pre_slowdown_reaction_ms,
+            avg_recovery_time_ms,
+            p90_recovery_time_ms,
+            avg_path_change_reaction_ms,
+            avg_target_switch_reaction_ms,
+            avg_trigger_magnitude_deg,
+            avg_peak_yaw_error_deg,
+            stable_response_ratio
+        FROM session_target_response_summaries
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let session_id = row.get::<_, String>(0)?;
+        Ok(crate::target_response::TargetResponseSummaryRecord {
+            session_id: session_id.clone(),
+            response_coverage_pct: row.get(4)?,
+            summary: crate::target_response::SessionTargetResponseSnapshot {
+                episode_count: row.get::<_, i64>(1)? as u32,
+                path_change_count: row.get::<_, i64>(2)? as u32,
+                target_switch_count: row.get::<_, i64>(3)? as u32,
+                avg_reaction_time_ms: row.get(5)?,
+                p90_reaction_time_ms: row.get(6)?,
+                avg_pre_slowdown_reaction_ms: row.get(7)?,
+                avg_recovery_time_ms: row.get(8)?,
+                p90_recovery_time_ms: row.get(9)?,
+                avg_path_change_reaction_ms: row.get(10)?,
+                avg_target_switch_reaction_ms: row.get(11)?,
+                avg_trigger_magnitude_deg: row.get(12)?,
+                avg_peak_yaw_error_deg: row.get(13)?,
+                stable_response_ratio: row.get(14)?,
+            },
+        })
+    })?;
+
+    let mut summaries = HashMap::new();
+    for row in rows {
+        let summary = row?;
+        summaries.insert(summary.session_id.clone(), summary);
+    }
+    Ok(summaries)
+}
+
+pub fn upsert_coaching_recommendation_evaluations(
+    app: &AppHandle,
+    evaluations: &[CoachingRecommendationEvaluation],
+) -> Result<usize> {
+    if evaluations.is_empty() {
+        return Ok(0);
+    }
+    let mut conn = connect(app)?;
+    let tx = conn.transaction()?;
+    let mut stmt = tx.prepare(
+        "
+        INSERT INTO coaching_recommendation_evaluations (
+            evaluation_id,
+            snapshot_kind,
+            recommendation_id,
+            recommendation_title,
+            signal_key,
+            status,
+            created_at_unix_ms,
+            updated_at_unix_ms,
+            anchor_sample_count,
+            latest_sample_count,
+            anchor_metric_value,
+            latest_metric_value,
+            outcome_delta,
+            context_json
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+        ON CONFLICT(evaluation_id) DO UPDATE SET
+            snapshot_kind = excluded.snapshot_kind,
+            recommendation_id = excluded.recommendation_id,
+            recommendation_title = excluded.recommendation_title,
+            signal_key = excluded.signal_key,
+            status = excluded.status,
+            created_at_unix_ms = excluded.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms,
+            anchor_sample_count = excluded.anchor_sample_count,
+            latest_sample_count = excluded.latest_sample_count,
+            anchor_metric_value = excluded.anchor_metric_value,
+            latest_metric_value = excluded.latest_metric_value,
+            outcome_delta = excluded.outcome_delta,
+            context_json = excluded.context_json
+        ",
+    )?;
+
+    for evaluation in evaluations {
+        stmt.execute(params![
+            &evaluation.evaluation_id,
+            &evaluation.snapshot_kind,
+            &evaluation.recommendation_id,
+            &evaluation.recommendation_title,
+            &evaluation.signal_key,
+            &evaluation.status,
+            evaluation.created_at_unix_ms as i64,
+            evaluation.updated_at_unix_ms as i64,
+            evaluation.anchor_sample_count as i64,
+            evaluation.latest_sample_count as i64,
+            evaluation.anchor_metric_value,
+            evaluation.latest_metric_value,
+            evaluation.outcome_delta,
+            serde_json::to_string(&evaluation.context_json)
+                .context("could not encode coaching evaluation json")?,
+        ])?;
+    }
+    drop(stmt);
+    tx.commit()?;
+    Ok(evaluations.len())
+}
+
+pub fn get_coaching_recommendation_evaluations(
+    app: &AppHandle,
+    snapshot_kind: Option<&str>,
+    status: Option<&str>,
+) -> Result<Vec<CoachingRecommendationEvaluation>> {
+    let conn = connect(app)?;
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            evaluation_id,
+            snapshot_kind,
+            recommendation_id,
+            recommendation_title,
+            signal_key,
+            status,
+            created_at_unix_ms,
+            updated_at_unix_ms,
+            anchor_sample_count,
+            latest_sample_count,
+            anchor_metric_value,
+            latest_metric_value,
+            outcome_delta,
+            context_json
+        FROM coaching_recommendation_evaluations
+        WHERE (?1 IS NULL OR snapshot_kind = ?1)
+          AND (?2 IS NULL OR status = ?2)
+        ORDER BY updated_at_unix_ms DESC, created_at_unix_ms DESC
+        ",
+    )?;
+    let rows = stmt.query_map(params![snapshot_kind, status], |row| {
+        let context_json = row.get::<_, String>(13)?;
+        Ok(CoachingRecommendationEvaluation {
+            evaluation_id: row.get(0)?,
+            snapshot_kind: row.get(1)?,
+            recommendation_id: row.get(2)?,
+            recommendation_title: row.get(3)?,
+            signal_key: row.get(4)?,
+            status: row.get(5)?,
+            created_at_unix_ms: row.get::<_, i64>(6)? as u64,
+            updated_at_unix_ms: row.get::<_, i64>(7)? as u64,
+            anchor_sample_count: row.get::<_, i64>(8)? as u32,
+            latest_sample_count: row.get::<_, i64>(9)? as u32,
+            anchor_metric_value: row.get(10)?,
+            latest_metric_value: row.get(11)?,
+            outcome_delta: row.get(12)?,
+            context_json: serde_json::from_str(&context_json).unwrap_or(serde_json::Value::Null),
+        })
+    })?;
+
+    let mut evaluations = Vec::new();
+    for row in rows {
+        evaluations.push(row?);
+    }
+    Ok(evaluations)
+}
+
+pub fn upsert_coaching_user_feedback(
+    app: &AppHandle,
+    feedback: &CoachingUserFeedbackRecord,
+) -> Result<()> {
+    let conn = connect(app)?;
+    conn.execute(
+        "
+        INSERT INTO coaching_user_feedback (
+            snapshot_kind,
+            recommendation_id,
+            signal_key,
+            feedback,
+            notes,
+            created_at_unix_ms,
+            updated_at_unix_ms,
+            context_json
+        )
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ON CONFLICT(snapshot_kind, recommendation_id) DO UPDATE SET
+            signal_key = excluded.signal_key,
+            feedback = excluded.feedback,
+            notes = excluded.notes,
+            created_at_unix_ms = excluded.created_at_unix_ms,
+            updated_at_unix_ms = excluded.updated_at_unix_ms,
+            context_json = excluded.context_json
+        ",
+        params![
+            &feedback.snapshot_kind,
+            &feedback.recommendation_id,
+            &feedback.signal_key,
+            &feedback.feedback,
+            &feedback.notes,
+            feedback.created_at_unix_ms as i64,
+            feedback.updated_at_unix_ms as i64,
+            serde_json::to_string(&feedback.context_json)
+                .context("could not encode coaching user feedback json")?,
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn get_coaching_user_feedback(
+    app: &AppHandle,
+    snapshot_kind: Option<&str>,
+) -> Result<Vec<CoachingUserFeedbackRecord>> {
+    let conn = connect(app)?;
+    let mut stmt = conn.prepare(
+        "
+        SELECT
+            snapshot_kind,
+            recommendation_id,
+            signal_key,
+            feedback,
+            notes,
+            created_at_unix_ms,
+            updated_at_unix_ms,
+            context_json
+        FROM coaching_user_feedback
+        WHERE (?1 IS NULL OR snapshot_kind = ?1)
+        ORDER BY updated_at_unix_ms DESC
+        ",
+    )?;
+    let rows = stmt.query_map(params![snapshot_kind], |row| {
+        let context_json = row.get::<_, String>(7)?;
+        Ok(CoachingUserFeedbackRecord {
+            snapshot_kind: row.get(0)?,
+            recommendation_id: row.get(1)?,
+            signal_key: row.get(2)?,
+            feedback: row.get(3)?,
+            notes: row.get(4)?,
+            created_at_unix_ms: row.get::<_, i64>(5)? as u64,
+            updated_at_unix_ms: row.get::<_, i64>(6)? as u64,
+            context_json: serde_json::from_str(&context_json).unwrap_or(serde_json::Value::Null),
+        })
+    })?;
+
+    let mut feedback_rows = Vec::new();
+    for row in rows {
+        feedback_rows.push(row?);
+    }
+    Ok(feedback_rows)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -2817,12 +3697,12 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
             ",
         )?;
         stmt.query_map([], |row| {
-            let shots_fired = row.get::<_, Option<f64>>(12)?;
-            let shots_hit = row.get::<_, Option<f64>>(13)?;
-            let kills = row.get::<_, Option<f64>>(14)?;
-            let kills_per_second = row.get::<_, Option<f64>>(15)?;
-            let damage_done = row.get::<_, Option<f64>>(16)?;
-            let damage_possible = row.get::<_, Option<f64>>(17)?;
+            let shots_fired = row.get::<_, Option<f64>>(13)?;
+            let shots_hit = row.get::<_, Option<f64>>(14)?;
+            let kills = row.get::<_, Option<f64>>(15)?;
+            let kills_per_second = row.get::<_, Option<f64>>(16)?;
+            let damage_done = row.get::<_, Option<f64>>(17)?;
+            let damage_possible = row.get::<_, Option<f64>>(18)?;
             let has_run_summary = shots_fired.is_some()
                 || shots_hit.is_some()
                 || kills.is_some()
@@ -2841,7 +3721,8 @@ pub fn backfill_session_classifications(app: &AppHandle) -> Result<usize> {
                     scenario_subtype: row.get(4)?,
                     kills: row.get::<_, Option<i64>>(5)?.map(|value| value as u32),
                     avg_kps: row.get(6)?,
-                    accuracy_pct: row.get(7)?,
+                    accuracy_pct: normalize_accuracy_pct(row.get(7)?, None, None)
+                        .map(|value| value as f32),
                     total_damage: row.get(8)?,
                     avg_ttk_ms: row.get(9)?,
                     best_ttk_ms: row.get(10)?,
