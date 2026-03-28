@@ -5635,7 +5635,10 @@ mod imp {
                 return BOOL(1);
             }
             let has_owner = match GetWindow(hwnd, GW_OWNER) {
-                Ok(owner) => !owner.is_invalid(),
+                Ok(owner) => {
+                    let owner: HWND = owner;
+                    !owner.is_invalid()
+                }
                 Err(_) => false,
             };
             if has_owner {
@@ -5766,21 +5769,25 @@ mod imp {
                     return Err(format!("GetModuleHandleW: {e}"));
                 }
             };
-            let load_lib = match GetProcAddress(k32, PCSTR(b"LoadLibraryW\0".as_ptr())) {
-                Some(addr) => addr,
-                None => {
-                    log::error!("bridge: GetProcAddress(LoadLibraryW) failed");
-                    let _ = VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
-                    let _ = CloseHandle(proc);
-                    return Err("GetProcAddress(LoadLibraryW) failed".into());
-                }
-            };
+            let load_lib: unsafe extern "system" fn(*const u16) -> isize =
+                match GetProcAddress(k32, PCSTR(b"LoadLibraryW\0".as_ptr())) {
+                    Some(addr) => addr,
+                    None => {
+                        log::error!("bridge: GetProcAddress(LoadLibraryW) failed");
+                        let _ = VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+                        let _ = CloseHandle(proc);
+                        return Err("GetProcAddress(LoadLibraryW) failed".into());
+                    }
+                };
 
             let thread = match CreateRemoteThread(
                 proc,
                 None,
                 0,
-                Some(std::mem::transmute(load_lib)),
+                Some(std::mem::transmute::<
+                    unsafe extern "system" fn(*const u16) -> isize,
+                    unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
+                >(load_lib)),
                 Some(remote.cast_const()),
                 0u32, // flags
                 None,

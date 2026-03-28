@@ -13,7 +13,9 @@ use dxgi_capture_rs::{CaptureError, DXGIManager};
 #[cfg(target_os = "windows")]
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 #[cfg(target_os = "windows")]
-use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIFactory1};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_OUTPUT_DESC, IDXGIAdapter1, IDXGIFactory1, IDXGIOutput,
+};
 #[cfg(target_os = "windows")]
 use windows::Win32::Graphics::Gdi::{
     ClientToScreen, GetMonitorInfoW, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITORINFO,
@@ -396,7 +398,10 @@ fn is_hwnd_capture_candidate(hwnd: HWND) -> bool {
         return false;
     }
     let has_owner = match unsafe { GetWindow(hwnd, GW_OWNER) } {
-        Ok(owner) => !owner.is_invalid(),
+        Ok(owner) => {
+            let owner: HWND = owner;
+            !owner.is_invalid()
+        }
         Err(_) => false,
     };
     if has_owner {
@@ -501,14 +506,16 @@ fn find_dxgi_output_for_hmonitor(hmon: HMONITOR) -> usize {
     };
     let mut global_idx = 0usize;
     'adapters: for adapter_i in 0u32.. {
-        let Ok(adapter) = (unsafe { factory.EnumAdapters1(adapter_i) }) else {
+        let Ok(adapter): Result<IDXGIAdapter1, _> = (unsafe { factory.EnumAdapters1(adapter_i) })
+        else {
             break 'adapters;
         };
         for output_i in 0u32.. {
-            let Ok(output) = (unsafe { adapter.EnumOutputs(output_i) }) else {
+            let Ok(output): Result<IDXGIOutput, _> = (unsafe { adapter.EnumOutputs(output_i) })
+            else {
                 break;
             };
-            let Ok(desc) = (unsafe { output.GetDesc() }) else {
+            let Ok(desc): Result<DXGI_OUTPUT_DESC, _> = (unsafe { output.GetDesc() }) else {
                 continue;
             };
             if desc.AttachedToDesktop.as_bool() {
@@ -651,8 +658,10 @@ fn dxgi_capture_loop(generation: u64) {
         let mon_h = mon_h as u32;
 
         // Translate client screen coordinates to monitor-local coordinates.
-        let win_x = (client_screen_x - monitor_origin.0).clamp(0, mon_w as i32) as u32;
-        let win_y = (client_screen_y - monitor_origin.1).clamp(0, mon_h as i32) as u32;
+        let client_local_x: i32 = client_screen_x - monitor_origin.0;
+        let client_local_y: i32 = client_screen_y - monitor_origin.1;
+        let win_x = client_local_x.clamp(0, mon_w as i32) as u32;
+        let win_y = client_local_y.clamp(0, mon_h as i32) as u32;
         let win_right = (win_x + client_w).min(mon_w);
         let win_bottom = (win_y + client_h).min(mon_h);
         if win_right <= win_x || win_bottom <= win_y {
