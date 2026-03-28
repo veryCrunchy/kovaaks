@@ -5769,23 +5769,22 @@ mod imp {
                     return Err(format!("GetModuleHandleW: {e}"));
                 }
             };
-            let load_lib: unsafe extern "system" fn(*const u16) -> isize =
-                match GetProcAddress(k32, PCSTR(b"LoadLibraryW\0".as_ptr())) {
-                    Some(addr) => addr,
-                    None => {
-                        log::error!("bridge: GetProcAddress(LoadLibraryW) failed");
-                        let _ = VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
-                        let _ = CloseHandle(proc);
-                        return Err("GetProcAddress(LoadLibraryW) failed".into());
-                    }
-                };
+            let load_lib = match GetProcAddress(k32, PCSTR(b"LoadLibraryW\0".as_ptr())) {
+                Some(addr) => addr,
+                None => {
+                    log::error!("bridge: GetProcAddress(LoadLibraryW) failed");
+                    let _ = VirtualFreeEx(proc, remote, 0, MEM_RELEASE);
+                    let _ = CloseHandle(proc);
+                    return Err("GetProcAddress(LoadLibraryW) failed".into());
+                }
+            };
 
             let thread = match CreateRemoteThread(
                 proc,
                 None,
                 0,
                 Some(std::mem::transmute::<
-                    unsafe extern "system" fn(*const u16) -> isize,
+                    unsafe extern "system" fn() -> isize,
                     unsafe extern "system" fn(*mut core::ffi::c_void) -> u32,
                 >(load_lib)),
                 Some(remote.cast_const()),
