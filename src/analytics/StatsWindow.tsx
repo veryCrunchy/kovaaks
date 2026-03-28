@@ -1,8 +1,10 @@
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useAppTheme } from "../hooks/useAppTheme";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import type { Update } from "@tauri-apps/plugin-updater";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { LeaderboardBrowser, ScenarioLeaderboardPanel } from "./LeaderboardBrowser";
 import { DebugTab } from "./DebugTab";
 import { HubBrowserPanel } from "./HubBrowser";
@@ -20,6 +22,7 @@ import {
   Line,
   BarChart,
   Bar,
+  ComposedChart,
   Brush,
   Cell,
   RadarChart,
@@ -1095,6 +1098,456 @@ interface RunMomentInsight {
 
 interface SessionRunCoachingAnalysis {
   keyMoments: RunMomentInsight[];
+}
+
+interface LocalLlmRuntimeStatus {
+  state: string;
+  detail: string;
+  canStart: boolean;
+  assetRoot: string;
+  manifestPath: string;
+  runnerPath: string;
+  modelPath: string;
+  endpoint: string;
+  modelId: string;
+  pid: number | null;
+  launchedAtUnixMs: number | null;
+}
+
+interface LocalCoachInputCard {
+  title: string;
+  badge: string;
+  body: string;
+  tip: string;
+  signals: string[];
+}
+
+interface LocalCoachKnowledgePreview {
+  id: string;
+  title: string;
+  summary: string;
+  actions: string[];
+  avoid: string[];
+}
+
+interface LocalCoachVisualPoint {
+  label: string;
+  value: number;
+  secondaryValue?: number | null;
+  note: string;
+  values?: Record<string, number>;
+}
+
+interface LocalCoachVisualSeries {
+  key: string;
+  label: string;
+  kind: string;
+  color: string;
+}
+
+interface LocalCoachVisual {
+  id: string;
+  kind: string;
+  title: string;
+  subtitle: string;
+  primaryLabel: string;
+  secondaryLabel: string;
+  points: LocalCoachVisualPoint[];
+  series: LocalCoachVisualSeries[];
+  detailLines: string[];
+}
+
+interface LocalCoachFact {
+  key: string;
+  label: string;
+  valueText: string;
+  numericValue?: number;
+  boolValue?: boolean;
+  direction: string;
+  confidence: string;
+}
+
+interface LocalCoachTurn {
+  question: string;
+  answer: string;
+}
+
+interface LocalCoachChatResponse {
+  message: string;
+  model: string;
+  runtimeStatus: LocalLlmRuntimeStatus;
+  knowledgeItems: LocalCoachKnowledgePreview[];
+  visuals: LocalCoachVisual[];
+}
+
+interface LocalCoachStreamEvent {
+  streamId: string;
+  kind: string;
+  delta: string;
+  content: string;
+  done: boolean;
+  error: string | null;
+}
+
+const LOCAL_COACH_STREAM_EVENT = "local-coach-stream";
+const LOCAL_COACH_VISUAL_REF_RE = /!?\[\[(?:visual:)?([^[\]]+)\]\]/gi;
+
+function LocalCoachMarkdown({ content }: { content: string }) {
+  return (
+    <div
+      style={{
+        background: "rgba(255,255,255,0.03)",
+        border: `1px solid ${C.border}`,
+        borderRadius: 12,
+        padding: "12px 14px",
+        fontSize: 12,
+        color: C.textSub,
+        lineHeight: 1.75,
+      }}
+    >
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => <h1 style={{ margin: "0 0 10px", fontSize: 18, lineHeight: 1.25, color: C.text }}>{children}</h1>,
+          h2: ({ children }) => <h2 style={{ margin: "14px 0 8px", fontSize: 15, lineHeight: 1.3, color: C.text }}>{children}</h2>,
+          h3: ({ children }) => <h3 style={{ margin: "12px 0 6px", fontSize: 13, lineHeight: 1.35, color: C.text }}>{children}</h3>,
+          p: ({ children }) => <p style={{ margin: "0 0 10px" }}>{children}</p>,
+          ul: ({ children }) => <ul style={{ margin: "0 0 10px", paddingLeft: 18 }}>{children}</ul>,
+          ol: ({ children }) => <ol style={{ margin: "0 0 10px", paddingLeft: 18 }}>{children}</ol>,
+          li: ({ children }) => <li style={{ marginBottom: 4 }}>{children}</li>,
+          strong: ({ children }) => <strong style={{ color: C.text, fontWeight: 700 }}>{children}</strong>,
+          code: (({ className, children }: any) =>
+            !className ? (
+              <code
+                style={{
+                  background: "rgba(255,255,255,0.06)",
+                  border: `1px solid ${C.borderSub}`,
+                  borderRadius: 6,
+                  padding: "1px 5px",
+                  fontSize: "0.95em",
+                  color: C.text,
+                }}
+              >
+                {children}
+              </code>
+            ) : (
+              <code>{children}</code>
+            )) as any,
+          pre: ({ children }) => (
+            <pre
+              style={{
+                margin: "0 0 10px",
+                padding: "10px 12px",
+                overflowX: "auto",
+                borderRadius: 10,
+                background: "rgba(0,0,0,0.22)",
+                border: `1px solid ${C.borderSub}`,
+                color: C.text,
+              }}
+            >
+              {children}
+            </pre>
+          ),
+          blockquote: ({ children }) => (
+            <blockquote
+              style={{
+                margin: "0 0 10px",
+                padding: "2px 0 2px 12px",
+                borderLeft: `3px solid ${C.accentBorder}`,
+                color: C.textSub,
+              }}
+            >
+              {children}
+            </blockquote>
+          ),
+          img: ({ alt, src }) => (
+            <div
+              style={{
+                margin: "0 0 10px",
+                padding: "10px 12px",
+                borderRadius: 10,
+                border: `1px solid ${C.borderSub}`,
+                background: "rgba(255,255,255,0.04)",
+                color: C.textSub,
+                fontSize: 11,
+              }}
+            >
+              Invalid generated chart reference{alt ? `: ${alt}` : ""}{src ? ` (${src})` : ""}.
+            </div>
+          ),
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+}
+
+function normalizeInlineMarkdownSegment(segment: string): string {
+  return segment
+    .replace(/^\n+/, "")
+    .replace(/\n+$/, "")
+    .replace(/[ \t]+\n/g, "\n");
+}
+
+function effectiveVisualSeries(visual: LocalCoachVisual): LocalCoachVisualSeries[] {
+  if (visual.series?.length) {
+    return visual.series.map((series) => ({
+      key: series.key,
+      label: series.label || series.key,
+      kind: series.kind || (visual.kind === "bar" ? "bar" : "line"),
+      color: series.color || "",
+    }));
+  }
+
+  const inferred: LocalCoachVisualSeries[] = [
+    {
+      key: "value",
+      label: visual.primaryLabel || "Value",
+      kind: visual.kind === "bar" ? "bar" : "line",
+      color: "",
+    },
+  ];
+  if (visual.secondaryLabel && visual.points.some((point) => point.secondaryValue != null || point.values?.secondaryValue != null)) {
+    inferred.push({
+      key: "secondaryValue",
+      label: visual.secondaryLabel,
+      kind: visual.kind === "bar" ? "bar" : "line",
+      color: "",
+    });
+  }
+  return inferred;
+}
+
+function visualChartData(visual: LocalCoachVisual): Array<Record<string, number | string | null>> {
+  return visual.points.map((point) => ({
+    label: point.label,
+    note: point.note,
+    value: point.value,
+    secondaryValue: point.secondaryValue ?? null,
+    ...(point.values ?? {}),
+  }));
+}
+
+function visualSeriesColor(series: LocalCoachVisualSeries, index: number): string {
+  if (series.color?.trim()) return series.color.trim();
+  const palette = [C.accent, "#ffb400", "#53d3ff", "#7ef29a", "#ff7aa2", "#9f8cff"];
+  return palette[index % palette.length];
+}
+
+function seriesNumericValues(
+  entry: LocalCoachVisualSeries,
+  chartData: Array<Record<string, number | string | null>>,
+): number[] {
+  return chartData
+    .map((row) => row[entry.key])
+    .filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+}
+
+function visualAxisAssignment(
+  series: LocalCoachVisualSeries[],
+  chartData: Array<Record<string, number | string | null>>,
+): Record<string, "left" | "right"> {
+  const assignments: Record<string, "left" | "right"> = {};
+  if (series.length <= 1) {
+    for (const entry of series) assignments[entry.key] = "left";
+    return assignments;
+  }
+
+  const stats = series
+    .map((entry) => {
+      const values = seriesNumericValues(entry, chartData);
+      const maxAbs = values.reduce((acc, value) => Math.max(acc, Math.abs(value)), 0);
+      return { entry, maxAbs };
+    })
+    .sort((a, b) => b.maxAbs - a.maxAbs);
+
+  for (const { entry } of stats) assignments[entry.key] = "left";
+
+  const [largest, second] = stats;
+  if (!largest || largest.maxAbs <= 0) {
+    return assignments;
+  }
+
+  const secondMax = second?.maxAbs ?? 0;
+  const ratio = secondMax > 0 ? largest.maxAbs / secondMax : Infinity;
+  if (ratio < 8) {
+    return assignments;
+  }
+
+  assignments[largest.entry.key] = "right";
+  return assignments;
+}
+
+function LocalCoachVisualCard({ visual }: { visual: LocalCoachVisual }) {
+  const series = effectiveVisualSeries(visual);
+  const chartData = visualChartData(visual);
+  const axisBySeries = visualAxisAssignment(series, chartData);
+  const hasRightAxis = series.some((entry) => axisBySeries[entry.key] === "right");
+
+  return (
+    <div
+      style={{
+        borderRadius: 12,
+        border: `1px solid ${C.border}`,
+        background: "rgba(255,255,255,0.02)",
+        padding: 12,
+        display: "flex",
+        flexDirection: "column",
+        gap: 8,
+      }}
+    >
+      <div>
+        <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{visual.title}</div>
+        {visual.subtitle && (
+          <div style={{ marginTop: 4, fontSize: 11, color: C.textSub, lineHeight: 1.5 }}>
+            {visual.subtitle}
+          </div>
+        )}
+      </div>
+      <ResponsiveContainer width="100%" height={220}>
+        {visual.kind === "combo" ? (
+          <ComposedChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis dataKey="label" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} interval={0} angle={-18} textAnchor="end" height={48} />
+            <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={40} />
+            {hasRightAxis ? <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={52} /> : null}
+            <Tooltip content={<MiniTooltip />} />
+            {series.map((entry, index) =>
+              entry.kind === "bar" ? (
+                <Bar yAxisId={axisBySeries[entry.key] ?? "left"} key={entry.key} dataKey={entry.key} fill={visualSeriesColor(entry, index)} radius={[6, 6, 0, 0]} name={entry.label} />
+              ) : (
+                <Line yAxisId={axisBySeries[entry.key] ?? "left"} key={entry.key} type="monotone" dataKey={entry.key} stroke={visualSeriesColor(entry, index)} strokeWidth={2.2} dot={false} name={entry.label} />
+              ),
+            )}
+          </ComposedChart>
+        ) : visual.kind === "bar" ? (
+          <BarChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis dataKey="label" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} interval={0} angle={-18} textAnchor="end" height={48} />
+            <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={40} />
+            {hasRightAxis ? <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={52} /> : null}
+            <Tooltip content={<MiniTooltip />} />
+            {series.map((entry, index) => (
+              <Bar yAxisId={axisBySeries[entry.key] ?? "left"} key={entry.key} dataKey={entry.key} fill={visualSeriesColor(entry, index)} radius={[6, 6, 0, 0]} name={entry.label} />
+            ))}
+          </BarChart>
+        ) : (
+          <LineChart data={chartData} margin={{ top: 4, right: 8, bottom: 0, left: 0 }}>
+            <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+            <XAxis dataKey="label" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} interval={0} angle={-18} textAnchor="end" height={48} />
+            <YAxis yAxisId="left" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={40} />
+            {hasRightAxis ? <YAxis yAxisId="right" orientation="right" tick={{ fill: "rgba(255,255,255,0.45)", fontSize: 10 }} width={52} /> : null}
+            <Tooltip content={<MiniTooltip />} />
+            {series.map((entry, index) => (
+              <Line yAxisId={axisBySeries[entry.key] ?? "left"} key={entry.key} type="monotone" dataKey={entry.key} stroke={visualSeriesColor(entry, index)} strokeWidth={2.2} dot={false} name={entry.label} />
+            ))}
+          </LineChart>
+        )}
+      </ResponsiveContainer>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", fontSize: 10, color: C.textFaint }}>
+        {series.map((entry) => (
+          <span key={entry.key}>{entry.label}</span>
+        ))}
+      </div>
+      {visual.detailLines?.length ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, fontSize: 11, color: C.textSub, lineHeight: 1.6 }}>
+          {visual.detailLines.map((line, index) => (
+            <div key={`${visual.id}-detail-${index}`}>{line}</div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function LocalCoachVisuals({ visuals, heading = "Additional visuals" }: { visuals: LocalCoachVisual[]; heading?: string }) {
+  if (visuals.length === 0) return null;
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+      <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+        {heading}
+      </div>
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {visuals.map((visual) => (
+          <div key={visual.id} style={{ flex: "1 1 300px", minWidth: 260 }}>
+            <LocalCoachVisualCard visual={visual} />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function LocalCoachResponseBody({ content, visuals }: { content: string; visuals: LocalCoachVisual[] }) {
+  const byId = new Map(visuals.map((visual) => [visual.id.toLowerCase(), visual]));
+  const parts: Array<{ key: string; kind: "markdown" | "visual"; value: string }> = [];
+  let lastIndex = 0;
+
+  for (const match of content.matchAll(LOCAL_COACH_VISUAL_REF_RE)) {
+    const full = match[0];
+    const rawId = match[1];
+    const offset = match.index ?? 0;
+    const before = content.slice(lastIndex, offset);
+    const normalizedBefore = normalizeInlineMarkdownSegment(before);
+    if (normalizedBefore.trim()) {
+      parts.push({
+        key: `text-${lastIndex}`,
+        kind: "markdown",
+        value: normalizedBefore,
+      });
+    }
+    parts.push({
+      key: `visual-${offset}`,
+      kind: "visual",
+      value: rawId.trim().toLowerCase(),
+    });
+    lastIndex = offset + full.length;
+  }
+
+  const tail = content.slice(lastIndex);
+  const normalizedTail = normalizeInlineMarkdownSegment(tail);
+  if (normalizedTail.trim()) {
+    parts.push({
+      key: `text-tail-${lastIndex}`,
+      kind: "markdown",
+      value: normalizedTail,
+    });
+  }
+
+  const hasInlineRefs = parts.some((part) => part.kind === "visual");
+  const referencedVisualIds = new Set(
+    parts
+      .filter((part) => part.kind === "visual")
+      .map((part) => part.value.toLowerCase()),
+  );
+  const extraVisuals = visuals.filter(
+    (visual) => !referencedVisualIds.has(visual.id.toLowerCase()),
+  );
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      {parts.length > 0 ? (
+        parts.map((part) => {
+          if (part.kind === "markdown") {
+            return <LocalCoachMarkdown key={part.key} content={part.value} />;
+          }
+          const visual = byId.get(part.value);
+          if (!visual) return null;
+          return <LocalCoachVisualCard key={part.key} visual={visual} />;
+        })
+      ) : (
+        <LocalCoachMarkdown content={content} />
+      )}
+      {extraVisuals.length > 0 && (
+        <LocalCoachVisuals
+          visuals={extraVisuals}
+          heading={hasInlineRefs ? "Additional visuals" : "Coach visuals"}
+        />
+      )}
+    </div>
+  );
 }
 
 function runAvg(values: number[]): number | null {
@@ -5859,6 +6312,8 @@ function CoachingTab({
   onExploreDrill,
   feedbackRows,
   onFeedback,
+  appSettings,
+  globalSummary,
 }: {
   records: AnalyticsSessionRecord[];
   sorted: AnalyticsSessionRecord[];
@@ -5869,8 +6324,20 @@ function CoachingTab({
   onExploreDrill: (query: string) => void;
   feedbackRows: CoachingUserFeedbackRecord[];
   onFeedback: (snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void;
+  appSettings: AppSettings | null;
+  globalSummary: string;
 }) {
   const [scenarioCoachingOverview, setScenarioCoachingOverview] = useState<ScenarioCoachingOverview | null>(null);
+  const [localCoachQuestion, setLocalCoachQuestion] = useState("");
+  const [localCoachGeneral, setLocalCoachGeneral] = useState(false);
+  const [localCoachHistory, setLocalCoachHistory] = useState<LocalCoachTurn[]>([]);
+  const [localCoachRuntime, setLocalCoachRuntime] = useState<LocalLlmRuntimeStatus | null>(null);
+  const [localCoachReply, setLocalCoachReply] = useState<LocalCoachChatResponse | null>(null);
+  const [localCoachDraftMessage, setLocalCoachDraftMessage] = useState("");
+  const [localCoachProgress, setLocalCoachProgress] = useState<string[]>([]);
+  const [localCoachBusy, setLocalCoachBusy] = useState(false);
+  const [localCoachError, setLocalCoachError] = useState<string | null>(null);
+  const localCoachActiveStreamIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -5895,6 +6362,58 @@ function CoachingTab({
       cancelled = true;
     };
   }, [dateRange, scenarioName]);
+
+  useEffect(() => {
+    setLocalCoachHistory([]);
+    setLocalCoachReply(null);
+    setLocalCoachDraftMessage("");
+  }, [scenarioName]);
+
+  useEffect(() => {
+    let cancelled = false;
+    invoke<LocalLlmRuntimeStatus>("get_local_llm_runtime_status")
+      .then((status) => {
+        if (!cancelled) {
+          setLocalCoachRuntime(status);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setLocalCoachRuntime(null);
+          setLocalCoachError(String(error));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [scenarioName]);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlistenPromise = listen<LocalCoachStreamEvent>(LOCAL_COACH_STREAM_EVENT, (event) => {
+      if (disposed) return;
+      if (event.payload.streamId !== localCoachActiveStreamIdRef.current) return;
+      if (event.payload.kind === "error") {
+        setLocalCoachError(event.payload.error?.trim() || "Local coach failed.");
+        setLocalCoachBusy(false);
+        return;
+      }
+      if (event.payload.kind === "status") {
+        const next = event.payload.delta.trim();
+        if (!next) return;
+        setLocalCoachProgress((prev) => {
+          if (prev[prev.length - 1] === next) return prev;
+          return [...prev, next];
+        });
+        return;
+      }
+      setLocalCoachDraftMessage(event.payload.content);
+    });
+    return () => {
+      disposed = true;
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, []);
 
   // CoachingTab always works on the full dataset and handles splits internally.
   const warmupSorted  = sorted.filter((r) => warmupIds.has(r.id));
@@ -5962,6 +6481,218 @@ function CoachingTab({
   const p50 = scenarioCoachingOverview?.p50Score ?? (sortedScores.length > 0 ? percentileOf(sortedScores, 50) : 0);
   const p90 = scenarioCoachingOverview?.p90Score ?? (sortedScores.length > 0 ? percentileOf(sortedScores, 90) : 0);
   const warmupStats = scenarioCoachingOverview?.warmupStats ?? null;
+  const localCoachSignals = Array.from(
+    new Set(
+      coachingCards
+        .flatMap((card) => coachingCardSignalKeys(card))
+        .filter((signal) => signal.trim().length > 0),
+    ),
+  ).slice(0, 8);
+  const localCoachContextTags = [
+    isPlateau ? "plateau" : null,
+    warmupStats ? "warmup" : null,
+    scoreCV >= 12 ? "variance" : null,
+    slope > 0 ? "improving" : slope < 0 ? "downtrend" : null,
+  ].filter((tag): tag is string => tag != null);
+  // ── Rich context for the local coach prompt ──────────────────────────────
+  const allScoresSorted = [...sorted].map((r) => r.score); // chronological, all records
+  const allTimeTotal = records.length;
+  const allTimeBest = allScoresSorted.length > 0 ? Math.max(...allScoresSorted) : 0;
+  const allTimeAvgScore = allScoresSorted.length > 0 ? mean(allScoresSorted) : 0;
+  const recentN = Math.min(7, allScoresSorted.length);
+  const recentScoreValues = allScoresSorted.slice(-recentN);
+  const recentAvgScore = recentScoreValues.length > 0 ? mean(recentScoreValues) : 0;
+  const earlyN = Math.min(10, Math.floor(allScoresSorted.length * 0.25));
+  const earlyAvgScore = earlyN > 0 ? mean(allScoresSorted.slice(0, earlyN)) : 0;
+  const firstTimestampMs = sorted.length > 0 ? sorted[0].timestampMs : 0;
+  const daysPracticing = firstTimestampMs > 0 ? Math.round((Date.now() - firstTimestampMs) / 86_400_000) : 0;
+  const totalPracticeHours = records.reduce((s, r) => s + (r.duration_secs ?? 0), 0) / 3600;
+  const localCoachFacts: LocalCoachFact[] = [
+    {
+      key: "score_cv_pct",
+      label: "Score consistency spread",
+      valueText: `${scoreCV.toFixed(1)}%`,
+      numericValue: scoreCV,
+      direction: "lower_is_better",
+      confidence: "high",
+    },
+    {
+      key: "score_slope_pts_per_run",
+      label: "Learning slope",
+      valueText: `${slope > 0 ? "+" : ""}${Math.round(slope)} pts/run`,
+      numericValue: slope,
+      direction: "higher_is_better",
+      confidence: "high",
+    },
+    {
+      key: "plateau_detected",
+      label: "Plateau detected",
+      valueText: isPlateau ? "yes" : "no",
+      boolValue: isPlateau,
+      direction: "context",
+      confidence: "medium",
+    },
+    ...(warmupStats
+      ? [{
+          key: "warmup_drop_pct",
+          label: "Opening vs settled gap",
+          valueText: `${warmupStats.dropPct.toFixed(0)}% below settled runs`,
+          numericValue: warmupStats.dropPct,
+          direction: "lower_is_better",
+          confidence: "medium",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(allTimeBest > 0
+      ? [{
+          key: "all_time_best_score",
+          label: "All-time best",
+          valueText: `${Math.round(allTimeBest)} pts`,
+          numericValue: allTimeBest,
+          direction: "higher_is_better",
+          confidence: "high",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(recentAvgScore > 0
+      ? [{
+          key: "recent_avg_score",
+          label: "Recent average",
+          valueText: `${Math.round(recentAvgScore)} pts`,
+          numericValue: recentAvgScore,
+          direction: "higher_is_better",
+          confidence: "high",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(allTimeAvgScore > 0
+      ? [{
+          key: "all_time_avg_score",
+          label: "Lifetime average",
+          valueText: `${Math.round(allTimeAvgScore)} pts`,
+          numericValue: allTimeAvgScore,
+          direction: "higher_is_better",
+          confidence: "medium",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(daysPracticing > 0
+      ? [{
+          key: "days_practicing",
+          label: "Days practicing",
+          valueText: `${daysPracticing} days`,
+          numericValue: daysPracticing,
+          direction: "higher_is_better",
+          confidence: "medium",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(totalPracticeHours > 0
+      ? [{
+          key: "total_practice_hours",
+          label: "Practice time",
+          valueText: totalPracticeHours < 1 ? `${Math.round(totalPracticeHours * 60)} min` : `${totalPracticeHours.toFixed(1)} hrs`,
+          numericValue: totalPracticeHours,
+          direction: "higher_is_better",
+          confidence: "medium",
+        } satisfies LocalCoachFact]
+      : []),
+    ...(recentScoreValues.length >= 3
+      ? [{
+          key: "recent_score_window",
+          label: "Recent score window",
+          valueText: recentScoreValues.map((s) => Math.round(s)).join(", "),
+          direction: "context",
+          confidence: "high",
+        } satisfies LocalCoachFact]
+      : []),
+  ];
+
+  const localCoachScenarioSummaryParts = [
+    // Long-term context (the most-missing piece)
+    allTimeTotal > 0
+      ? `Total sessions: ${allTimeTotal}${daysPracticing > 0 ? ` over ${daysPracticing} days` : ""}.`
+      : null,
+    allTimeBest > 0
+      ? `All-time best: ${Math.round(allTimeBest)} pts.`
+      : null,
+    earlyAvgScore > 0 && recentAvgScore > 0 && earlyN >= 3
+      ? `Improved from ~${Math.round(earlyAvgScore)} pts (first ${earlyN} runs) to ~${Math.round(recentAvgScore)} pts recently.`
+      : null,
+    allTimeAvgScore > 0 && recentAvgScore > 0 && allTimeTotal >= 15
+      ? `Lifetime avg: ${Math.round(allTimeAvgScore)} pts; recent avg (last ${recentN}): ${Math.round(recentAvgScore)} pts.`
+      : null,
+    totalPracticeHours > 0
+      ? `Total practice time: ${totalPracticeHours < 1 ? `${Math.round(totalPracticeHours * 60)} min` : `${totalPracticeHours.toFixed(1)} hrs`}.`
+      : null,
+    // Recent actual score values so the LLM can see the real numbers
+    recentScoreValues.length >= 3
+      ? `Recent ${recentN} scores (oldest→newest): ${recentScoreValues.map((s) => Math.round(s)).join(", ")}.`
+      : null,
+    // Current-window derived stats
+    scoreCV > 0 ? `Score consistency spread: ${scoreCV.toFixed(1)}%.` : null,
+    `Learning slope: ${(slope > 0 ? "+" : "") + Math.round(slope)} pts/run.`,
+    isPlateau ? "A plateau is currently detected." : null,
+    warmupStats
+      ? `Warm-up effect: opening runs land about ${warmupStats.dropPct.toFixed(0)}% below settled-in runs.`
+      : null,
+  ].filter((part): part is string => part != null);
+
+  const askLocalCoach = async () => {
+    const question = localCoachQuestion.trim();
+    if (!question) return;
+    const streamId = `local-coach-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    localCoachActiveStreamIdRef.current = streamId;
+    setLocalCoachBusy(true);
+    setLocalCoachError(null);
+    setLocalCoachReply(null);
+    setLocalCoachDraftMessage("");
+    setLocalCoachProgress([]);
+    try {
+      const response = await invoke<LocalCoachChatResponse>("local_llm_stream_coaching_reply", {
+        request: {
+          scenarioName: localCoachGeneral ? "" : scenarioName,
+          scenarioType: localCoachGeneral ? "" : scenarioType,
+          question,
+          signalKeys: localCoachSignals,
+          contextTags: localCoachContextTags,
+          focusArea: appSettings?.coaching_focus_area ?? "balanced",
+          challengePreference: appSettings?.coaching_challenge_preference ?? "balanced",
+          timePreference: appSettings?.coaching_time_preference ?? "this_week",
+          scenarioSummary: localCoachGeneral ? "" : localCoachScenarioSummaryParts.join(" "),
+          globalSummary,
+          general: localCoachGeneral,
+          conversationHistory: localCoachHistory.slice(-4),
+          coachFacts: localCoachFacts,
+          coachingCards: coachingCards.slice(0, 5).map((card): LocalCoachInputCard => ({
+            title: card.title,
+            badge: card.badge,
+            body: card.body,
+            tip: card.tip,
+            signals: coachingCardSignalKeys(card),
+          })),
+        },
+        streamId,
+      });
+      if (localCoachActiveStreamIdRef.current !== streamId) return;
+      setLocalCoachReply(response);
+      setLocalCoachDraftMessage(response.message);
+      setLocalCoachRuntime(response.runtimeStatus);
+      if (response.message) {
+        setLocalCoachHistory((prev) => [...prev, { question, answer: response.message }]);
+      }
+    } catch (error) {
+      if (localCoachActiveStreamIdRef.current !== streamId) return;
+      setLocalCoachError(String(error));
+    } finally {
+      if (localCoachActiveStreamIdRef.current === streamId) {
+        localCoachActiveStreamIdRef.current = null;
+        setLocalCoachBusy(false);
+      }
+    }
+  };
+
+  const refreshLocalCoachStatus = () => {
+    setLocalCoachError(null);
+    void invoke<LocalLlmRuntimeStatus>("get_local_llm_runtime_status")
+      .then((status) => setLocalCoachRuntime(status))
+      .catch((error) => setLocalCoachError(String(error)));
+  };
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 24 }}>
@@ -5974,6 +6705,366 @@ function CoachingTab({
       )}
       {showPeakSection && scores.length >= 3 && (
       <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
+      <div
+        style={{
+          ...CHART_STYLE,
+          display: "flex",
+          flexDirection: "column",
+          gap: 12,
+          borderColor:
+            localCoachRuntime?.state === "ready"
+              ? accentAlpha("33")
+              : localCoachRuntime?.state === "missing_assets"
+                ? "rgba(255,215,0,0.2)"
+                : C.border,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+            <div>
+              <SectionTitle>Local Coach</SectionTitle>
+              <div style={{ marginTop: 4, fontSize: 12, color: C.textSub, lineHeight: 1.6 }}>
+                Ask anything — your trends, what to focus on, how to break a plateau. Runs on your PC.
+              </div>
+            </div>
+            <button
+              type="button"
+              title="AI Coach settings"
+              onClick={() => {
+                void invoke("toggle_settings");
+                void emit("navigate-settings", { section: "ai" });
+              }}
+              style={{
+                background: "transparent",
+                border: "none",
+                cursor: "pointer",
+                color: C.textFaint,
+                padding: "2px 4px",
+                fontSize: 14,
+                lineHeight: 1,
+                flexShrink: 0,
+                marginTop: 2,
+                borderRadius: 4,
+              }}
+            >
+              ⚙
+            </button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span
+              style={{
+                fontSize: 11,
+                padding: "5px 9px",
+                borderRadius: 999,
+                background:
+                  localCoachRuntime?.state === "ready"
+                    ? "rgba(0,245,160,0.12)"
+                    : localCoachRuntime?.state === "missing_assets"
+                      ? "rgba(255,215,0,0.12)"
+                      : "rgba(255,255,255,0.06)",
+                border:
+                  localCoachRuntime?.state === "ready"
+                    ? "1px solid rgba(0,245,160,0.24)"
+                    : localCoachRuntime?.state === "missing_assets"
+                      ? "1px solid rgba(255,215,0,0.24)"
+                      : `1px solid ${C.border}`,
+                color:
+                  localCoachRuntime?.state === "ready"
+                    ? "#00f5a0"
+                    : localCoachRuntime?.state === "missing_assets"
+                      ? C.warn
+                      : C.textSub,
+              }}
+            >
+              {localCoachRuntime?.state === "ready"
+                ? "Active"
+                : localCoachRuntime?.state === "missing_assets"
+                  ? "Setup needed"
+                  : localCoachRuntime?.state === "error"
+                    ? "Error"
+                    : localCoachRuntime?.state === "stopped"
+                      ? "Available"
+                      : "Checking…"}
+            </span>
+            <button
+              type="button"
+              onClick={refreshLocalCoachStatus}
+              className="am-btn"
+              style={{ padding: "6px 10px", minHeight: 0, fontSize: 11 }}
+            >
+              Refresh
+            </button>
+          </div>
+        </div>
+
+        {/* ── Conversation thread (prior turns) ── */}
+        {localCoachHistory.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {localCoachHistory.map((turn, i) => (
+              <div
+                key={i}
+                style={{
+                  borderRadius: 10,
+                  background: "rgba(255,255,255,0.025)",
+                  border: `1px solid ${C.borderSub}`,
+                  overflow: "hidden",
+                }}
+              >
+                <div style={{ padding: "7px 12px 4px", fontSize: 11, fontWeight: 600, color: C.textFaint }}>
+                  {turn.question}
+                </div>
+                <div style={{ padding: "0 12px 8px", fontSize: 11, color: C.textSub, lineHeight: 1.5, maxHeight: 72, overflow: "hidden", maskImage: "linear-gradient(to bottom, black 60%, transparent 100%)" }}>
+                  {turn.answer.slice(0, 200)}{turn.answer.length > 200 ? "…" : ""}
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={() => {
+                setLocalCoachHistory([]);
+                setLocalCoachReply(null);
+                setLocalCoachDraftMessage("");
+              }}
+              style={{ alignSelf: "flex-start", fontSize: 10, color: C.textFaint, background: "transparent", border: "none", cursor: "pointer", padding: "2px 0", textDecoration: "underline" }}
+            >
+              Clear conversation
+            </button>
+          </div>
+        )}
+
+        {/* ── Input ── */}
+        <textarea
+          value={localCoachQuestion}
+          onChange={(event) => setLocalCoachQuestion(event.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.ctrlKey || e.metaKey) && !localCoachBusy && localCoachQuestion.trim().length > 0) {
+              e.preventDefault();
+              void askLocalCoach();
+            }
+          }}
+          placeholder={
+            localCoachHistory.length > 0
+              ? "Ask a follow-up…"
+              : "Why do I keep losing control late in this scenario, and what should I change next session?"
+          }
+          className="am-input"
+          style={{
+            minHeight: localCoachHistory.length > 0 ? 56 : 88,
+            resize: "vertical",
+            width: "100%",
+            boxSizing: "border-box",
+            lineHeight: 1.6,
+            padding: "10px 12px",
+          }}
+        />
+
+        {/* ── Scope toggle + actions row ── */}
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, flexWrap: "wrap" }}>
+          {/* Scope toggle */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 0, background: "rgba(255,255,255,0.04)", border: `1px solid ${C.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <button
+                type="button"
+                onClick={() => setLocalCoachGeneral(false)}
+                style={{ padding: "4px 10px", fontSize: 11, background: !localCoachGeneral ? accentAlpha("14") : "transparent", color: !localCoachGeneral ? C.accent : C.textFaint, border: "none", cursor: "pointer", borderRight: `1px solid ${C.border}` }}
+              >
+                This scenario
+              </button>
+              <button
+                type="button"
+                onClick={() => setLocalCoachGeneral(true)}
+                style={{ padding: "4px 10px", fontSize: 11, background: localCoachGeneral ? accentAlpha("14") : "transparent", color: localCoachGeneral ? C.accent : C.textFaint, border: "none", cursor: "pointer" }}
+              >
+                General
+              </button>
+            </div>
+            <span style={{ fontSize: 11, color: C.textFaint }}>
+              {localCoachGeneral ? "All aim training knowledge" : scenarioName || "This scenario"}
+            </span>
+          </div>
+
+          {/* Action buttons */}
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {(localCoachRuntime?.state === "missing_assets" || localCoachRuntime?.state === "error") && (
+              <button
+                type="button"
+                className="am-btn"
+                style={{ padding: "6px 10px", minHeight: 0, fontSize: 11 }}
+                onClick={() => {
+                  setLocalCoachBusy(true);
+                  setLocalCoachError(null);
+                  void invoke<LocalLlmRuntimeStatus>("install_local_llm_assets")
+                    .then((status) => setLocalCoachRuntime(status))
+                    .catch((error) => setLocalCoachError(String(error)))
+                    .finally(() => setLocalCoachBusy(false));
+                }}
+                disabled={localCoachBusy}
+              >
+                {localCoachBusy ? "Setting up…" : "Set up coach"}
+              </button>
+            )}
+            {localCoachRuntime?.state === "ready" && (
+              <button
+                type="button"
+                className="am-btn"
+                style={{ padding: "6px 10px", minHeight: 0, fontSize: 11 }}
+                onClick={() => {
+                  setLocalCoachBusy(true);
+                  setLocalCoachError(null);
+                  void invoke<LocalLlmRuntimeStatus>("stop_local_llm_runtime")
+                    .then((status) => setLocalCoachRuntime(status))
+                    .catch((error) => setLocalCoachError(String(error)))
+                    .finally(() => setLocalCoachBusy(false));
+                }}
+              >
+                Stop
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => void askLocalCoach()}
+              className="am-btn"
+              style={{
+                padding: "6px 14px",
+                minHeight: 0,
+                fontSize: 11,
+                background: accentAlpha("16"),
+                border: `1px solid ${C.accentBorder}`,
+                color: C.accent,
+              }}
+              disabled={localCoachBusy || localCoachQuestion.trim().length === 0}
+            >
+              {localCoachBusy ? "Thinking…" : localCoachHistory.length > 0 ? "Ask follow-up" : "Ask coach"}
+            </button>
+          </div>
+        </div>
+
+        {(localCoachError || (localCoachRuntime?.state === "missing_assets") || (localCoachRuntime?.state === "error")) && !localCoachBusy && (
+          <div
+            style={{
+              fontSize: 12,
+              color: localCoachError || localCoachRuntime?.state === "error" ? C.warn : C.textSub,
+              lineHeight: 1.7,
+              background: "rgba(255,255,255,0.03)",
+              border: `1px solid ${C.borderSub}`,
+              borderRadius: 12,
+              padding: "10px 12px",
+            }}
+          >
+            {localCoachRuntime?.state === "missing_assets" && !localCoachError
+              ? "The local coach needs to be set up before you can use it. Click \"Set up coach\" to download the required files."
+              : localCoachRuntime?.state === "error" && !localCoachError
+                ? "The local coach ran into a problem. Try clicking \"Set up coach\" to reinstall, or ask a question to restart automatically."
+                : localCoachError
+                  ? (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <div>Local coach error:</div>
+                      <div
+                        style={{
+                          fontFamily: "monospace",
+                          fontSize: 11,
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-word",
+                          color: C.textSub,
+                          background: "rgba(0,0,0,0.18)",
+                          border: `1px solid ${C.borderSub}`,
+                          borderRadius: 8,
+                          padding: "8px 10px",
+                        }}
+                      >
+                        {localCoachError}
+                      </div>
+                    </div>
+                  )
+                  : null}
+          </div>
+        )}
+
+        {/* ── Live progress — visible from the first click, before any content arrives ── */}
+        {localCoachBusy && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 6,
+              padding: "10px 12px",
+              borderRadius: 10,
+              background: "rgba(255,255,255,0.025)",
+              border: `1px solid ${C.borderSub}`,
+            }}
+          >
+            {/* Completed steps */}
+            {localCoachProgress.slice(0, -1).map((step, index) => (
+              <div
+                key={`done-${index}-${step}`}
+                style={{ display: "flex", alignItems: "baseline", gap: 6, fontSize: 11, color: C.textFaint, lineHeight: 1.5 }}
+              >
+                <span style={{ color: accentAlpha("60"), flexShrink: 0 }}>✓</span>
+                <span>{step}</span>
+              </div>
+            ))}
+            {/* Current step — highlighted */}
+            <div
+              style={{ display: "flex", alignItems: "baseline", gap: 7, fontSize: 12, color: C.textSub, lineHeight: 1.5 }}
+            >
+              <span
+                style={{
+                  display: "inline-block",
+                  width: 7,
+                  height: 7,
+                  borderRadius: "50%",
+                  background: C.accent,
+                  flexShrink: 0,
+                  marginTop: 2,
+                  animation: "glow-pulse 1.4s ease-in-out infinite",
+                }}
+              />
+              <span>
+                {localCoachProgress.length > 0
+                  ? localCoachProgress[localCoachProgress.length - 1]
+                  : "Starting up…"}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ── Streaming / completed answer ── */}
+        {(localCoachDraftMessage || localCoachReply?.message) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <LocalCoachResponseBody
+              content={localCoachDraftMessage || localCoachReply?.message || ""}
+              visuals={localCoachReply?.visuals ?? []}
+            />
+            {/* Knowledge items used */}
+            {(localCoachReply?.knowledgeItems.length ?? 0) > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <div style={{ fontSize: 10, color: C.textFaint, textTransform: "uppercase", letterSpacing: "0.08em", fontWeight: 700 }}>
+                  Hub knowledge used
+                </div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {localCoachReply?.knowledgeItems.map((item) => (
+                    <div
+                      key={item.id}
+                      style={{
+                        minWidth: 180,
+                        flex: "1 1 180px",
+                        padding: "10px 12px",
+                        borderRadius: 12,
+                        border: `1px solid ${C.border}`,
+                        background: "rgba(255,255,255,0.02)",
+                      }}
+                    >
+                      <div style={{ fontSize: 12, fontWeight: 700, color: C.text }}>{item.title}</div>
+                      <div style={{ marginTop: 5, fontSize: 11, color: C.textSub, lineHeight: 1.6 }}>{item.summary}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
       {/* ── Aim Fingerprint ── */}
       {fingerprint && aimStyle && (
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
@@ -7128,6 +8219,8 @@ function ScenarioDetails({
   hubHandle,
   feedbackRows,
   onFeedback,
+  appSettings,
+  globalSummary,
 }: {
   records: AnalyticsSessionRecord[];
   scenarioName: string;
@@ -7137,6 +8230,8 @@ function ScenarioDetails({
   hubHandle: string | null;
   feedbackRows: CoachingUserFeedbackRecord[];
   onFeedback: (snapshotKind: string, card: CoachingCardData, feedback: CoachingCardFeedback) => void;
+  appSettings: AppSettings | null;
+  globalSummary: string;
 }) {
   const [activeTab, setActiveTab] = useState<Tab>(() => {
     const stored = readStoredValue(STATS_WINDOW_STORAGE_KEYS.scenarioTab);
@@ -7425,6 +8520,8 @@ function ScenarioDetails({
           onExploreDrill={onExploreDrill}
           feedbackRows={feedbackRows}
           onFeedback={onFeedback}
+          appSettings={appSettings}
+          globalSummary={globalSummary}
         />
       )}
       {activeTab === "replay" && (
@@ -8700,6 +9797,8 @@ export function StatsWindow({ embedded }: { embedded?: boolean } = {}) {
               hubHandle={appSettings?.hub_account_label?.trim() || null}
               feedbackRows={coachingUserFeedback}
               onFeedback={handleCoachingFeedback}
+              appSettings={appSettings}
+              globalSummary={globalCoachingOverview?.playerLearningProfile?.summary ?? ""}
               onReplayMetadataChanged={() => {
                 void loadHistory(true);
               }}

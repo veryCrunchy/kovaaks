@@ -40,7 +40,9 @@
     "framer-motion": "^11",
     "react": "^18",
     "react-dom": "^18",
-    "recharts": "^2"
+    "react-markdown": "^10.1.0",
+    "recharts": "^2",
+    "remark-gfm": "^4.0.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",

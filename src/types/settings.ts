@@ -89,6 +89,8 @@ export interface AppSettings {
   overlay_selected_benchmark_ids: number[];
   /** Preferred benchmark for the full benchmark widget. */
   overlay_primary_benchmark_id: number | null;
+  /** GPU layers for local coach: 0=CPU only, -1=all GPU, N=split. */
+  local_llm_gpu_layers: number;
 }
 
 export interface MonitorInfo {

@@ -12,7 +12,7 @@ import { C, accentAlpha } from "../design/tokens";
 const StatsWindowEmbed = lazy(() =>
   import("../analytics/StatsWindow").then(m => ({ default: m.StatsWindow }))
 );
-const DEFAULT_HUB_API_BASE_URL = "https://aimmod.hub";
+const DEFAULT_HUB_API_BASE_URL = "https://aimmod.app";
 
 type Tab = "general" | "overlays" | "friends" | "stats";
 
@@ -73,6 +73,13 @@ export function Settings({
     invoke<string>("get_app_version_label")
       .then(setAppVersionLabel)
       .catch(() => setAppVersionLabel(""));
+  }, []);
+
+  useEffect(() => {
+    const unlisten = listen<{ section: string }>("navigate-settings", () => {
+      setActiveTab("general");
+    });
+    return () => { void unlisten.then((fn) => fn()); };
   }, []);
 
   const dirty = useMemo(() => {
@@ -472,7 +479,7 @@ function estimateReplayResourceUsage(settings: AppSettings): ReplayResourceEstim
   };
 }
 
-type GeneralSection = "basics" | "overlay" | "appearance" | "replay" | "hub" | "hud";
+type GeneralSection = "basics" | "overlay" | "appearance" | "replay" | "hub" | "hud" | "ai";
 
 const GENERAL_SETTING_SECTIONS: { id: GeneralSection; label: string }[] = [
   { id: "basics", label: "Basics" },
@@ -481,6 +488,7 @@ const GENERAL_SETTING_SECTIONS: { id: GeneralSection; label: string }[] = [
   { id: "replay", label: "Replay" },
   { id: "hub", label: "Hub" },
   { id: "hud", label: "HUD / Post-Run" },
+  { id: "ai", label: "AI Coach" },
 ];
 
 function GeneralSettings({
@@ -507,6 +515,13 @@ function GeneralSettings({
   const [ffmpegBusy, setFfmpegBusy] = useState(false);
   const [ffmpegError, setFfmpegError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<GeneralSection>("basics");
+
+  useEffect(() => {
+    const unlisten = listen<{ section: GeneralSection }>("navigate-settings", (event) => {
+      setActiveSection(event.payload.section);
+    });
+    return () => { void unlisten.then((fn) => fn()); };
+  }, []);
 
   const replayResourceUsage = useMemo(
     () => estimateReplayResourceUsage(settings),
@@ -1875,7 +1890,7 @@ function GeneralSettings({
         </FieldGroup>
         )}
 
-        {activeSection === "hud" && (
+        {activeSection === "ai" && (
         <FieldGroup
           label="Coaching Preferences"
           description="Tell AimMod what kind of coaching is most useful for you so it can rank and tailor advice better."
@@ -1992,6 +2007,13 @@ function GeneralSettings({
           </GlassCard>
         </FieldGroup>
         )}
+
+        {activeSection === "ai" && (
+        <LocalCoachManager
+          gpuLayers={settings.local_llm_gpu_layers ?? 0}
+          onGpuLayersChange={(v) => update("local_llm_gpu_layers", v)}
+        />
+        )}
       </div>
 
       {/* ── Footer actions ───────────────────────────────────────────── */}
@@ -2087,6 +2109,178 @@ const PALETTE_ENTRIES: PaletteEntry[] = [
 ];
 
 const PALETTE_GROUPS = ["Theme", "HUD", "Info"] as const;
+
+type LocalLlmRuntimeStatus = {
+  state: string;
+  detail: string;
+  activeGpuLayers?: number;
+};
+
+const GPU_MODES = [
+  { value: 0,   label: "CPU only",  desc: "No GPU required. Slowest but always works." },
+  { value: -1,  label: "Full GPU",  desc: "All layers on GPU. Fastest — needs enough VRAM for the model." },
+  { value: 20,  label: "Split",     desc: "20 layers on GPU, rest on CPU. Good for cards with limited VRAM." },
+] as const;
+
+function LocalCoachManager({
+  gpuLayers,
+  onGpuLayersChange,
+}: {
+  gpuLayers: number;
+  onGpuLayersChange: (v: number) => void;
+}) {
+  const [status, setStatus] = useState<LocalLlmRuntimeStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmUninstall, setConfirmUninstall] = useState(false);
+
+  useEffect(() => {
+    invoke<LocalLlmRuntimeStatus>("get_local_llm_runtime_status")
+      .then(setStatus)
+      .catch(() => setStatus(null));
+  }, []);
+
+  const restart = () => {
+    setBusy(true);
+    setError(null);
+    invoke<LocalLlmRuntimeStatus>("stop_local_llm_runtime")
+      .then((s) => { setStatus(s); setBusy(false); })
+      .catch((e) => { setError(String(e)); setBusy(false); });
+  };
+
+  const reinstall = () => {
+    setBusy(true);
+    setError(null);
+    setConfirmUninstall(false);
+    invoke<LocalLlmRuntimeStatus>("install_local_llm_assets")
+      .then((s) => { setStatus(s); setBusy(false); })
+      .catch((e) => { setError(String(e)); setBusy(false); });
+  };
+
+  const uninstall = () => {
+    if (!confirmUninstall) { setConfirmUninstall(true); return; }
+    setBusy(true);
+    setError(null);
+    setConfirmUninstall(false);
+    invoke<LocalLlmRuntimeStatus>("uninstall_local_llm_assets")
+      .then((s) => { setStatus(s); setBusy(false); })
+      .catch((e) => { setError(String(e)); setBusy(false); });
+  };
+
+  const isInstalled = status?.state === "ready" || status?.state === "stopped";
+  const stateLabel =
+    status?.state === "ready" ? "Running"
+    : status?.state === "stopped" ? "Installed (not running)"
+    : status?.state === "missing_assets" ? "Not installed"
+    : status?.state === "error" ? "Error"
+    : status ? status.state
+    : "Unknown";
+
+  // Resolve which GPU_MODES entry matches the current value (fallback to custom)
+  const selectedMode = GPU_MODES.find((m) => m.value === gpuLayers) ?? null;
+
+  return (
+    <FieldGroup
+      label="Local Coach"
+      description="Manage the on-device AI model used by the Local Coach tab in Session Stats."
+    >
+      <GlassCard style={{ padding: "12px 14px" }}>
+        <div className="flex flex-col gap-5">
+
+          {/* Status row */}
+          <div className="flex items-center gap-3">
+            <span
+              style={{
+                width: 8, height: 8, borderRadius: "50%", flexShrink: 0,
+                background: status?.state === "ready" ? "#22c55e"
+                  : status?.state === "stopped" ? accentAlpha("80")
+                  : status?.state === "missing_assets" ? "rgba(255,255,255,0.2)"
+                  : "#f97316",
+              }}
+            />
+            <span className="text-sm" style={{ color: C.textSub }}>{stateLabel}</span>
+            {status?.detail && status.state !== "ready" && (
+              <span className="text-xs" style={{ color: C.textFaint, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                — {status.detail}
+              </span>
+            )}
+          </div>
+
+          {/* GPU mode selector */}
+          <div className="flex flex-col gap-2">
+            <span className="text-sm" style={{ color: C.textSub }}>Compute mode</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              {GPU_MODES.map((mode) => {
+                const active = gpuLayers === mode.value;
+                return (
+                  <button
+                    key={mode.value}
+                    type="button"
+                    className="am-btn"
+                    onClick={() => onGpuLayersChange(mode.value)}
+                    style={{
+                      padding: "4px 10px",
+                      minHeight: 0,
+                      borderRadius: 7,
+                      fontSize: 11,
+                      background: active ? accentAlpha("14") : C.surface,
+                      border: `1px solid ${active ? C.accentBorder : C.border}`,
+                      color: active ? C.accent : C.textMuted,
+                      fontFamily: "inherit",
+                    }}
+                  >
+                    {mode.label}
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.5 }}>
+              {selectedMode?.desc ?? `Custom: ${gpuLayers} layers on GPU`}
+            </p>
+            {status?.state === "ready" && status.activeGpuLayers !== undefined && status.activeGpuLayers !== gpuLayers && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs" style={{ color: C.warn }}>Restart required to apply compute mode change.</span>
+                <Btn variant="ghost" size="sm" disabled={busy} onClick={restart}>Restart now</Btn>
+              </div>
+            )}
+          </div>
+
+          {/* Install / uninstall actions */}
+          <div className="flex items-center gap-2 flex-wrap">
+            {status?.state === "ready" && (
+              <Btn variant="ghost" size="sm" disabled={busy} onClick={restart}>
+                {busy ? "Working…" : "Restart"}
+              </Btn>
+            )}
+            <Btn variant="ghost" size="sm" disabled={busy} onClick={reinstall}>
+              {busy ? "Working…" : isInstalled ? "Reinstall / Update" : "Install"}
+            </Btn>
+            {isInstalled && (
+              <Btn
+                variant={confirmUninstall ? "danger" : "ghost"}
+                size="sm"
+                disabled={busy}
+                onClick={uninstall}
+                onBlur={() => setConfirmUninstall(false)}
+              >
+                {confirmUninstall ? "Confirm uninstall" : "Uninstall"}
+              </Btn>
+            )}
+          </div>
+
+          {error && (
+            <p className="text-xs" style={{ color: "#f97316", lineHeight: 1.6 }}>{error}</p>
+          )}
+
+          <p className="text-xs" style={{ color: C.textFaint, lineHeight: 1.6 }}>
+            "Reinstall / Update" fetches the latest model and runtime from the AimMod manifest.
+            Uninstalling removes all downloaded files (~1–4 GB) from disk.
+          </p>
+        </div>
+      </GlassCard>
+    </FieldGroup>
+  );
+}
 
 function AppearanceSection({
   settings,
