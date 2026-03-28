@@ -4,7 +4,7 @@ use tauri::AppHandle;
 
 const STORE_PATH: &str = "settings.json";
 const STORE_KEY: &str = "app_settings";
-pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.hub";
+pub const DEFAULT_HUB_API_BASE_URL: &str = "https://aimmod.app";
 pub const DEFAULT_REPLAY_CAPTURE_FPS: u32 = 24;
 pub const DEFAULT_REPLAY_CAPTURE_WIDTH: u32 = 480;
 pub const DEFAULT_REPLAY_KEEP_COUNT: u32 = 150;
@@ -325,6 +325,10 @@ pub struct AppSettings {
     /// Preferred benchmark for the full benchmark widget.
     #[serde(default)]
     pub overlay_primary_benchmark_id: Option<u32>,
+    /// Number of model layers to offload to GPU for the local coach.
+    /// 0 = CPU only, -1 = all layers on GPU, any positive N = N layers on GPU (split mode).
+    #[serde(default)]
+    pub local_llm_gpu_layers: i32,
 }
 
 impl Default for AppSettings {
@@ -371,6 +375,7 @@ impl Default for AppSettings {
             active_surface_assignments: default_overlay_surface_assignments(),
             overlay_selected_benchmark_ids: Vec::new(),
             overlay_primary_benchmark_id: None,
+            local_llm_gpu_layers: 0,
         }
     }
 }
@@ -681,35 +686,13 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
         return String::new();
     }
 
-    let migrated = if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.hub") {
-        format!("https://aimmod.hub{}", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.hub") {
-        format!("https://aimmod.hub{}", rest)
-    } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.hub") {
-        format!(
-            "https://aimmod.hub{}",
-            if rest.starts_with('/') {
-                rest.to_string()
-            } else {
-                format!("/{}", rest)
-            }
-        )
-    } else if let Some(rest) = trimmed.strip_prefix("aimmod.hub") {
-        format!(
-            "https://aimmod.hub{}",
-            if rest.is_empty() || rest.starts_with('/') {
-                rest.to_string()
-            } else {
-                format!("/{}", rest)
-            }
-        )
-    } else if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.app") {
-        format!("https://aimmod.hub{}", rest)
+    let normalized = if let Some(rest) = trimmed.strip_prefix("https://api.aimmod.app") {
+        format!("https://aimmod.app{}", rest)
     } else if let Some(rest) = trimmed.strip_prefix("http://api.aimmod.app") {
-        format!("https://aimmod.hub{}", rest)
+        format!("https://aimmod.app{}", rest)
     } else if let Some(rest) = trimmed.strip_prefix("api.aimmod.app") {
         format!(
-            "https://aimmod.hub{}",
+            "https://aimmod.app{}",
             if rest.starts_with('/') {
                 rest.to_string()
             } else {
@@ -718,7 +701,7 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
         )
     } else if let Some(rest) = trimmed.strip_prefix("aimmod.app") {
         format!(
-            "https://aimmod.hub{}",
+            "https://aimmod.app{}",
             if rest.is_empty() || rest.starts_with('/') {
                 rest.to_string()
             } else {
@@ -729,7 +712,7 @@ pub fn normalize_hub_api_base_url(value: &str) -> String {
         trimmed.to_string()
     };
 
-    migrated.trim_end_matches('/').to_string()
+    normalized.trim_end_matches('/').to_string()
 }
 fn default_replay_capture_fps() -> u32 {
     DEFAULT_REPLAY_CAPTURE_FPS

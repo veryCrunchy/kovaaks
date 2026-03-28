@@ -388,6 +388,7 @@ mod hub_live_activity;
 mod hub_sync;
 mod kovaaks_api;
 mod kovaaks_theme;
+mod local_llm;
 mod logger;
 mod mouse_hook;
 mod overlay_service;
@@ -416,6 +417,7 @@ pub use settings::{AppSettings, FriendProfile};
 /// Global app state accessible from Tauri commands.
 pub struct AppState {
     pub settings: Arc<Mutex<AppSettings>>,
+    pub local_llm: Arc<Mutex<local_llm::LocalLlmRuntimeState>>,
 }
 
 // ─── Monitor helpers ──────────────────────────────────────────────────────────
@@ -842,6 +844,79 @@ async fn hub_get_aim_fingerprint(
     handle: String,
 ) -> Result<hub_api::HubAimFingerprintResponse, String> {
     hub_api::get_aim_fingerprint(&app, handle)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn hub_query_coaching_knowledge(
+    app: AppHandle,
+    query: hub_api::HubCoachingKnowledgeQuery,
+) -> Result<hub_api::HubCoachingKnowledgeResponse, String> {
+    hub_api::query_coaching_knowledge(&app, query)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_local_llm_runtime_status(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<local_llm::LocalLlmRuntimeStatus, String> {
+    local_llm::get_runtime_status(&app, &state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn install_local_llm_assets(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<local_llm::LocalLlmRuntimeStatus, String> {
+    local_llm::install_assets(&app, &state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn uninstall_local_llm_assets(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<local_llm::LocalLlmRuntimeStatus, String> {
+    local_llm::uninstall_assets(&app, &state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_local_llm_runtime(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+) -> Result<local_llm::LocalLlmRuntimeStatus, String> {
+    local_llm::stop_runtime(&app, &state)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_llm_generate_coaching_reply(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: local_llm::LocalCoachChatRequest,
+) -> Result<local_llm::LocalCoachChatResponse, String> {
+    local_llm::generate_coaching_reply(&app, &state, request)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn local_llm_stream_coaching_reply(
+    app: AppHandle,
+    state: tauri::State<'_, AppState>,
+    request: local_llm::LocalCoachChatRequest,
+    stream_id: String,
+) -> Result<local_llm::LocalCoachChatResponse, String> {
+    local_llm::stream_coaching_reply(&app, &state, request, stream_id)
         .await
         .map_err(|e| e.to_string())
 }
@@ -2252,6 +2327,7 @@ pub fn run() {
     let initial_settings = settings::load_default();
     let app_state = AppState {
         settings: Arc::new(Mutex::new(initial_settings)),
+        local_llm: local_llm::default_runtime_state(),
     };
 
     tauri::Builder::default()
@@ -2304,6 +2380,13 @@ pub fn run() {
             hub_get_player_scenario_history,
             hub_get_aim_profile,
             hub_get_aim_fingerprint,
+            hub_query_coaching_knowledge,
+            get_local_llm_runtime_status,
+            install_local_llm_assets,
+            uninstall_local_llm_assets,
+            stop_local_llm_runtime,
+            local_llm_generate_coaching_reply,
+            local_llm_stream_coaching_reply,
             read_kovaaks_palette,
             write_kovaaks_palette_colors,
             get_friends,
@@ -2508,8 +2591,15 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::Exit = event {
+                // Kill the llama-server child process so it doesn't become an
+                // orphan that blocks the port on the next launch.
+                local_llm::kill_child_if_running(app_handle);
+            }
+        });
 }
 
 fn setup_tray<R: Runtime>(app: &tauri::App<R>) -> Result<(), Box<dyn std::error::Error>> {

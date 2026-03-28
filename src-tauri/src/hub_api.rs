@@ -33,6 +33,7 @@ const GET_RUN_PATH: &str = "/aimmod.hub.v1.HubService/GetRun";
 const GET_AIM_PROFILE_PATH: &str = "/aimmod.hub.v1.HubService/GetAimProfile";
 const GET_AIM_FINGERPRINT_PATH: &str = "/aimmod.hub.v1.HubService/GetAimFingerprint";
 const GET_PLAYER_SCENARIO_HISTORY_PATH: &str = "/aimmod.hub.v1.HubService/GetPlayerScenarioHistory";
+const COACHING_QUERY_PATH: &str = "/api/coaching/query";
 
 #[derive(Debug, Clone)]
 struct CachedBenchmarkList {
@@ -61,6 +62,17 @@ where
     D: Deserializer<'de>,
 {
     Ok(de_u64ish(deserializer).unwrap_or(0))
+}
+
+/// Deserializes a JSON null or a missing field as an empty Vec.
+/// Needed because the hub sends explicit `null` for empty array fields, and
+/// serde's `#[serde(default)]` only kicks in when the field is absent.
+fn de_null_as_empty_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 fn strip_null_fields(value: &mut serde_json::Value) {
@@ -669,6 +681,145 @@ pub struct HubAimFingerprintResponse {
     pub overall: Option<HubAimFingerprint>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeQuery {
+    pub scenario_name: String,
+    pub scenario_type: String,
+    pub signal_keys: Vec<String>,
+    pub context_tags: Vec<String>,
+    pub focus_area: String,
+    pub challenge_preference: String,
+    pub time_preference: String,
+    pub question: String,
+    pub limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coach_facts: Vec<HubCoachFact>,
+    /// Only serialized when true — omitting it when false keeps older hub
+    /// deployments (which reject unknown fields) working normally.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub general: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachFact {
+    pub key: String,
+    pub label: String,
+    pub value_text: String,
+    pub numeric_value: Option<f64>,
+    pub bool_value: Option<bool>,
+    pub direction: String,
+    pub confidence: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingDrill {
+    pub label: String,
+    pub query: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeMatch {
+    pub scenario_name: bool,
+    pub scenario_type: bool,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub signal_keys: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub context_tags: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub preferences: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub question_terms: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeSource {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub author: String,
+    pub url: String,
+    pub published_at_iso: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeItem {
+    pub id: String,
+    pub title: String,
+    pub summary: String,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub scenario_types: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub scenario_names: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub signal_keys: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub context_tags: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub why: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub actions: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub drills: Vec<HubCoachingDrill>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub avoid: Vec<String>,
+    pub priority: String,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub sources: Vec<HubCoachingKnowledgeSource>,
+    #[serde(rename = "match")]
+    pub match_info: HubCoachingKnowledgeMatch,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeQueryEcho {
+    pub scenario_name: String,
+    pub scenario_type: String,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub signal_keys: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub context_tags: Vec<String>,
+    pub focus_area: String,
+    pub challenge_preference: String,
+    pub time_preference: String,
+    pub question: String,
+    pub limit: u32,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub coach_facts: Vec<HubCoachFact>,
+    pub general: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachAnswerPlan {
+    pub intent: String,
+    pub response_shape: String,
+    pub must_answer_directly: bool,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub primary_findings: Vec<String>,
+    #[serde(default, deserialize_with = "de_null_as_empty_vec")]
+    pub suggested_actions: Vec<String>,
+    pub clarifying_question: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct HubCoachingKnowledgeResponse {
+    pub version: String,
+    pub updated_at_iso: String,
+    pub cache_ttl_secs: u32,
+    pub tool_instruction: String,
+    pub query: HubCoachingKnowledgeQueryEcho,
+    pub answer_plan: HubCoachAnswerPlan,
+    pub items: Vec<HubCoachingKnowledgeItem>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SearchRequestPayload {
@@ -756,6 +907,32 @@ async fn post_connect_json_once<TReq: Serialize, TResp: DeserializeOwned>(
     serde_json::from_value::<TResp>(value).context("error decoding response body")
 }
 
+async fn post_json_once<TReq: Serialize, TResp: DeserializeOwned>(
+    app: &AppHandle,
+    path: &str,
+    payload: &TReq,
+) -> anyhow::Result<TResp> {
+    let base_url = hub_base_url(app)?;
+    let response = HUB_CLIENT
+        .post(format!("{base_url}{path}"))
+        .header("Content-Type", "application/json")
+        .json(payload)
+        .send()
+        .await
+        .with_context(|| format!("error sending request for url ({base_url}{path})"))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        anyhow::bail!("hub request returned {status}: {body}");
+    }
+
+    response
+        .json::<TResp>()
+        .await
+        .context("error decoding response body")
+}
+
 async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
     app: &AppHandle,
     path: &str,
@@ -777,6 +954,48 @@ async fn post_connect_json<TReq: Serialize, TResp: DeserializeOwned>(
     }
 
     Err(last_error.unwrap_or_else(|| anyhow::anyhow!("hub request failed")))
+}
+
+async fn post_json<TReq: Serialize, TResp: DeserializeOwned>(
+    app: &AppHandle,
+    path: &str,
+    payload: &TReq,
+) -> anyhow::Result<TResp> {
+    let mut last_error = None;
+
+    for attempt in 0..HUB_REQUEST_MAX_ATTEMPTS {
+        match post_json_once(app, path, payload).await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                last_error = Some(error);
+                if attempt + 1 < HUB_REQUEST_MAX_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(HUB_REQUEST_RETRY_DELAYS_MS[attempt]))
+                        .await;
+                }
+            }
+        }
+    }
+
+    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("hub request failed")))
+}
+
+fn fill_default_coaching_preferences(
+    app: &AppHandle,
+    query: &mut HubCoachingKnowledgeQuery,
+) -> anyhow::Result<()> {
+    let settings = crate::settings::load(app)?;
+
+    if query.focus_area.trim().is_empty() {
+        query.focus_area = settings.coaching_focus_area;
+    }
+    if query.challenge_preference.trim().is_empty() {
+        query.challenge_preference = settings.coaching_challenge_preference;
+    }
+    if query.time_preference.trim().is_empty() {
+        query.time_preference = settings.coaching_time_preference;
+    }
+
+    Ok(())
 }
 
 pub async fn get_overview(app: &AppHandle) -> anyhow::Result<HubOverviewResponse> {
@@ -943,4 +1162,12 @@ pub async fn get_aim_fingerprint(
         &HandleRequestPayload { handle },
     )
     .await
+}
+
+pub async fn query_coaching_knowledge(
+    app: &AppHandle,
+    mut query: HubCoachingKnowledgeQuery,
+) -> anyhow::Result<HubCoachingKnowledgeResponse> {
+    fill_default_coaching_preferences(app, &mut query)?;
+    post_json(app, COACHING_QUERY_PATH, &query).await
 }

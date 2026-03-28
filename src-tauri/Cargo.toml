@@ -56,7 +56,9 @@ notify = "6"
 csv = "1"
 
 # HTTP client — used for KovaaK's public API
-reqwest = { version = "0.12", features = ["json", "blocking"] }
+reqwest = { version = "0.12", features = ["json", "blocking", "stream"] }
+bytes = "1"
+futures-util = "0.3"
 
 # Utilities
 tokio = { version = "1", features = ["full"] }
